@@ -426,11 +426,6 @@ impl App {
         let paused = matches!(&self.state, State::Recording(r) if r.is_paused());
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.add_sized(
-                Vec2::new(100.0, 54.0),
-                egui::Label::new(RichText::new("OPENCLIP").strong().size(20.0).color(TEXT_BRIGHT)),
-            );
-            ui.add_space(4.0);
 
             ui.add_enabled_ui(!recording, |ui| {
                 for (kind, icon, label) in [
