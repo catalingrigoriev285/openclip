@@ -51,10 +51,6 @@ impl FormatDialog {
         }
     }
 
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
-
     pub fn open(&mut self, current: &FormatSettings, encoders: &[EncoderInfo]) {
         self.draft = current.clone();
         self.notes = self.draft.normalize(encoders);

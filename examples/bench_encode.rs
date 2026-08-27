@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
     let mut pcm = Vec::new();
     let mut audio_pos = 0u64; // samples generated so far
 
-    let mut push = |mux: &mut Mp4Writer<BufWriter<File>>, f: &openclip::video::EncodedFrame| -> anyhow::Result<()> {
+    let push = |mux: &mut Mp4Writer<BufWriter<File>>, f: &openclip::video::EncodedFrame| -> anyhow::Result<()> {
         mux.push_video(&f.data, f.pts, f.keyframe)
     };
 

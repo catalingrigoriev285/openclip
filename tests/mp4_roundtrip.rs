@@ -343,10 +343,12 @@ fn hevc_sample_entry() {
 
     let ftyp = find_box(&bytes, b"ftyp").unwrap();
     assert!(ftyp.windows(4).any(|w| w == b"hvc1"), "ftyp should carry the hvc1 brand");
-    let hvc1 = find_box(&bytes, b"hvc1").expect("hvc1 sample entry");
+    // Search inside moov so the ftyp brand bytes cannot be mistaken for boxes.
+    let moov = find_box(&bytes, b"moov").expect("moov");
+    let hvc1 = find_box(moov, b"hvc1").expect("hvc1 sample entry");
     assert_eq!(u16::from_be_bytes([hvc1[24], hvc1[25]]), 1280);
     assert_eq!(u16::from_be_bytes([hvc1[26], hvc1[27]]), 720);
-    let hvcc = find_box(&bytes, b"hvcC").expect("hvcC");
+    let hvcc = find_box(moov, b"hvcC").expect("hvcC");
     assert_eq!(hvcc[0], 1, "configurationVersion");
     assert_eq!(hvcc[1] & 0x1F, 1, "general_profile_idc Main");
     assert_eq!(u32::from_be_bytes(hvcc[2..6].try_into().unwrap()), 0x6000_0000);
@@ -364,7 +366,7 @@ fn hevc_sample_entry() {
     }
 
     // Samples: parameter sets stripped, each NAL length-prefixed.
-    let stsz = find_box(&bytes, b"stsz").unwrap();
+    let stsz = find_box(moov, b"stsz").unwrap();
     let count = u32::from_be_bytes(stsz[8..12].try_into().unwrap());
     assert_eq!(count, 5);
     let first_size = u32::from_be_bytes(stsz[12..16].try_into().unwrap()) as usize;
@@ -410,7 +412,9 @@ fn aac_sample_entry() {
     };
     assert_eq!(mp4a.audio.sample_rate.integer(), 48_000);
     assert_eq!(mp4a.esds.es_desc.dec_config.object_type_indication, 0x40);
-    assert_eq!(mp4a.esds.es_desc.dec_config.dec_specific.as_ref().map(|d| d.as_slice()), Some(asc.as_slice()));
+    let dsi = mp4a.esds.es_desc.dec_config.dec_specific.as_ref().expect("DecoderSpecificInfo");
+    assert_eq!(dsi.raw, asc);
+    assert_eq!((dsi.profile, dsi.freq_index, dsi.chan_conf), (2, 3, 2));
     assert_eq!(stbl.stts.entries[0].sample_delta, 1024);
     assert_eq!(stbl.stts.entries[0].sample_count, 10);
 
