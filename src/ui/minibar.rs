@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Align, Align2, CornerRadius, FontId, Layout, RichText, Sense, Stroke, Vec2, ViewportCommand, WindowLevel};
 
 use super::icons;
+use super::region_frame::{GAP_PX, THICKNESS_PT};
 use super::theme::*;
 use super::{format_duration, human_bytes, pause_button, rec_button, App, RecClick, SourceKind, State};
 
@@ -14,6 +15,9 @@ use super::{format_duration, human_bytes, pause_button, rec_button, App, RecClic
 pub const BAR_SIZE: Vec2 = Vec2::new(750.0, 104.0);
 const GROUP_H: f32 = 86.0;
 const TOAST_TTL: Duration = Duration::from_secs(5);
+/// How long after one of our own position commands the bar is left to settle
+/// before user drags start moving the docked region.
+const BAR_SETTLE: Duration = Duration::from_millis(400);
 
 impl App {
     /// Collapses the main window into the floating bar (always on top, bottom-right).
@@ -22,6 +26,7 @@ impl App {
         self.saved_rect = outer;
         self.live.stop();
         self.compact = true;
+        self.bar_moved_by_us();
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(400.0, 80.0)));
         ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(BAR_SIZE));
@@ -31,6 +36,54 @@ impl App {
             let pos = egui::pos2((mon.x - BAR_SIZE.x - 24.0).max(0.0), (mon.y - BAR_SIZE.y - 110.0).max(0.0));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         }
+    }
+
+    /// Parks the bar outside the selected region on the region's monitor:
+    /// centred below it, else above, else to the right, else to the left. If
+    /// the region leaves no room on any side, the bar goes to the bottom
+    /// centre of the screen (it will overlap; the user can drag it).
+    pub(super) fn place_bar_near_region(&mut self, ctx: &egui::Context) {
+        self.bar_moved_by_us();
+        let Some((m, r)) = self.region_monitor() else { return };
+        let ppp = ctx.pixels_per_point();
+        let scale = m.scale_factor.max(0.1);
+        // Title-bar height in physical px (outer minus inner of the current window).
+        let deco = ctx
+            .input(|i| Some((i.viewport().outer_rect?.height() - i.viewport().inner_rect?.height()) * ppp))
+            .unwrap_or(32.0 * ppp)
+            .max(0.0);
+        let (bw, bh) = (BAR_SIZE.x * ppp, BAR_SIZE.y * ppp + deco);
+        // Clearance from the region edge: frame stroke + gap + breathing room.
+        let band = (THICKNESS_PT * scale).round() + GAP_PX as f32 + 16.0;
+        let (rx, ry) = ((m.x + r.x as i32) as f32, (m.y + r.y as i32) as f32);
+        let (rw, rh) = (r.width as f32, r.height as f32);
+        // Usable screen area (taskbar allowance at the bottom, as in `enter_compact`).
+        let (x0, y0) = (m.x as f32, m.y as f32);
+        let (x1, y1) = (x0 + m.width as f32, y0 + m.height as f32 - 110.0 * scale);
+        let clamp_x = |x: f32| x.clamp(x0, (x1 - bw).max(x0));
+        let clamp_y = |y: f32| y.clamp(y0, (y1 - bh).max(y0));
+        let cx = rx + rw / 2.0 - bw / 2.0;
+        let cy = ry + rh / 2.0 - bh / 2.0;
+
+        let candidates = [
+            (clamp_x(cx), ry + rh + band),  // below
+            (clamp_x(cx), ry - band - bh),  // above
+            (rx + rw + band, clamp_y(cy)),  // right
+            (rx - band - bw, clamp_y(cy)),  // left
+        ];
+        let fits = |(x, y): (f32, f32)| x >= x0 && y >= y0 && x + bw <= x1 && y + bh <= y1;
+        let (x, y) = candidates
+            .into_iter()
+            .find(|&c| fits(c))
+            .unwrap_or((clamp_x(cx), clamp_y(y1 - bh)));
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x / ppp, y / ppp)));
+    }
+
+    /// Marks that the bar's position is about to change because of our own
+    /// viewport command, so `follow_bar` resyncs instead of moving the region.
+    fn bar_moved_by_us(&mut self) {
+        self.bar_anchor = None;
+        self.bar_settle_until = Some(Instant::now() + BAR_SETTLE);
     }
 
     /// In compact mode the title-bar X restores the full window instead of

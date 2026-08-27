@@ -6,6 +6,7 @@ pub mod icons;
 mod library;
 mod minibar;
 pub mod picker;
+pub mod region_frame;
 mod theme;
 
 use std::path::PathBuf;
@@ -215,6 +216,13 @@ pub struct App {
     compact: bool,
     /// Outer rect of the full window, restored when leaving compact mode.
     saved_rect: Option<egui::Rect>,
+    /// Last known outer position of the mini bar; the region is docked to it
+    /// and follows when the user drags the bar.
+    bar_anchor: Option<egui::Pos2>,
+    /// After we move the bar ourselves, ignore position changes until then.
+    bar_settle_until: Option<Instant>,
+    /// Whether the region-frame strip windows have had their DWM styling applied.
+    frame_styled: bool,
 }
 
 impl App {
@@ -259,6 +267,9 @@ impl App {
             last_file: None,
             compact: false,
             saved_rect: None,
+            bar_anchor: None,
+            bar_settle_until: None,
+            frame_styled: false,
         }
     }
 
@@ -1123,12 +1134,20 @@ impl eframe::App for App {
                     self.region = Some((monitor_id, rect));
                     self.source_kind = SourceKind::Region;
                     self.state = State::Idle;
+                    // Like other recorders: collapse to the mini bar next to the
+                    // area and show the border around it.
+                    if !self.compact {
+                        self.enter_compact(&ctx);
+                    }
+                    self.place_bar_near_region(&ctx);
                 }
                 PickerOutcome::Cancelled => self.state = State::Idle,
             }
         }
 
         if self.compact && !self.intercept_close(&ctx) {
+            self.follow_bar(&ctx);
+            self.region_frame(&ctx);
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(8, 6)))
                 .show(ui, |ui| self.minibar(ui, &ctx));
