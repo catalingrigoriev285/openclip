@@ -2,6 +2,7 @@
 
 pub mod convert;
 pub mod encoder;
+pub mod mouse_fx;
 pub mod preview;
 
 pub use convert::{Converter, PixelFormat, RawFrame};

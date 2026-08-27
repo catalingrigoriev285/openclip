@@ -15,7 +15,9 @@ use anyhow::{anyhow, Context, Result};
 use crate::audio::capture::{open_microphone, open_system_loopback, AudioSource};
 use crate::audio::mixer::Mixer;
 use crate::audio::{Mp3Encoder, Mp3Frame};
+use crate::capture::monitors::source_origin;
 use crate::capture::{self, CaptureConfig, CaptureHandle, Source};
+use crate::video::mouse_fx::{MouseFx, MouseSampler};
 use crate::mux::{AudioTrackConfig, Mp4Writer, VideoTrackConfig};
 use crate::video::preview::{make_preview, PreviewImage};
 use crate::video::{Converter, H264Encoder, RawFrame};
@@ -33,7 +35,7 @@ pub struct RecordConfig {
     pub fps: u32,
     pub bitrate_kbps: u32,
     pub half_resolution: bool,
-    pub show_cursor: bool,
+    pub mouse_fx: MouseFx,
     pub system_audio: bool,
     /// `Some(None)` = default microphone, `Some(Some(name))` = named device.
     pub microphone: Option<Option<String>>,
@@ -242,7 +244,7 @@ fn start_capture(
         }
     });
     capture::start(
-        CaptureConfig { source: config.source.clone(), fps: config.fps, show_cursor: config.show_cursor },
+        CaptureConfig { source: config.source.clone(), fps: config.fps, show_cursor: config.mouse_fx.native_cursor() },
         epoch,
         sink,
     )
@@ -289,6 +291,10 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
     let mut last_pts: Option<Duration> = None;
     let mut last_size = (0u32, 0u32);
     let mut last_frame: Option<RawFrame> = None;
+    let mut sampler = config.mouse_fx.any_overlay().then(MouseSampler::new);
+    let mut origin = source_origin(&config.source).unwrap_or((0, 0));
+    let fx_scale = if config.half_resolution { 0.5 } else { 1.0 };
+    let mut frames_since_origin = 0u32;
 
     let push_audio = |mux: &mut Mp4Writer<BufWriter<File>>, stats: &Stats| -> Result<()> {
         if mux.has_audio() {
@@ -358,10 +364,29 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         let st = state.as_mut().unwrap();
         last_pts = Some(frame.pts);
 
-        // Heartbeats reuse the previous conversion; real frames are converted fresh.
         let t0 = Instant::now();
-        if !is_heartbeat {
-            st.converter.convert(&frame)?;
+        // Mouse effects are painted on a copy so the clean frame can be reused for heartbeats.
+        let mut painted: Option<RawFrame> = None;
+        if let Some(sampler) = sampler.as_mut() {
+            sampler.sample();
+            if matches!(config.source, Source::Window { .. }) {
+                frames_since_origin += 1;
+                if frames_since_origin >= 30 {
+                    frames_since_origin = 0;
+                    if let Ok(o) = source_origin(&config.source) {
+                        origin = o;
+                    }
+                }
+            }
+            let (cursor, clicks) = sampler.mapped(origin, fx_scale);
+            let mut f = frame.clone();
+            config.mouse_fx.apply(&mut f, cursor, &clicks, fx_scale);
+            painted = Some(f);
+        }
+        let shown: &RawFrame = painted.as_ref().unwrap_or(&frame);
+        // Heartbeats reuse the previous conversion unless effects moved.
+        if !is_heartbeat || painted.is_some() {
+            st.converter.convert(shown)?;
         }
         let t1 = Instant::now();
         let encoded = st.encoder.encode(&st.converter.yuv(), frame.pts)?;
@@ -378,7 +403,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
                 let n = stats.frames_encoded.fetch_add(1, Ordering::Relaxed) + 1;
                 stats.bytes_written.store(st.mux.bytes_written(), Ordering::Relaxed);
                 if n % preview_every == 0 && !is_heartbeat {
-                    *preview.image.lock().unwrap() = Some(make_preview(&frame, PREVIEW_MAX_SIDE));
+                    *preview.image.lock().unwrap() = Some(make_preview(shown, PREVIEW_MAX_SIDE));
                     if let Some(cb) = &on_preview {
                         cb();
                     }

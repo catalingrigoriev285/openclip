@@ -150,6 +150,25 @@ pub fn screenshot_region(monitor_id: u32, rect: super::Rect) -> Result<RawFrame>
     ))
 }
 
+/// Top-left corner of a source's frame in global (virtual desktop) physical
+/// pixels, used to map the mouse position into frame coordinates.
+pub fn source_origin(source: &super::Source) -> Result<(i32, i32)> {
+    match source {
+        super::Source::Monitor { id } => {
+            let m = find_monitor(*id)?;
+            Ok((m.x()?, m.y()?))
+        }
+        super::Source::Region { monitor_id, rect } => {
+            let m = find_monitor(*monitor_id)?;
+            Ok((m.x()? + rect.x as i32, m.y()? + rect.y as i32))
+        }
+        super::Source::Window { id } => {
+            let w = find_window(*id)?;
+            Ok((w.x()?, w.y()?))
+        }
+    }
+}
+
 /// Screenshot of any [`super::Source`], used for idle thumbnails.
 pub fn screenshot_source(source: &super::Source) -> Result<RawFrame> {
     match source {

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use openclip::capture::monitors::{list_monitors, list_windows};
 use openclip::capture::{Rect, Source};
 use openclip::pipeline::{RecordConfig, Recorder};
+use openclip::video::mouse_fx::MouseFx;
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -19,6 +20,10 @@ fn main() -> anyhow::Result<()> {
     let audio = !args.iter().any(|a| a == "--no-audio");
     let half = args.iter().any(|a| a == "--half");
     let mic = args.iter().any(|a| a == "--mic");
+    let mut fx = MouseFx::default();
+    if args.iter().any(|a| a == "--fx") {
+        fx.cursor_size = 150;
+    }
 
     let monitors = list_monitors()?;
     let primary = monitors.iter().find(|m| m.is_primary).or(monitors.first()).expect("no monitors");
@@ -46,7 +51,7 @@ fn main() -> anyhow::Result<()> {
         fps: 30,
         bitrate_kbps: 6000,
         half_resolution: half,
-        show_cursor: true,
+        mouse_fx: fx,
         system_audio: audio,
         microphone: mic.then_some(None),
         output: out.clone(),
