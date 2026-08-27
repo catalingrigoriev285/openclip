@@ -249,6 +249,36 @@
   }
   .section-head p { color: var(--label-secondary); font-size: 19px; margin-top: 14px; }
 
+  /* Screenshots */
+  .shots-tabs {
+    display: flex; justify-content: center; gap: 6px; flex-wrap: wrap;
+    margin: 0 auto 22px; padding: 4px;
+    background: var(--bg-elevated); border-radius: 999px; width: max-content; max-width: 100%;
+  }
+  .shots-tabs button {
+    border: 0; background: transparent; color: var(--label-secondary);
+    font: inherit; font-size: 15px; font-weight: 600; letter-spacing: -0.01em;
+    padding: 9px 18px; border-radius: 999px; cursor: pointer;
+    transition: background .15s ease, color .15s ease;
+  }
+  .shots-tabs button:hover { color: var(--label); }
+  .shots-tabs button[aria-selected="true"] { background: var(--bg-elevated-3); color: var(--label); }
+  .shots-tabs button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .shot {
+    max-width: 860px; margin: 0 auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--separator);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .shot[hidden] { display: none; }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot figcaption {
+    padding: 14px 20px; border-top: 1px solid var(--separator-soft);
+    color: var(--label-secondary); font-size: 15px;
+  }
+  .shot figcaption b { color: var(--label); font-weight: 600; margin-right: 8px; }
+
   /* Feature cards */
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
   .card {
@@ -431,6 +461,7 @@
     </a>
     <nav class="nav" aria-label="Primary">
       <a href="#features">Features</a>
+      <a href="#screenshots">Screenshots</a>
       <a href="#platforms">Platforms</a>
       <a href="#how">How it works</a>
       <a href="#build">Build</a>
@@ -558,6 +589,34 @@
           <p>Frame rate, bitrate, full or half size, mic device, output folder and file-name prefix. That's the whole settings page.</p>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- ===== Screenshots ===== -->
+  <section id="screenshots">
+    <div class="wrap">
+      <div class="section-head">
+        <div class="eyebrow">Screenshots</div>
+        <h2>This is the whole app.</h2>
+        <p>Pick a source and toggles in the toolbar, hit REC. Your recordings, video settings and mouse effects live on three pages.</p>
+      </div>
+      <div class="shots-tabs" role="tablist" aria-label="Screenshots">
+        <button role="tab" id="tab-home" aria-controls="shot-home" aria-selected="true">Home</button>
+        <button role="tab" id="tab-video" aria-controls="shot-video" aria-selected="false" tabindex="-1">Video settings</button>
+        <button role="tab" id="tab-mouse" aria-controls="shot-mouse" aria-selected="false" tabindex="-1">Mouse effects</button>
+      </div>
+      <figure class="shot" id="shot-home" role="tabpanel" aria-labelledby="tab-home">
+        <img src="assets/screen_01.png" width="997" height="765" alt="openclip Home page: toolbar with Region, Monitor and Window source buttons, audio, mic and cursor toggles and a REC button; below, a media library listing three recorded MP4 files with Play, Folder and Delete actions.">
+        <figcaption><b>Home</b> Your recordings, screenshots and audio clips in one library — play, reveal in folder or delete without leaving the app.</figcaption>
+      </figure>
+      <figure class="shot" id="shot-video" role="tabpanel" aria-labelledby="tab-video" hidden>
+        <img src="assets/screen_02.png" width="997" height="761" alt="openclip Video page, Record tab: checkboxes for showing the mouse cursor, click effects and highlight effect, Full size / Half size toggle, and the current format — H264 OpenH264 CBR at 30 fps, 6000 kbps with MP3 48 kHz stereo audio." loading="lazy">
+        <figcaption><b>Video</b> Cursor and click effects, full or half size, and the H.264 + MP3 format summary with its settings one click away.</figcaption>
+      </figure>
+      <figure class="shot" id="shot-mouse" role="tabpanel" aria-labelledby="tab-mouse" hidden>
+        <img src="assets/screen_03.png" width="997" height="760" alt="openclip Video page, Mouse tab: cursor size, left and right click colours, highlight colour and opacity slider, with a live preview area showing the highlight circle around the cursor." loading="lazy">
+        <figcaption><b>Mouse effects</b> Cursor size, left/right click colours and a highlight halo with adjustable opacity — with a live preview you can click inside.</figcaption>
+      </figure>
     </div>
   </section>
 
@@ -779,6 +838,31 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
         note.textContent = (rel.tag_name || 'Latest release') + ' · see release assets';
       }
     } catch (_) { /* keep releases/latest fallback */ }
+  })();
+
+  // Screenshot tabs.
+  (function () {
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('.shots-tabs [role="tab"]'));
+    if (!tabs.length) return;
+    function select(tab) {
+      tabs.forEach(function (t) {
+        var on = t === tab;
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+        t.tabIndex = on ? 0 : -1;
+        var panel = document.getElementById(t.getAttribute('aria-controls'));
+        if (panel) panel.hidden = !on;
+      });
+    }
+    tabs.forEach(function (t, i) {
+      t.addEventListener('click', function () { select(t); });
+      t.addEventListener('keydown', function (e) {
+        var j = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : -1;
+        if (j < 0) return;
+        e.preventDefault();
+        var next = tabs[(j + tabs.length) % tabs.length];
+        select(next); next.focus();
+      });
+    });
   })();
 
   // Copy buttons for code blocks.

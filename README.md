@@ -1,5 +1,7 @@
 # openclip
 
+![openclip — a self-contained screen recorder](docs/assets/945shots_so.png)
+
 A small, self-contained screen recorder written in Rust with an [egui](https://github.com/emilk/egui) GUI.
 
 - Records a **whole monitor**, a **single window**, or a **dragged region**
