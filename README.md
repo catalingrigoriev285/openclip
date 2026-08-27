@@ -30,10 +30,22 @@ Installing [nasm](https://www.nasm.us/) before building enables OpenH264's assem
 The window is laid out like a classic recorder: a toolbar on top, a navigation on the left and pages on the right.
 
 1. **Toolbar** – pick a recording mode (**Region** opens the on-screen selector: drag a rectangle, Esc cancels; **Monitor**; **Window**), toggle **system audio**, **microphone** and **cursor**, then press the round **REC** button. The camera button saves a PNG snapshot of the current source.
-2. **Home** shows a live preview of exactly what will be recorded — including the mouse cursor — and the monitor/window/region selector. **Video** sets frame rate, bitrate and full/half size; **Audio** picks the microphone device; **General** sets the output folder and file-name prefix.
-3. Press **REC** again (it turns into a stop button) to finish. Files are written as `<prefix>-YYYYMMDD-HHMMSS.mp4` into the chosen folder (defaults to `~/Videos`).
+2. **Home** – a file browser for your output folder with **Videos / Images / Audios** tabs (newest first, with sizes; double-click or **Play** opens the file, **Folder** reveals it, **Delete** asks for confirmation) and, right of the divider, a live preview of exactly what will be recorded — cursor and mouse effects included — with the monitor/window/region selector.
+3. **Video** sets frame rate, bitrate and full/half size; **Mouse** configures mouse effects (below); **Audio** picks the microphone device; **General** sets the output folder and file-name prefix.
+4. Press **REC** again (it turns into a stop button) to finish. Files are written as `<prefix>-YYYYMMDD-HHMMSS.mp4` into the chosen folder (defaults to `~/Videos`).
 
 "Half size" halves both dimensions, which is the easiest way to keep up on slow machines or 4K displays. The status strip shows elapsed time, encoded fps, dropped frames and file size while recording. Frames are dropped (never desynchronised) when the encoder cannot keep up, and the encoder may skip frames to hold the bitrate; each frame carries its real capture timestamp, so playback timing stays correct either way. When the screen is static the last frame is re-encoded at the target rate so the video keeps a steady cadence.
+
+### Mouse effects
+
+The **Mouse** page mirrors the classic "mouse effects" panel:
+
+- **Show mouse cursor** with a **Size** (50–300 %). At 100 % the real cursor is captured natively (exact shape); at any other size the app hides the native cursor and draws its own scalable arrow.
+- **Click effect** – an expanding ring on every press, with separate **left / right click colours** and a size.
+- **Highlight effect** – a translucent halo that follows the pointer, with colour, size and opacity.
+- A checkerboard **preview** shows the current settings; click inside it to test the click effect.
+
+Effects are painted onto the captured frames themselves (in the encode thread, and in the live preview), so the recording and the preview always match. The global pointer is read through `device_query`; on Linux this needs X11 (`libx11-dev` at build time).
 
 ### Headless examples
 

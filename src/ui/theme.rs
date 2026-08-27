@@ -62,3 +62,6 @@ pub fn apply_theme(ctx: &egui::Context) {
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
     ctx.set_style_of(egui::Theme::Dark, style);
 }
+
+pub const CHECKER_LIGHT: Color32 = Color32::from_rgb(0xd8, 0xd8, 0xd8);
+pub const CHECKER_DARK: Color32 = Color32::from_rgb(0xb4, 0xb4, 0xb4);

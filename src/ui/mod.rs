@@ -1,28 +1,35 @@
 //! egui application, laid out in the style of classic recorder tools: a top
 //! toolbar (recording modes, audio toggles, REC), a left navigation with
-//! settings pages, and a live preview on the Home page.
+//! settings pages, a file browser + live preview on the Home page.
 
+mod library;
 pub mod picker;
 mod theme;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Align, Align2, Color32, ColorImage, CornerRadius, FontId, Layout, Margin, RichText, Sense,
-    Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2,
+    self, Align, Align2, Color32, ColorImage, CornerRadius, FontId, Layout, Margin, PointerButton,
+    RichText, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2,
 };
 
 use crate::audio::capture::list_input_devices;
-use crate::capture::monitors::{list_monitors, list_windows, screenshot_source, MonitorInfo, WindowInfo};
+use crate::capture::monitors::{
+    list_monitors, list_windows, screenshot_source, source_origin, MonitorInfo, WindowInfo,
+};
 use crate::capture::{self as cap, CaptureConfig, CaptureHandle, Rect, Source};
 use crate::pipeline::{RecordConfig, Recorder};
+use crate::video::mouse_fx::{MouseFx, MouseSampler, ARROW, CLICK_DURATION};
 use crate::video::preview::{make_preview, PreviewImage};
 
+use library::{open_with_default, reveal_in_folder, Library, LibraryTab};
 use picker::{Picker, PickerOutcome};
 use theme::*;
+
+type SharedFx = Arc<RwLock<MouseFx>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
@@ -36,6 +43,7 @@ enum Tab {
     Home,
     General,
     Video,
+    Mouse,
     Audio,
     Image,
     About,
@@ -48,11 +56,11 @@ enum State {
 }
 
 /// Live low-frame-rate capture of the selected source shown while idle, so the
-/// preview (including the mouse cursor) matches what will be recorded.
+/// preview (cursor and mouse effects included) matches what will be recorded.
 struct LivePreview {
     handle: Option<CaptureHandle>,
     source: Option<Source>,
-    cursor: bool,
+    native_cursor: bool,
     slot: Arc<Mutex<Option<PreviewImage>>>,
     error: Option<String>,
     last_attempt: Option<Instant>,
@@ -62,12 +70,20 @@ impl LivePreview {
     const FPS: u32 = 12;
 
     fn new() -> Self {
-        Self { handle: None, source: None, cursor: true, slot: Default::default(), error: None, last_attempt: None }
+        Self {
+            handle: None,
+            source: None,
+            native_cursor: true,
+            slot: Default::default(),
+            error: None,
+            last_attempt: None,
+        }
     }
 
-    /// Starts/restarts the preview capture if the source or cursor setting changed.
-    fn ensure(&mut self, source: Option<Source>, cursor: bool, ctx: &egui::Context) {
-        let changed = source != self.source || cursor != self.cursor;
+    /// Starts/restarts the preview capture if the source or cursor mode changed.
+    fn ensure(&mut self, source: Option<Source>, fx: &SharedFx, ctx: &egui::Context) {
+        let native_cursor = fx.read().unwrap().native_cursor();
+        let changed = source != self.source || native_cursor != self.native_cursor;
         let retry = self.handle.is_none()
             && self.error.is_some()
             && self.last_attempt.map(|t| t.elapsed() > Duration::from_secs(3)).unwrap_or(true);
@@ -76,18 +92,38 @@ impl LivePreview {
         }
         self.stop();
         self.source = source.clone();
-        self.cursor = cursor;
+        self.native_cursor = native_cursor;
         self.error = None;
         let Some(source) = source else { return };
         self.last_attempt = Some(Instant::now());
         let slot = self.slot.clone();
         let ctx = ctx.clone();
-        let sink: cap::FrameSink = Box::new(move |frame| {
+        let fx = fx.clone();
+        let is_window = matches!(source, Source::Window { .. });
+        let src = source.clone();
+        let mut origin = source_origin(&source).unwrap_or((0, 0));
+        let mut sampler: Option<MouseSampler> = None;
+        let mut n = 0u32;
+        let sink: cap::FrameSink = Box::new(move |mut frame| {
+            let fx = fx.read().unwrap().clone();
+            if fx.any_overlay() {
+                let s = sampler.get_or_insert_with(MouseSampler::new);
+                s.sample();
+                n += 1;
+                if is_window && n.is_multiple_of(30)
+                    && let Ok(o) = source_origin(&src)
+                {
+                    origin = o;
+                }
+                let (cursor, clicks) = s.mapped(origin, 1.0);
+                fx.apply(&mut frame, cursor, &clicks, 1.0);
+            }
             *slot.lock().unwrap() = Some(make_preview(&frame, 720));
             ctx.request_repaint();
             true
         });
-        match cap::start(CaptureConfig { source, fps: Self::FPS, show_cursor: cursor }, Instant::now(), sink) {
+        let cfg = CaptureConfig { source, fps: Self::FPS, show_cursor: native_cursor };
+        match cap::start(cfg, Instant::now(), sink) {
             Ok(h) => self.handle = Some(h),
             Err(e) => self.error = Some(format!("{e:#}")),
         }
@@ -116,7 +152,8 @@ pub struct App {
     fps: u32,
     bitrate_kbps: u32,
     half_resolution: bool,
-    show_cursor: bool,
+    mouse_fx: SharedFx,
+    fx_demo_clicks: Vec<(Instant, bool)>,
     system_audio: bool,
     mic_enabled: bool,
     mic_idx: usize,
@@ -125,6 +162,7 @@ pub struct App {
     tab: Tab,
     state: State,
     live: LivePreview,
+    library: Library,
     preview_tex: Option<TextureHandle>,
     preview_dims: (u32, u32),
     message: Option<(String, bool)>, // (text, is_error)
@@ -137,6 +175,9 @@ impl App {
         let monitors = list_monitors().unwrap_or_default();
         let windows = list_windows().unwrap_or_default();
         let mics = list_input_devices();
+        let output_dir = default_output_dir();
+        let mut library = Library::new();
+        library.refresh(&output_dir, true);
         Self {
             monitors,
             windows,
@@ -148,15 +189,17 @@ impl App {
             fps: 30,
             bitrate_kbps: 6000,
             half_resolution: false,
-            show_cursor: true,
+            mouse_fx: Arc::new(RwLock::new(MouseFx::default())),
+            fx_demo_clicks: Vec::new(),
             system_audio: true,
             mic_enabled: false,
             mic_idx: 0,
-            output_dir: default_output_dir(),
+            output_dir,
             file_prefix: "openclip".into(),
             tab: Tab::Home,
             state: State::Idle,
             live: LivePreview::new(),
+            library,
             preview_tex: None,
             preview_dims: (0, 0),
             message: None,
@@ -209,6 +252,13 @@ impl App {
         self.output_dir.join(format!("{prefix}-{}.{ext}", timestamp()))
     }
 
+    fn saved(&mut self, path: PathBuf, what: &str) {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        self.message = Some((format!("{what} saved: {} ({})", path.display(), human_bytes(size)), false));
+        self.library.select_path(&path, &self.output_dir);
+        self.last_file = Some(path);
+    }
+
     fn start_recording(&mut self, ctx: &egui::Context) {
         let Some(source) = self.selected_source() else {
             self.message = Some(("Select something to record first.".into(), true));
@@ -221,7 +271,7 @@ impl App {
             fps: self.fps,
             bitrate_kbps: self.bitrate_kbps,
             half_resolution: self.half_resolution,
-            show_cursor: self.show_cursor,
+            mouse_fx: self.mouse_fx.read().unwrap().clone(),
             system_audio: self.system_audio,
             microphone: self.mic_enabled.then(|| self.mics.get(self.mic_idx).cloned()),
             output: self.timestamped("mp4"),
@@ -240,11 +290,7 @@ impl App {
     fn stop_recording(&mut self) {
         if let State::Recording(rec) = std::mem::replace(&mut self.state, State::Idle) {
             match rec.stop() {
-                Ok(path) => {
-                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    self.message = Some((format!("Saved {} ({})", path.display(), human_bytes(size)), false));
-                    self.last_file = Some(path);
-                }
+                Ok(path) => self.saved(path, "Recording"),
                 Err(e) => self.message = Some((format!("Recording failed: {e:#}"), true)),
             }
         }
@@ -263,10 +309,7 @@ impl App {
             img.save(&path).map_err(|e| anyhow::anyhow!("{e}"))
         });
         match result {
-            Ok(()) => {
-                self.message = Some((format!("Snapshot saved to {}", path.display()), false));
-                self.last_file = Some(path);
-            }
+            Ok(()) => self.saved(path, "Snapshot"),
             Err(e) => self.message = Some((format!("Snapshot failed: {e:#}"), true)),
         }
     }
@@ -288,7 +331,7 @@ impl App {
                 }
             }
             State::Idle => {
-                self.live.ensure(self.selected_source(), self.show_cursor, ctx);
+                self.live.ensure(self.selected_source(), &self.mouse_fx, ctx);
                 if let Some(img) = self.live.take() {
                     self.upload_preview(ctx, &img);
                 }
@@ -323,7 +366,12 @@ impl App {
                 ui.add_space(10.0);
                 toggle_button(ui, "🔊", "System audio", &mut self.system_audio);
                 toggle_button(ui, "🎤", "Microphone", &mut self.mic_enabled);
-                toggle_button(ui, "🖱", "Show cursor", &mut self.show_cursor);
+                let mut show_cursor = self.mouse_fx.read().unwrap().show_cursor;
+                let before = show_cursor;
+                toggle_button(ui, "🖱", "Show cursor", &mut show_cursor);
+                if show_cursor != before {
+                    self.mouse_fx.write().unwrap().show_cursor = show_cursor;
+                }
             });
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -401,6 +449,7 @@ impl App {
             (Tab::Home, "🏠", "Home"),
             (Tab::General, "⚙", "General"),
             (Tab::Video, "🎞", "Video"),
+            (Tab::Mouse, "🖱", "Mouse"),
             (Tab::Audio, "🔊", "Audio"),
             (Tab::Image, "🖼", "Image"),
             (Tab::About, "ℹ", "About"),
@@ -416,23 +465,166 @@ impl App {
             Tab::Home => self.page_home(ui),
             Tab::General => self.page_general(ui),
             Tab::Video => self.page_video(ui),
+            Tab::Mouse => self.page_mouse(ui),
             Tab::Audio => self.page_audio(ui),
             Tab::Image => self.page_image(ui),
             Tab::About => self.page_about(ui),
         }
     }
 
+    // ----- Home: file browser | preview ------------------------------------------
+
     fn page_home(&mut self, ui: &mut egui::Ui) {
         let recording = self.is_recording();
-        section_title(ui, "Preview");
+        let total = ui.available_size();
+        let left_w = (total.x * 0.46).clamp(300.0, 520.0);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(Vec2::new(left_w, total.y), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(left_w);
+                ui.set_height(total.y);
+                self.library_panel(ui);
+            });
+            ui.add_space(8.0);
+            let (rule, _) = ui.allocate_exact_size(Vec2::new(1.0, total.y), Sense::hover());
+            ui.painter().vline(rule.center().x, rule.y_range(), Stroke::new(1.0, SEPARATOR));
+            ui.add_space(12.0);
+            let right_w = ui.available_width();
+            ui.allocate_ui_with_layout(Vec2::new(right_w, total.y), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(right_w);
+                section_title(ui, "Preview");
+                self.source_row(ui, recording);
+                ui.add_space(6.0);
+                self.preview_panel(ui);
+            });
+        });
+    }
+
+    fn library_panel(&mut self, ui: &mut egui::Ui) {
+        // Tab strip.
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            for tab in LibraryTab::ALL {
+                let selected = self.library.tab == tab;
+                let text = RichText::new(tab.label()).size(15.0);
+                let text = if selected { text.strong().color(TEXT_BRIGHT) } else { text.color(TEXT_NORMAL) };
+                let resp = ui.selectable_label(selected, text);
+                if resp.clicked() {
+                    self.library.set_tab(tab, &self.output_dir);
+                }
+                ui.add_space(6.0);
+            }
+        });
+        self.library.refresh(&self.output_dir, false);
+        // Folder row.
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(RichText::new(self.output_dir.display().to_string()).color(TEXT_DIM).small())
+                .on_hover_text("Output folder (change it under General)");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.small_button("⟳").on_hover_text("Refresh list").clicked() {
+                    self.library.refresh(&self.output_dir, true);
+                }
+                if ui.small_button("📂").on_hover_text("Open folder").clicked() {
+                    open_folder(&self.output_dir);
+                }
+            });
+        });
+        ui.painter().hline(
+            ui.available_rect_before_wrap().x_range(),
+            ui.cursor().top() + 2.0,
+            Stroke::new(1.0, SEPARATOR),
+        );
+        ui.add_space(6.0);
+
+        // File list.
+        let list_h = (ui.available_height() - 48.0).max(80.0);
+        let mut clicked: Option<usize> = None;
+        let mut activated: Option<usize> = None;
+        egui::Frame::new().fill(PREVIEW_BG).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
+            ui.set_min_height(list_h);
+            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                if self.library.entries.is_empty() {
+                    ui.add_space(12.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new(format!("No {} yet", self.library.tab.label().to_lowercase())).color(TEXT_DIM));
+                    });
+                }
+                for (i, e) in self.library.entries.iter().enumerate() {
+                    let selected = self.library.selected == Some(i);
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
+                    let p = ui.painter();
+                    if selected {
+                        p.rect_filled(rect, CornerRadius::ZERO, ACCENT.gamma_multiply(0.55));
+                    } else if resp.hovered() {
+                        p.rect_filled(rect, CornerRadius::ZERO, BUTTON_HOVER);
+                    }
+                    let color = if selected { TEXT_BRIGHT } else { TEXT_NORMAL };
+                    let name_rect = egui::Rect::from_min_max(rect.min + Vec2::new(8.0, 0.0), rect.max - Vec2::new(90.0, 0.0));
+                    p.with_clip_rect(name_rect).text(
+                        name_rect.left_center(),
+                        Align2::LEFT_CENTER,
+                        &e.name,
+                        FontId::proportional(14.0),
+                        color,
+                    );
+                    p.text(
+                        rect.right_center() - Vec2::new(8.0, 0.0),
+                        Align2::RIGHT_CENTER,
+                        human_bytes(e.size),
+                        FontId::proportional(13.0),
+                        color,
+                    );
+                    if resp.double_clicked() {
+                        activated = Some(i);
+                    } else if resp.clicked() {
+                        clicked = Some(i);
+                    }
+                    resp.on_hover_text(e.path.display().to_string());
+                }
+            });
+        });
+        if let Some(i) = clicked {
+            self.library.selected = Some(i);
+        }
+        if let Some(i) = activated {
+            self.library.selected = Some(i);
+            if let Some(e) = self.library.entries.get(i) {
+                open_with_default(&e.path);
+            }
+        }
+
+        // Actions.
+        ui.add_space(6.0);
+        let selected = self.library.selected_entry().map(|e| e.path.clone());
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 16.0) / 3.0;
+            let has = selected.is_some();
+            if ui.add_enabled(has, egui::Button::new("▶  Play").min_size(Vec2::new(w, 30.0))).clicked()
+                && let Some(p) = &selected
+            {
+                open_with_default(p);
+            }
+            if ui.add_enabled(has, egui::Button::new("📂  Folder").min_size(Vec2::new(w, 30.0))).clicked()
+                && let Some(p) = &selected
+            {
+                reveal_in_folder(p);
+            }
+            if ui.add_enabled(has, egui::Button::new("🗑  Delete").min_size(Vec2::new(w, 30.0))).clicked() {
+                self.library.confirm_delete = selected.clone();
+            }
+        });
+    }
+
+    fn source_row(&mut self, ui: &mut egui::Ui, recording: bool) {
         ui.add_enabled_ui(!recording, |ui| {
             ui.horizontal(|ui| {
+                let combo_w = (ui.available_width() - 120.0).max(160.0);
                 match self.source_kind {
                     SourceKind::Monitor => {
                         ui.label("Monitor");
                         let label =
                             self.monitors.get(self.monitor_idx).map(|m| m.label()).unwrap_or("No monitors".into());
-                        egui::ComboBox::from_id_salt("monitor").width(360.0).selected_text(label).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("monitor").width(combo_w).selected_text(label).show_ui(ui, |ui| {
                             for (i, m) in self.monitors.iter().enumerate() {
                                 ui.selectable_value(&mut self.monitor_idx, i, m.label());
                             }
@@ -442,7 +634,7 @@ impl App {
                         ui.label("Window");
                         let label =
                             self.windows.get(self.window_idx).map(|w| w.label()).unwrap_or("No windows".into());
-                        egui::ComboBox::from_id_salt("window").width(360.0).selected_text(label).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("window").width(combo_w).selected_text(label).show_ui(ui, |ui| {
                             for (i, w) in self.windows.iter().enumerate() {
                                 ui.selectable_value(&mut self.window_idx, i, w.label());
                             }
@@ -460,8 +652,6 @@ impl App {
                 }
             });
         });
-        ui.add_space(6.0);
-        self.preview_panel(ui);
     }
 
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
@@ -491,6 +681,8 @@ impl App {
         });
     }
 
+    // ----- settings pages ---------------------------------------------------------
+
     fn page_general(&mut self, ui: &mut egui::Ui) {
         section_title(ui, "Output");
         settings_row(ui, "Save to", |ui| {
@@ -499,6 +691,7 @@ impl App {
                 && let Some(dir) = rfd::FileDialog::new().set_directory(&self.output_dir).pick_folder()
             {
                 self.output_dir = dir;
+                self.library.refresh(&self.output_dir, true);
             }
             if ui.button("Open").clicked() {
                 open_folder(&self.output_dir);
@@ -509,11 +702,8 @@ impl App {
             ui.label(RichText::new(format!("→ {}-YYYYMMDD-HHMMSS.mp4", self.file_prefix.trim())).color(TEXT_DIM));
         });
         ui.add_space(14.0);
-        section_title(ui, "Recording");
-        settings_row(ui, "Mouse cursor", |ui| {
-            ui.checkbox(&mut self.show_cursor, "Show mouse cursor in recordings and preview");
-        });
-        settings_row(ui, "Sources", |ui| {
+        section_title(ui, "Sources");
+        settings_row(ui, "Devices", |ui| {
             if ui.button("Refresh monitors, windows and devices").clicked() {
                 self.refresh_sources();
             }
@@ -549,6 +739,117 @@ impl App {
             )
             .color(TEXT_DIM),
         );
+    }
+
+    fn page_mouse(&mut self, ui: &mut egui::Ui) {
+        section_title(ui, "Mouse effects");
+        let current = self.mouse_fx.read().unwrap().clone();
+        let mut fx = current.clone();
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(440.0);
+                ui.checkbox(&mut fx.show_cursor, "Show mouse cursor");
+                ui.add_enabled_ui(fx.show_cursor, |ui| {
+                    settings_row(ui, "      Size", |ui| {
+                        size_combo(ui, "cursor_size", &mut fx.cursor_size);
+                        if fx.cursor_size != 100 {
+                            ui.label(RichText::new("(app-drawn arrow)").color(TEXT_DIM));
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                ui.checkbox(&mut fx.click_effect, "Add mouse click effect");
+                ui.add_enabled_ui(fx.click_effect, |ui| {
+                    settings_row(ui, "      Size", |ui| size_combo(ui, "click_size", &mut fx.click_size));
+                    settings_row(ui, "      Left click color", |ui| color_swatch(ui, &mut fx.left_color));
+                    settings_row(ui, "      Right click color", |ui| color_swatch(ui, &mut fx.right_color));
+                });
+                ui.add_space(8.0);
+                ui.checkbox(&mut fx.highlight, "Add mouse highlight effect");
+                ui.add_enabled_ui(fx.highlight, |ui| {
+                    settings_row(ui, "      Size", |ui| size_combo(ui, "highlight_size", &mut fx.highlight_size));
+                    settings_row(ui, "      Highlight color", |ui| color_swatch(ui, &mut fx.highlight_color));
+                    settings_row(ui, "      Opacity", |ui| {
+                        ui.add(egui::DragValue::new(&mut fx.highlight_opacity).range(0..=100).suffix(" %"));
+                        ui.add(egui::Slider::new(&mut fx.highlight_opacity, 0..=100).show_value(false));
+                    });
+                });
+            });
+            ui.add_space(20.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Preview").color(TEXT_NORMAL));
+                ui.add_space(4.0);
+                self.fx_preview(ui, &fx);
+                ui.add_space(6.0);
+                ui.label(RichText::new("Click inside the preview to test the click effect.").color(TEXT_DIM).small());
+            });
+        });
+        if fx != current {
+            *self.mouse_fx.write().unwrap() = fx;
+        }
+    }
+
+    /// Checkerboard square showing the cursor, halo and (on click) ripples.
+    fn fx_preview(&mut self, ui: &mut egui::Ui, fx: &MouseFx) {
+        let size = Vec2::splat(220.0);
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let p = ui.painter_at(rect);
+        let cell = 11.0;
+        let cols = (size.x / cell).ceil() as i32;
+        for cy in 0..cols {
+            for cx in 0..cols {
+                let c = if (cx + cy) % 2 == 0 { CHECKER_LIGHT } else { CHECKER_DARK };
+                let r = egui::Rect::from_min_size(rect.min + Vec2::new(cx as f32 * cell, cy as f32 * cell), Vec2::splat(cell))
+                    .intersect(rect);
+                p.rect_filled(r, CornerRadius::ZERO, c);
+            }
+        }
+        p.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, SEPARATOR), StrokeKind::Inside);
+        let center = rect.center();
+        if resp.clicked_by(PointerButton::Primary) {
+            self.fx_demo_clicks.push((Instant::now(), false));
+        }
+        if resp.clicked_by(PointerButton::Secondary) {
+            self.fx_demo_clicks.push((Instant::now(), true));
+        }
+        let now = Instant::now();
+        self.fx_demo_clicks.retain(|(t, _)| now.duration_since(*t) < CLICK_DURATION);
+        if fx.highlight && fx.highlight_opacity > 0 {
+            let [r, g, b] = fx.highlight_color;
+            let a = (fx.highlight_opacity.min(100) * 255 / 100) as u8;
+            p.circle_filled(center, 32.0 * fx.highlight_size as f32 / 100.0, Color32::from_rgba_unmultiplied(r, g, b, a));
+        }
+        if fx.click_effect {
+            for (t, right) in &self.fx_demo_clicks {
+                let age = now.duration_since(*t).as_secs_f32() / CLICK_DURATION.as_secs_f32();
+                let k = fx.click_size as f32 / 100.0;
+                let radius = (10.0 + 32.0 * age) * k;
+                let [r, g, b] = if *right { fx.right_color } else { fx.left_color };
+                let a = (230.0 * (1.0 - age)) as u8;
+                p.circle_stroke(center, radius, Stroke::new(3.0 * k.max(0.5), Color32::from_rgba_unmultiplied(r, g, b, a)));
+            }
+            if !self.fx_demo_clicks.is_empty() {
+                ui.ctx().request_repaint();
+            }
+        }
+        if fx.show_cursor {
+            let s = fx.cursor_size as f32 / 100.0;
+            for (y, row) in ARROW.iter().enumerate() {
+                for (x, ch) in row.bytes().enumerate() {
+                    let color = match ch {
+                        b'X' => Color32::BLACK,
+                        b'W' => Color32::WHITE,
+                        _ => continue,
+                    };
+                    let r = egui::Rect::from_min_size(
+                        center + Vec2::new(x as f32 * s, y as f32 * s),
+                        Vec2::splat(s + 0.2),
+                    );
+                    p.rect_filled(r, CornerRadius::ZERO, color);
+                }
+            }
+        }
+        resp.on_hover_cursor(egui::CursorIcon::Crosshair);
     }
 
     fn page_audio(&mut self, ui: &mut egui::Ui) {
@@ -619,7 +920,7 @@ impl App {
                         && let Some(path) = self.last_file.clone()
                         && ui.small_button("Open folder").clicked()
                     {
-                        open_folder(&path);
+                        reveal_in_folder(&path);
                     }
                 }
                 None => {
@@ -627,6 +928,35 @@ impl App {
                 }
             }
         });
+    }
+
+    fn delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.library.confirm_delete.clone() else { return };
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("confirm-delete")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading("Delete file?");
+            ui.add_space(6.0);
+            ui.label(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            ui.label(RichText::new("This permanently deletes the file from disk.").color(TEXT_DIM));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let del = egui::Button::new(RichText::new("Delete").color(TEXT_BRIGHT)).fill(REC_RED);
+                if ui.add(del).clicked() {
+                    match self.library.delete(&path, &self.output_dir) {
+                        Ok(()) => self.message = Some((format!("Deleted {}", path.display()), false)),
+                        Err(e) => self.message = Some((format!("Could not delete: {e}"), true)),
+                    }
+                    close = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close || modal.should_close() {
+            self.library.confirm_delete = None;
+        }
     }
 }
 
@@ -664,6 +994,8 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(PAGE_BG).inner_margin(Margin::same(18)))
             .show(ui, |ui| self.page(ui));
+
+        self.delete_dialog(&ctx);
     }
 
     fn on_exit(&mut self) {
@@ -785,16 +1117,33 @@ fn section_title(ui: &mut egui::Ui, title: &str) {
 
 fn settings_row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.add_sized(Vec2::new(130.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
+        ui.add_sized(Vec2::new(150.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
         add(ui);
     });
     ui.add_space(4.0);
 }
 
+/// Percent size selector used by the mouse-effect settings.
+fn size_combo(ui: &mut egui::Ui, id: &str, value: &mut u32) {
+    egui::ComboBox::from_id_salt(id).width(90.0).selected_text(format!("{value} %")).show_ui(ui, |ui| {
+        for v in [50u32, 75, 100, 125, 150, 200, 300] {
+            ui.selectable_value(value, v, format!("{v} %"));
+        }
+    });
+}
+
+/// Wide colour swatch that opens egui's colour picker.
+fn color_swatch(ui: &mut egui::Ui, rgb: &mut [u8; 3]) {
+    let mut c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    ui.spacing_mut().interact_size = Vec2::new(64.0, 22.0);
+    egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque);
+    *rgb = [c.r(), c.g(), c.b()];
+}
+
 /// Dark "format summary" box like the Video/Audio boxes in classic recorders.
 fn format_box(ui: &mut egui::Ui, label: &str, title: &str, detail: &str) {
     ui.horizontal(|ui| {
-        ui.add_sized(Vec2::new(130.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
+        ui.add_sized(Vec2::new(150.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
         let width = ui.available_width().min(520.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::hover());
         let p = ui.painter();

@@ -69,7 +69,7 @@ impl MouseFx {
     /// Paints the effects onto `frame`. `cursor` is in frame pixels, `clicks`
     /// are (frame position, age 0..1, is_right). `scale` scales effect sizes
     /// (0.5 for half-resolution frames).
-    pub fn apply(&self, frame: &mut RawFrame, cursor: (i32, i32), clicks: &[(i32, i32, f32, bool)], scale: f32) {
+    pub fn apply(&self, frame: &mut RawFrame, cursor: (i32, i32), clicks: &[FrameClick], scale: f32) {
         if self.highlight && self.highlight_opacity > 0 {
             let r = HIGHLIGHT_RADIUS * self.highlight_size as f32 / 100.0 * scale;
             let alpha = self.highlight_opacity.min(100) as f32 / 100.0;
@@ -89,6 +89,9 @@ impl MouseFx {
         }
     }
 }
+
+/// A click mapped into frame space: (x, y, age 0..1, is_right).
+pub type FrameClick = (i32, i32, f32, bool);
 
 /// A recorded button press.
 #[derive(Debug, Clone, Copy)]
@@ -156,7 +159,7 @@ impl MouseSampler {
     }
 
     /// Maps the sampled state into frame coordinates for [`MouseFx::apply`].
-    pub fn mapped(&self, origin: (i32, i32), scale: f32) -> ((i32, i32), Vec<(i32, i32, f32, bool)>) {
+    pub fn mapped(&self, origin: (i32, i32), scale: f32) -> ((i32, i32), Vec<FrameClick>) {
         let now = Instant::now();
         let map = |p: (i32, i32)| (((p.0 - origin.0) as f32 * scale) as i32, ((p.1 - origin.1) as f32 * scale) as i32);
         let cursor = map(self.pos);
@@ -228,7 +231,7 @@ fn ring(frame: &mut RawFrame, cx: f32, cy: f32, r: f32, thickness: f32, rgb: [u8
 }
 
 /// Classic arrow cursor, 12×19: `.` transparent, `X` black outline, `W` white fill.
-const ARROW: [&str; 19] = [
+pub const ARROW: [&str; 19] = [
     "X...........",
     "XX..........",
     "XWX.........",
