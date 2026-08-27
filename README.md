@@ -27,11 +27,13 @@ Installing [nasm](https://www.nasm.us/) before building enables OpenH264's assem
 
 ## Usage
 
-1. Pick a source: a monitor, a window, or **Region → Select region…** and drag a rectangle on the screen (Esc cancels).
-2. Choose frame rate, bitrate, cursor, and audio sources. "Half resolution" halves both dimensions, which is the easiest way to keep up on slow machines or 4K displays.
-3. Press **Record**; press **Stop** to finish. Files are written as `openclip-YYYYMMDD-HHMMSS.mp4` into the chosen folder (defaults to `~/Videos`).
+The window is laid out like a classic recorder: a toolbar on top, a navigation on the left and pages on the right.
 
-The status bar shows encoded fps, dropped frames and file size while recording. Frames are dropped (never desynchronised) when the encoder cannot keep up, and the encoder may skip frames to hold the bitrate; each frame carries its real capture timestamp, so playback timing stays correct either way. When the screen is static the last frame is re-encoded at the target rate so the video keeps a steady cadence.
+1. **Toolbar** – pick a recording mode (**Region** opens the on-screen selector: drag a rectangle, Esc cancels; **Monitor**; **Window**), toggle **system audio**, **microphone** and **cursor**, then press the round **REC** button. The camera button saves a PNG snapshot of the current source.
+2. **Home** shows a live preview of exactly what will be recorded — including the mouse cursor — and the monitor/window/region selector. **Video** sets frame rate, bitrate and full/half size; **Audio** picks the microphone device; **General** sets the output folder and file-name prefix.
+3. Press **REC** again (it turns into a stop button) to finish. Files are written as `<prefix>-YYYYMMDD-HHMMSS.mp4` into the chosen folder (defaults to `~/Videos`).
+
+"Half size" halves both dimensions, which is the easiest way to keep up on slow machines or 4K displays. The status strip shows elapsed time, encoded fps, dropped frames and file size while recording. Frames are dropped (never desynchronised) when the encoder cannot keep up, and the encoder may skip frames to hold the bitrate; each frame carries its real capture timestamp, so playback timing stays correct either way. When the screen is static the last frame is re-encoded at the target rate so the video keeps a steady cadence.
 
 ### Headless examples
 
