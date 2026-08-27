@@ -1,5 +1,6 @@
 //! Compact floating recorder bar (Camtasia-style): recording area, recorded
-//! inputs, pause / rec, and an expand button back to the full window.
+//! inputs and pause / rec. Closing the bar window (title-bar X) does not quit
+//! the app — it restores the full window instead.
 
 use std::time::{Duration, Instant};
 
@@ -10,7 +11,7 @@ use super::theme::*;
 use super::{format_duration, human_bytes, pause_button, rec_button, App, RecClick, SourceKind, State};
 
 /// Inner size of the bar window, in points.
-pub const BAR_SIZE: Vec2 = Vec2::new(780.0, 104.0);
+pub const BAR_SIZE: Vec2 = Vec2::new(750.0, 104.0);
 const GROUP_H: f32 = 86.0;
 const TOAST_TTL: Duration = Duration::from_secs(5);
 
@@ -30,6 +31,17 @@ impl App {
             let pos = egui::pos2((mon.x - BAR_SIZE.x - 24.0).max(0.0), (mon.y - BAR_SIZE.y - 110.0).max(0.0));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         }
+    }
+
+    /// In compact mode the title-bar X restores the full window instead of
+    /// quitting. Returns true when a close was intercepted this frame.
+    pub(super) fn intercept_close(&mut self, ctx: &egui::Context) -> bool {
+        if !self.compact || !ctx.input(|i| i.viewport().close_requested()) {
+            return false;
+        }
+        ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+        self.exit_compact(ctx);
+        true
     }
 
     /// Restores the full window at its previous position.
@@ -163,9 +175,7 @@ impl App {
 
             // ----- Controls -----
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if expand_button(ui).clicked() {
-                    self.exit_compact(ctx);
-                }
+                ui.add_space(4.0);
                 let can_record = self.selected_source().is_some();
                 match rec_button(ui, recording, can_record) {
                     RecClick::Start => self.start_recording(ctx),
@@ -261,16 +271,6 @@ fn input_toggle(ui: &mut egui::Ui, icon: &str, name: &str, value: &mut bool, tip
             }
         });
     });
-}
-
-fn expand_button(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(30.0, 40.0), Sense::click());
-    let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(3), BUTTON_HOVER);
-    }
-    p.text(rect.center(), Align2::CENTER_CENTER, icons::EXPAND, FontId::proportional(16.0), TEXT_BRIGHT);
-    resp.on_hover_text("Back to the full window")
 }
 
 fn truncate(s: &str, max: usize) -> String {

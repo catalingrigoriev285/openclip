@@ -37,7 +37,6 @@ pub const PAUSE: &str = "\u{f04c}";
 pub const STOP: &str = "\u{f04d}";
 pub const CAMERA: &str = "\u{f030}";
 pub const MINIMIZE: &str = "\u{f066}"; // compress
-pub const EXPAND: &str = "\u{f065}"; // expand
 pub const REFRESH: &str = "\u{f021}"; // arrows-rotate
 pub const FOLDER: &str = "\u{f07c}"; // folder-open
 pub const TRASH: &str = "\u{f2ed}"; // trash-can

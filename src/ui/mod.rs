@@ -453,7 +453,7 @@ impl App {
                 if icon_button(ui, icons::CAMERA, "Take a snapshot (PNG)").clicked() {
                     self.take_snapshot();
                 }
-                if icon_button(ui, icons::MINIMIZE, "Mini bar: collapse to a small floating recorder bar").clicked() {
+                if icon_button(ui, icons::MINIMIZE, "Mini bar: collapse to a small floating recorder bar (close the bar to come back)").clicked() {
                     self.enter_compact(ctx);
                 }
                 let can_record = self.selected_source().is_some();
@@ -1128,7 +1128,7 @@ impl eframe::App for App {
             }
         }
 
-        if self.compact {
+        if self.compact && !self.intercept_close(&ctx) {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(8, 6)))
                 .show(ui, |ui| self.minibar(ui, &ctx));
