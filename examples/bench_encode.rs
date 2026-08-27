@@ -42,6 +42,7 @@ fn main() -> anyhow::Result<()> {
         stride: width * 4,
         format: PixelFormat::Bgra,
         pts: Duration::ZERO,
+        mouse: None,
     };
     let mut convert_time = Duration::ZERO;
     let mut encode_time = Duration::ZERO;

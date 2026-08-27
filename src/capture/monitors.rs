@@ -127,7 +127,7 @@ fn find_window(id: u32) -> Result<Window> {
 
 fn image_to_frame(img: xcap::image::RgbaImage) -> RawFrame {
     let (w, h) = (img.width(), img.height());
-    RawFrame { data: img.into_raw(), width: w, height: h, stride: w * 4, format: PixelFormat::Rgba, pts: Duration::ZERO }
+    RawFrame { data: img.into_raw(), width: w, height: h, stride: w * 4, format: PixelFormat::Rgba, pts: Duration::ZERO, mouse: None }
 }
 
 /// Takes a screenshot of a monitor (RGBA).

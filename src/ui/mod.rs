@@ -100,7 +100,7 @@ struct LivePreview {
 }
 
 impl LivePreview {
-    const FPS: u32 = 12;
+    const FPS: u32 = 20;
 
     fn new() -> Self {
         Self {

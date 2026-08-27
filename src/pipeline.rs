@@ -143,6 +143,7 @@ impl Recorder {
             None
         };
 
+        let sampler = config.mouse_fx.any_overlay().then(|| Arc::new(Mutex::new(MouseSampler::new())));
         let encode_thread = spawn_encode_thread(EncodeArgs {
             config: config.clone(),
             epoch,
@@ -155,9 +156,10 @@ impl Recorder {
             stats: stats.clone(),
             preview: preview.clone(),
             on_preview,
+            sampler: sampler.clone(),
         })?;
 
-        let capture = start_capture(&config, epoch, video_tx, stats.clone())?;
+        let capture = start_capture(&config, epoch, video_tx, stats.clone(), sampler)?;
 
         Ok(Recorder {
             stop,
@@ -268,9 +270,15 @@ fn start_capture(
     epoch: Instant,
     tx: SyncSender<RawFrame>,
     stats: Arc<Stats>,
+    sampler: Option<Arc<Mutex<MouseSampler>>>,
 ) -> Result<CaptureHandle> {
-    let sink: capture::FrameSink = Box::new(move |frame| {
+    let sink: capture::FrameSink = Box::new(move |mut frame| {
         stats.frames_captured.fetch_add(1, Ordering::Relaxed);
+        // Sample the pointer right when the frame arrives so effects line up
+        // with the captured image even if encoding lags behind.
+        if let Some(s) = &sampler {
+            frame.mouse = Some(s.lock().unwrap().snapshot());
+        }
         match tx.try_send(frame) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
@@ -300,6 +308,8 @@ struct EncodeArgs {
     stats: Arc<Stats>,
     preview: Arc<PreviewSlot>,
     on_preview: Option<PreviewCallback>,
+    /// Shared with the capture sink; used here only for heartbeat frames.
+    sampler: Option<Arc<Mutex<MouseSampler>>>,
 }
 
 fn spawn_encode_thread(args: EncodeArgs) -> Result<JoinHandle<Result<()>>> {
@@ -326,6 +336,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         stats,
         preview,
         on_preview,
+        sampler,
     } = args;
     // Recording-time clock: wall time since epoch minus paused time.
     let paused_dur = || Duration::from_micros(paused_total.load(Ordering::Relaxed));
@@ -344,7 +355,6 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
     let mut last_pts: Option<Duration> = None;
     let mut last_size = (0u32, 0u32);
     let mut last_frame: Option<RawFrame> = None;
-    let mut sampler = config.mouse_fx.any_overlay().then(MouseSampler::new);
     let mut origin = source_origin(&config.source).unwrap_or((0, 0));
     let fx_scale = if config.half_resolution { 0.5 } else { 1.0 };
     let mut frames_since_origin = 0u32;
@@ -385,6 +395,10 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
                     {
                         let mut f = f.clone();
                         f.pts = rec_now();
+                        // The screen is static but the pointer may move: sample now.
+                        if let Some(s) = &sampler {
+                            f.mouse = Some(s.lock().unwrap().snapshot());
+                        }
                         (f, true)
                     }
                     _ => continue,
@@ -429,8 +443,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         let t0 = Instant::now();
         // Mouse effects are painted on a copy so the clean frame can be reused for heartbeats.
         let mut painted: Option<RawFrame> = None;
-        if let Some(sampler) = sampler.as_mut() {
-            sampler.sample();
+        if let Some(snap) = frame.mouse.as_ref().filter(|_| sampler.is_some()) {
             if matches!(config.source, Source::Window { .. }) {
                 frames_since_origin += 1;
                 if frames_since_origin >= 30 {
@@ -440,7 +453,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
                     }
                 }
             }
-            let (cursor, clicks) = sampler.mapped(origin, fx_scale);
+            let (cursor, clicks) = snap.mapped(origin, fx_scale);
             let mut f = frame.clone();
             config.mouse_fx.apply(&mut f, cursor, &clicks, fx_scale);
             painted = Some(f);

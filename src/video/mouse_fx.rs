@@ -93,6 +93,32 @@ impl MouseFx {
 /// A click mapped into frame space: (x, y, age 0..1, is_right).
 pub type FrameClick = (i32, i32, f32, bool);
 
+/// Pointer state captured together with a frame (global desktop pixels).
+#[derive(Debug, Clone, Default)]
+pub struct MouseSnapshot {
+    pub pos: (i32, i32),
+    pub clicks: Vec<Click>,
+}
+
+impl MouseSnapshot {
+    /// Maps into frame coordinates for [`MouseFx::apply`].
+    pub fn mapped(&self, origin: (i32, i32), scale: f32) -> ((i32, i32), Vec<FrameClick>) {
+        let now = Instant::now();
+        let map = |p: (i32, i32)| (((p.0 - origin.0) as f32 * scale) as i32, ((p.1 - origin.1) as f32 * scale) as i32);
+        let cursor = map(self.pos);
+        let clicks = self
+            .clicks
+            .iter()
+            .map(|c| {
+                let (x, y) = map(c.pos);
+                let age = now.duration_since(c.at).as_secs_f32() / CLICK_DURATION.as_secs_f32();
+                (x, y, age, c.right)
+            })
+            .collect();
+        (cursor, clicks)
+    }
+}
+
 /// A recorded button press.
 #[derive(Debug, Clone, Copy)]
 pub struct Click {
@@ -158,21 +184,15 @@ impl MouseSampler {
         &self.clicks
     }
 
+    /// Samples and returns a snapshot to attach to a frame.
+    pub fn snapshot(&mut self) -> MouseSnapshot {
+        self.sample();
+        MouseSnapshot { pos: self.pos, clicks: self.clicks.clone() }
+    }
+
     /// Maps the sampled state into frame coordinates for [`MouseFx::apply`].
     pub fn mapped(&self, origin: (i32, i32), scale: f32) -> ((i32, i32), Vec<FrameClick>) {
-        let now = Instant::now();
-        let map = |p: (i32, i32)| (((p.0 - origin.0) as f32 * scale) as i32, ((p.1 - origin.1) as f32 * scale) as i32);
-        let cursor = map(self.pos);
-        let clicks = self
-            .clicks
-            .iter()
-            .map(|c| {
-                let (x, y) = map(c.pos);
-                let age = now.duration_since(c.at).as_secs_f32() / CLICK_DURATION.as_secs_f32();
-                (x, y, age, c.right)
-            })
-            .collect();
-        (cursor, clicks)
+        MouseSnapshot { pos: self.pos, clicks: self.clicks.clone() }.mapped(origin, scale)
     }
 }
 
@@ -284,6 +304,7 @@ mod tests {
             stride: w * 4,
             format: PixelFormat::Bgra,
             pts: Duration::ZERO,
+            mouse: None,
         }
     }
 

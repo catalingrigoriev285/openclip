@@ -81,6 +81,7 @@ fn spawn_monitor(
                         stride: frame.width * 4,
                         format: PixelFormat::Rgba,
                         pts: now.duration_since(epoch),
+                        mouse: None,
                     };
                     if let Some(r) = crop {
                         raw = raw.crop(r.x, r.y, r.width, r.height);
@@ -136,6 +137,7 @@ fn spawn_window(
                 stride: w * 4,
                 format: PixelFormat::Rgba,
                 pts: Instant::now().duration_since(epoch),
+                mouse: None,
             };
             if !sink(raw) {
                 break;

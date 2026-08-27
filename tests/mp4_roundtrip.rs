@@ -68,6 +68,7 @@ fn build(with_audio: bool) -> Built {
         stride: W * 4,
         format: PixelFormat::Bgra,
         pts: Duration::ZERO,
+        mouse: None,
     };
     let mut keyframes = Vec::new();
     let mut video_samples = 0;

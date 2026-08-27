@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use openh264::formats::YUVSlices;
+
+use super::mouse_fx::MouseSnapshot;
 use yuv::{
     bgra_to_yuv420, rgba_to_yuv420, BufferStoreMut, YuvChromaSubsampling, YuvConversionMode,
     YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
@@ -28,6 +30,8 @@ pub struct RawFrame {
     pub format: PixelFormat,
     /// Capture time relative to the recording epoch.
     pub pts: Duration,
+    /// Pointer state sampled when the frame was captured (global pixels).
+    pub mouse: Option<MouseSnapshot>,
 }
 
 impl RawFrame {
@@ -54,7 +58,7 @@ impl RawFrame {
                 }
             }
         }
-        RawFrame { data, width: w, height: h, stride: w * 4, format: self.format, pts: self.pts }
+        RawFrame { data, width: w, height: h, stride: w * 4, format: self.format, pts: self.pts, mouse: self.mouse.clone() }
     }
 
     /// Returns a copy cropped to the given rectangle (clamped to the frame bounds).
@@ -68,7 +72,7 @@ impl RawFrame {
             let start = (row * self.stride + x * 4) as usize;
             data.extend_from_slice(&self.data[start..start + (w * 4) as usize]);
         }
-        RawFrame { data, width: w, height: h, stride: w * 4, format: self.format, pts: self.pts }
+        RawFrame { data, width: w, height: h, stride: w * 4, format: self.format, pts: self.pts, mouse: self.mouse.clone() }
     }
 }
 
@@ -161,7 +165,7 @@ mod tests {
         for _ in 0..w * h {
             data.extend_from_slice(&bgra);
         }
-        RawFrame { data, width: w, height: h, stride: w * 4, format: PixelFormat::Bgra, pts: Duration::ZERO }
+        RawFrame { data, width: w, height: h, stride: w * 4, format: PixelFormat::Bgra, pts: Duration::ZERO, mouse: None }
     }
 
     #[test]

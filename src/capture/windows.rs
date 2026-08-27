@@ -74,7 +74,7 @@ impl GraphicsCaptureApiHandler for Handler {
         let (w, h) = (buffer.width(), buffer.height());
         let data = buffer.as_nopadding_buffer(&mut self.scratch).to_vec();
         self.frames += 1;
-        let raw = RawFrame { data, width: w, height: h, stride: w * 4, format: PixelFormat::Bgra, pts };
+        let raw = RawFrame { data, width: w, height: h, stride: w * 4, format: PixelFormat::Bgra, pts, mouse: None };
         if !(self.flags.sink)(raw) {
             control.stop();
         }
