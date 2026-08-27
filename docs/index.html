@@ -133,30 +133,32 @@
   .btn svg { width: 18px; height: 18px; }
 
   /* ---------- Hero ---------- */
-  .hero { padding: 96px 0 72px; text-align: center; }
-  .hero-badge {
-    display: inline-flex; align-items: center; gap: 8px;
-    background: var(--bg-elevated); border: 1px solid var(--separator);
-    color: var(--label-secondary); font-size: 13px; font-weight: 600;
-    padding: 6px 12px 6px 8px; border-radius: 999px; margin-bottom: 26px;
+  .hero { padding: 96px 0 72px; text-align: left; }
+  .hero-top {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    gap: 32px 48px; align-items: start;
   }
-  .hero-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
   .hero h1 {
     font-size: clamp(44px, 8vw, 76px);
     line-height: 1.04; font-weight: 700; letter-spacing: -0.035em;
-    max-width: 14ch; margin: 0 auto 20px;
+    max-width: 14ch; margin: 0 0 20px;
   }
   .hero h1 span { color: var(--label-secondary); }
   .hero p.lead {
     font-size: clamp(18px, 2.4vw, 22px);
     color: var(--label-secondary);
-    max-width: 44ch; margin: 0 auto 36px; line-height: 1.45;
+    max-width: 44ch; margin: 0 0 36px; line-height: 1.45;
   }
-  .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .hero-actions { display: flex; gap: 12px; justify-content: flex-start; flex-wrap: wrap; }
   .hero-meta {
-    margin-top: 28px; display: flex; gap: 8px 22px; justify-content: center; flex-wrap: wrap;
+    margin-top: 28px; display: flex; gap: 8px 22px; justify-content: flex-start; flex-wrap: wrap;
     color: var(--label-tertiary); font-size: 14px; font-weight: 500;
   }
+  .hero-download { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; padding-top: 10px; }
+  .btn-download { padding: 12px 20px; font-size: 16px; white-space: nowrap; }
+  .btn-download svg { width: 20px; height: 20px; }
+  .hero-download small { color: var(--label-tertiary); font-size: 13px; font-weight: 500; }
+  .hero-download small a { color: inherit; }
   .hero-meta span { display: inline-flex; align-items: center; gap: 6px; }
   .hero-meta svg { width: 14px; height: 14px; }
 
@@ -401,6 +403,8 @@
   @media (max-width: 700px) {
     .nav { display: none; }
     .hero { padding: 64px 0 48px; }
+    .hero-top { grid-template-columns: 1fr; }
+    .hero-download { align-items: flex-start; padding-top: 0; }
     .grid, .cols, .limits { grid-template-columns: 1fr; }
     .card.wide { grid-column: auto; }
     .list-row { grid-template-columns: 1fr; gap: 6px; }
@@ -451,8 +455,16 @@
   <!-- ===== Hero ===== -->
   <section class="hero">
     <div class="wrap">
-      <div class="hero-badge"><span class="dot" aria-hidden="true"></span> v0.1 · Apache-2.0 · Rust</div>
-      <h1>Screen recording, <span>with nothing to install.</span></h1>
+      <div class="hero-top">
+        <h1>Screen recording, <span>with nothing to install.</span></h1>
+        <div class="hero-download">
+          <a class="btn btn-primary btn-download" id="dl-win" href="https://github.com/catalingrigoriev285/openclip/releases/latest" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10.5 4.4v7.1H3V5.5zm8.5-1.3L21 3v8.5h-9.5V4.2zM3 12.5h7.5v7.1L3 18.5v-6zm8.5 0H21V21l-9.5-1.3v-7.2z"/></svg>
+            Download for Windows
+          </a>
+          <small id="dl-note">Latest release from <a href="https://github.com/catalingrigoriev285/openclip/releases" target="_blank" rel="noopener">GitHub</a></small>
+        </div>
+      </div>
       <p class="lead">
         openclip records a monitor, a window or a dragged region — with system audio and your microphone —
         straight to a standard MP4. No ffmpeg. No system codecs. One binary.
@@ -743,6 +755,30 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
         el.parentElement.title = n + ' stars on GitHub';
       }
     } catch (_) { /* keep fallback label */ }
+  })();
+
+  // Point the download button at the Windows asset of the latest GitHub release.
+  (async function () {
+    const btn = document.getElementById('dl-win');
+    const note = document.getElementById('dl-note');
+    try {
+      const r = await fetch('https://api.github.com/repos/catalingrigoriev285/openclip/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
+      if (!r.ok) return;
+      const rel = await r.json();
+      const assets = Array.isArray(rel.assets) ? rel.assets : [];
+      const isWin = function (a) { return /win|windows|x86_64-pc|msvc/i.test(a.name) || /\.(exe|msi)$/i.test(a.name); };
+      const asset = assets.find(isWin);
+      if (asset) {
+        btn.href = asset.browser_download_url;
+        btn.removeAttribute('target');
+        btn.setAttribute('download', asset.name);
+        var mb = asset.size ? ' · ' + (asset.size / 1048576).toFixed(1) + ' MB' : '';
+        note.textContent = (rel.tag_name || 'Latest') + ' · ' + asset.name + mb;
+      } else if (rel.html_url) {
+        btn.href = rel.html_url;
+        note.textContent = (rel.tag_name || 'Latest release') + ' · see release assets';
+      }
+    } catch (_) { /* keep releases/latest fallback */ }
   })();
 
   // Copy buttons for code blocks.

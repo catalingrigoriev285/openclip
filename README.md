@@ -27,18 +27,18 @@ Installing [nasm](https://www.nasm.us/) before building enables OpenH264's assem
 
 ## Usage
 
-The window is laid out like a classic recorder: a toolbar on top, a navigation on the left and pages on the right.
+The window is laid out like a classic recorder (about 800×640): a toolbar on top, a navigation on the left (Home / General / Video / Image / About) and pages on the right.
 
-1. **Toolbar** – pick a recording mode (**Region** opens the on-screen selector: drag a rectangle, Esc cancels; **Monitor**; **Window**), toggle **system audio**, **microphone** and **cursor**, then press the round **REC** button. The camera button saves a PNG snapshot of the current source.
-2. **Home** – a file browser for your output folder with **Videos / Images / Audios** tabs (newest first, with sizes; double-click or **Play** opens the file, **Folder** reveals it, **Delete** asks for confirmation) and, right of the divider, a live preview of exactly what will be recorded — cursor and mouse effects included — with the monitor/window/region selector.
-3. **Video** sets frame rate, bitrate and full/half size; **Mouse** configures mouse effects (below); **Audio** picks the microphone device; **General** sets the output folder and file-name prefix.
+1. **Toolbar** – pick a recording mode (**Region** opens the on-screen selector: drag a rectangle, Esc cancels; **Monitor**; **Window**), toggle **system audio**, **microphone** and **cursor**, then press the round **REC** button. **⏸** pauses and resumes (paused time is cut out of the file, video and audio stay in sync); the camera button saves a PNG snapshot.
+2. **Home** – a file browser for your output folder with **Videos / Images / Audios** tabs (newest first, with sizes; double-click or **Play** opens the file, **Folder** reveals it, **Delete** asks for confirmation). The **Preview** tab shows a live view of exactly what will be recorded — cursor and mouse effects included — together with the monitor/window/region selector; the preview capture only runs while that tab is open. The status strip's **Change…** button jumps there.
+3. **Video** has three tabs: **Record** (cursor / click / highlight toggles, size, and the format summary boxes), **Format** (codec, frame rate, bitrate, size; system audio, microphone and device) and **Mouse** (mouse effects, below). **General** sets the output folder and file-name prefix.
 4. Press **REC** again (it turns into a stop button) to finish. Files are written as `<prefix>-YYYYMMDD-HHMMSS.mp4` into the chosen folder (defaults to `~/Videos`).
 
-"Half size" halves both dimensions, which is the easiest way to keep up on slow machines or 4K displays. The status strip shows elapsed time, encoded fps, dropped frames and file size while recording. Frames are dropped (never desynchronised) when the encoder cannot keep up, and the encoder may skip frames to hold the bitrate; each frame carries its real capture timestamp, so playback timing stays correct either way. When the screen is static the last frame is re-encoded at the target rate so the video keeps a steady cadence.
+"Half size" halves both dimensions, which is the easiest way to keep up on slow machines or 4K displays. The status strip shows elapsed (recorded) time, encoded fps, dropped frames and file size while recording. Frames are dropped (never desynchronised) when the encoder cannot keep up, and the encoder may skip frames to hold the bitrate; each frame carries its real capture timestamp, so playback timing stays correct either way. When the screen is static the last frame is re-encoded at the target rate so the video keeps a steady cadence.
 
 ### Mouse effects
 
-The **Mouse** page mirrors the classic "mouse effects" panel:
+The **Video → Mouse** tab mirrors the classic "mouse effects" panel:
 
 - **Show mouse cursor** with a **Size** (50–300 %). At 100 % the real cursor is captured natively (exact shape); at any other size the app hides the native cursor and draws its own scalable arrow.
 - **Click effect** – an expanding ring on every press, with separate **left / right click colours** and a size.
@@ -51,6 +51,7 @@ Effects are painted onto the captured frames themselves (in the encode thread, a
 
 ```sh
 cargo run --release --example capture_to_mp4 -- 10 out.mp4      # record the primary monitor for 10 s
+                                    # flags: --half --mic --no-audio --fx --region X,Y,W,H --window TITLE --pause-at S --resume-at S
 cargo run --release --example bench_encode -- 1920 1080 5       # encoder throughput on synthetic content
 ```
 

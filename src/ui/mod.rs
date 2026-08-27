@@ -1,6 +1,6 @@
 //! egui application, laid out in the style of classic recorder tools: a top
-//! toolbar (recording modes, audio toggles, REC), a left navigation with
-//! settings pages, a file browser + live preview on the Home page.
+//! toolbar (recording modes, audio toggles, pause, REC), a left navigation
+//! with settings pages, and a file browser (+ optional preview tab) on Home.
 
 mod library;
 pub mod picker;
@@ -43,10 +43,42 @@ enum Tab {
     Home,
     General,
     Video,
-    Mouse,
-    Audio,
     Image,
     About,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeTab {
+    Videos,
+    Images,
+    Audios,
+    Preview,
+}
+
+impl HomeTab {
+    fn library(self) -> Option<LibraryTab> {
+        match self {
+            HomeTab::Videos => Some(LibraryTab::Videos),
+            HomeTab::Images => Some(LibraryTab::Images),
+            HomeTab::Audios => Some(LibraryTab::Audios),
+            HomeTab::Preview => None,
+        }
+    }
+
+    fn from_library(tab: LibraryTab) -> Self {
+        match tab {
+            LibraryTab::Videos => HomeTab::Videos,
+            LibraryTab::Images => HomeTab::Images,
+            LibraryTab::Audios => HomeTab::Audios,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VideoTab {
+    Record,
+    Format,
+    Mouse,
 }
 
 enum State {
@@ -55,8 +87,9 @@ enum State {
     Recording(Recorder),
 }
 
-/// Live low-frame-rate capture of the selected source shown while idle, so the
-/// preview (cursor and mouse effects included) matches what will be recorded.
+/// Live low-frame-rate capture of the selected source shown on the Preview
+/// tab, so the preview (cursor and mouse effects included) matches what will
+/// be recorded. Only runs while the tab is visible.
 struct LivePreview {
     handle: Option<CaptureHandle>,
     source: Option<Source>,
@@ -110,7 +143,8 @@ impl LivePreview {
                 let s = sampler.get_or_insert_with(MouseSampler::new);
                 s.sample();
                 n += 1;
-                if is_window && n.is_multiple_of(30)
+                if is_window
+                    && n.is_multiple_of(30)
                     && let Ok(o) = source_origin(&src)
                 {
                     origin = o;
@@ -134,6 +168,10 @@ impl LivePreview {
             let _ = h.stop();
         }
         self.source = None;
+    }
+
+    fn is_running(&self) -> bool {
+        self.handle.is_some()
     }
 
     fn take(&self) -> Option<PreviewImage> {
@@ -160,6 +198,8 @@ pub struct App {
     output_dir: PathBuf,
     file_prefix: String,
     tab: Tab,
+    home_tab: HomeTab,
+    video_tab: VideoTab,
     state: State,
     live: LivePreview,
     library: Library,
@@ -197,6 +237,8 @@ impl App {
             output_dir,
             file_prefix: "openclip".into(),
             tab: Tab::Home,
+            home_tab: HomeTab::Videos,
+            video_tab: VideoTab::Record,
             state: State::Idle,
             live: LivePreview::new(),
             library,
@@ -247,6 +289,11 @@ impl App {
         matches!(self.state, State::Recording(_))
     }
 
+    fn show_preview_tab(&mut self) {
+        self.tab = Tab::Home;
+        self.home_tab = HomeTab::Preview;
+    }
+
     fn timestamped(&self, ext: &str) -> PathBuf {
         let prefix = if self.file_prefix.trim().is_empty() { "openclip" } else { self.file_prefix.trim() };
         self.output_dir.join(format!("{prefix}-{}.{ext}", timestamp()))
@@ -256,6 +303,9 @@ impl App {
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         self.message = Some((format!("{what} saved: {} ({})", path.display(), human_bytes(size)), false));
         self.library.select_path(&path, &self.output_dir);
+        if self.tab == Tab::Home && self.home_tab != HomeTab::Preview {
+            self.home_tab = HomeTab::from_library(self.library.tab);
+        }
         self.last_file = Some(path);
     }
 
@@ -296,6 +346,16 @@ impl App {
         }
     }
 
+    fn toggle_pause(&mut self) {
+        if let State::Recording(rec) = &mut self.state {
+            if rec.is_paused() {
+                rec.resume();
+            } else {
+                rec.pause();
+            }
+        }
+    }
+
     fn take_snapshot(&mut self) {
         let Some(source) = self.selected_source() else {
             self.message = Some(("Select something to capture first.".into(), true));
@@ -324,6 +384,7 @@ impl App {
     }
 
     fn poll_preview(&mut self, ctx: &egui::Context) {
+        let preview_visible = self.tab == Tab::Home && self.home_tab == HomeTab::Preview;
         match &self.state {
             State::Recording(rec) => {
                 if let Some(img) = rec.preview().take() {
@@ -331,9 +392,13 @@ impl App {
                 }
             }
             State::Idle => {
-                self.live.ensure(self.selected_source(), &self.mouse_fx, ctx);
-                if let Some(img) = self.live.take() {
-                    self.upload_preview(ctx, &img);
+                if preview_visible {
+                    self.live.ensure(self.selected_source(), &self.mouse_fx, ctx);
+                    if let Some(img) = self.live.take() {
+                        self.upload_preview(ctx, &img);
+                    }
+                } else if self.live.is_running() {
+                    self.live.stop();
                 }
             }
             State::Picking(_) => {}
@@ -344,10 +409,14 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let recording = self.is_recording();
+        let paused = matches!(&self.state, State::Recording(r) if r.is_paused());
         ui.horizontal(|ui| {
-            ui.add_space(6.0);
-            ui.label(RichText::new("OPENCLIP").strong().size(22.0).color(TEXT_BRIGHT));
-            ui.add_space(14.0);
+            ui.add_space(4.0);
+            ui.add_sized(
+                Vec2::new(100.0, 54.0),
+                egui::Label::new(RichText::new("OPENCLIP").strong().size(20.0).color(TEXT_BRIGHT)),
+            );
+            ui.add_space(4.0);
 
             ui.add_enabled_ui(!recording, |ui| {
                 for (kind, icon, label) in [
@@ -356,14 +425,10 @@ impl App {
                     (SourceKind::Window, "▣", "Window"),
                 ] {
                     if mode_button(ui, icon, label, self.source_kind == kind).clicked() {
-                        self.source_kind = kind;
-                        self.tab = Tab::Home;
-                        if kind == SourceKind::Region && self.region.is_none() {
-                            self.open_picker();
-                        }
+                        self.select_mode(kind);
                     }
                 }
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 toggle_button(ui, "🔊", "System audio", &mut self.system_audio);
                 toggle_button(ui, "🎤", "Microphone", &mut self.mic_enabled);
                 let mut show_cursor = self.mouse_fx.read().unwrap().show_cursor;
@@ -375,19 +440,36 @@ impl App {
             });
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(8.0);
+                ui.add_space(4.0);
                 if icon_button(ui, "📷", "Take a snapshot (PNG)").clicked() {
                     self.take_snapshot();
                 }
-                ui.add_space(6.0);
                 let can_record = self.selected_source().is_some();
                 match rec_button(ui, recording, can_record) {
                     RecClick::Start => self.start_recording(ctx),
                     RecClick::Stop => self.stop_recording(),
                     RecClick::None => {}
                 }
+                if pause_button(ui, recording, paused) {
+                    self.toggle_pause();
+                }
             });
         });
+    }
+
+    /// Switches recording mode and opens the Preview tab when a choice is needed.
+    fn select_mode(&mut self, kind: SourceKind) {
+        self.source_kind = kind;
+        let needs_choice = match kind {
+            SourceKind::Window => true,
+            SourceKind::Monitor => self.monitors.len() > 1,
+            SourceKind::Region => false,
+        };
+        if kind == SourceKind::Region && self.region.is_none() {
+            self.open_picker();
+        } else if needs_choice {
+            self.show_preview_tab();
+        }
     }
 
     fn open_picker(&mut self) {
@@ -410,8 +492,15 @@ impl App {
                     let bytes = s.bytes_written.load(Ordering::Relaxed);
                     let (w, h) = (s.width.load(Ordering::Relaxed), s.height.load(Ordering::Relaxed));
                     let fps = if elapsed.as_secs_f64() > 0.5 { encoded as f64 / elapsed.as_secs_f64() } else { 0.0 };
-                    ui.label(RichText::new("●").color(REC_RED).size(16.0));
-                    ui.label(RichText::new(format!("REC  {}", format_duration(elapsed))).strong().color(TEXT_BRIGHT));
+                    if rec.is_paused() {
+                        ui.label(RichText::new("‖").color(WARN_YELLOW).size(16.0));
+                        ui.label(
+                            RichText::new(format!("PAUSED  {}", format_duration(elapsed))).strong().color(WARN_YELLOW),
+                        );
+                    } else {
+                        ui.label(RichText::new("●").color(REC_RED).size(16.0));
+                        ui.label(RichText::new(format!("REC  {}", format_duration(elapsed))).strong().color(TEXT_BRIGHT));
+                    }
                     ui.separator();
                     ui.label(format!("{w}×{h}   {fps:.1} fps   {dropped} dropped   {}", human_bytes(bytes)));
                     if let Some(n) = s.audio_note.lock().unwrap().as_ref() {
@@ -436,6 +525,12 @@ impl App {
                         "Please select a recording source".to_string()
                     };
                     ui.label(text);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        if ui.small_button("Change…").on_hover_text("Choose the monitor, window or region").clicked() {
+                            self.show_preview_tab();
+                        }
+                    });
                 }
             }
         });
@@ -449,8 +544,6 @@ impl App {
             (Tab::Home, "🏠", "Home"),
             (Tab::General, "⚙", "General"),
             (Tab::Video, "🎞", "Video"),
-            (Tab::Mouse, "🖱", "Mouse"),
-            (Tab::Audio, "🔊", "Audio"),
             (Tab::Image, "🖼", "Image"),
             (Tab::About, "ℹ", "About"),
         ] {
@@ -465,55 +558,44 @@ impl App {
             Tab::Home => self.page_home(ui),
             Tab::General => self.page_general(ui),
             Tab::Video => self.page_video(ui),
-            Tab::Mouse => self.page_mouse(ui),
-            Tab::Audio => self.page_audio(ui),
             Tab::Image => self.page_image(ui),
             Tab::About => self.page_about(ui),
         }
     }
 
-    // ----- Home: file browser | preview ------------------------------------------
+    // ----- Home: Videos | Images | Audios | Preview -----------------------------
 
     fn page_home(&mut self, ui: &mut egui::Ui) {
-        let recording = self.is_recording();
-        let total = ui.available_size();
-        let left_w = (total.x * 0.46).clamp(300.0, 520.0);
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(Vec2::new(left_w, total.y), Layout::top_down(Align::Min), |ui| {
-                ui.set_width(left_w);
-                ui.set_height(total.y);
-                self.library_panel(ui);
-            });
-            ui.add_space(8.0);
-            let (rule, _) = ui.allocate_exact_size(Vec2::new(1.0, total.y), Sense::hover());
-            ui.painter().vline(rule.center().x, rule.y_range(), Stroke::new(1.0, SEPARATOR));
-            ui.add_space(12.0);
-            let right_w = ui.available_width();
-            ui.allocate_ui_with_layout(Vec2::new(right_w, total.y), Layout::top_down(Align::Min), |ui| {
-                ui.set_width(right_w);
-                section_title(ui, "Preview");
+        let mut home_tab = self.home_tab;
+        tab_strip(
+            ui,
+            &[
+                (HomeTab::Videos, "Videos"),
+                (HomeTab::Images, "Images"),
+                (HomeTab::Audios, "Audios"),
+                (HomeTab::Preview, "Preview"),
+            ],
+            &mut home_tab,
+        );
+        if home_tab != self.home_tab {
+            self.home_tab = home_tab;
+            if let Some(lib) = home_tab.library() {
+                self.library.set_tab(lib, &self.output_dir);
+            }
+        }
+        ui.add_space(4.0);
+        match self.home_tab {
+            HomeTab::Preview => {
+                let recording = self.is_recording();
                 self.source_row(ui, recording);
                 ui.add_space(6.0);
                 self.preview_panel(ui);
-            });
-        });
+            }
+            _ => self.library_panel(ui),
+        }
     }
 
     fn library_panel(&mut self, ui: &mut egui::Ui) {
-        // Tab strip.
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            for tab in LibraryTab::ALL {
-                let selected = self.library.tab == tab;
-                let text = RichText::new(tab.label()).size(15.0);
-                let text = if selected { text.strong().color(TEXT_BRIGHT) } else { text.color(TEXT_NORMAL) };
-                let resp = ui.selectable_label(selected, text);
-                if resp.clicked() {
-                    self.library.set_tab(tab, &self.output_dir);
-                }
-                ui.add_space(6.0);
-            }
-        });
         self.library.refresh(&self.output_dir, false);
         // Folder row.
         ui.horizontal(|ui| {
@@ -687,6 +769,8 @@ impl App {
         section_title(ui, "Output");
         settings_row(ui, "Save to", |ui| {
             ui.label(RichText::new(self.output_dir.display().to_string()).color(TEXT_BRIGHT));
+        });
+        settings_row(ui, "", |ui| {
             if ui.button("Choose folder…").clicked()
                 && let Some(dir) = rfd::FileDialog::new().set_directory(&self.output_dir).pick_folder()
             {
@@ -698,8 +782,8 @@ impl App {
             }
         });
         settings_row(ui, "File name prefix", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.file_prefix).desired_width(200.0));
-            ui.label(RichText::new(format!("→ {}-YYYYMMDD-HHMMSS.mp4", self.file_prefix.trim())).color(TEXT_DIM));
+            ui.add(egui::TextEdit::singleline(&mut self.file_prefix).desired_width(160.0));
+            ui.label(RichText::new(format!("→ {}-YYYYMMDD-HHMMSS.mp4", self.file_prefix.trim())).color(TEXT_DIM).small());
         });
         ui.add_space(14.0);
         section_title(ui, "Sources");
@@ -711,11 +795,71 @@ impl App {
     }
 
     fn page_video(&mut self, ui: &mut egui::Ui) {
+        let mut vt = self.video_tab;
+        tab_strip(ui, &[(VideoTab::Record, "Record"), (VideoTab::Format, "Format"), (VideoTab::Mouse, "Mouse")], &mut vt);
+        self.video_tab = vt;
+        ui.add_space(6.0);
+        match self.video_tab {
+            VideoTab::Record => self.video_record_tab(ui),
+            VideoTab::Format => self.video_format_tab(ui),
+            VideoTab::Mouse => self.video_mouse_tab(ui),
+        }
+    }
+
+    fn video_record_tab(&mut self, ui: &mut egui::Ui) {
+        section_title(ui, "Record");
+        let current = self.mouse_fx.read().unwrap().clone();
+        let mut fx = current.clone();
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.checkbox(&mut fx.show_cursor, "Show mouse cursor");
+                ui.checkbox(&mut fx.click_effect, "Add mouse click effects");
+                ui.checkbox(&mut fx.highlight, "Add mouse highlight effect");
+            });
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                if ui.add(egui::Button::new("Settings").min_size(Vec2::new(150.0, 26.0))).clicked() {
+                    self.video_tab = VideoTab::Mouse;
+                }
+            });
+        });
+        if fx != current {
+            *self.mouse_fx.write().unwrap() = fx;
+        }
+        ui.add_space(6.0);
+        ui.add_enabled_ui(!self.is_recording(), |ui| {
+            settings_row(ui, "Size", |ui| {
+                ui.selectable_value(&mut self.half_resolution, false, "Full size");
+                ui.selectable_value(&mut self.half_resolution, true, "Half size");
+            });
+        });
+        ui.add_space(14.0);
         section_title(ui, "Format – MP4");
         let size = if self.half_resolution { "Half size" } else { "Full size" };
         format_box(ui, "Video", "H264 – OpenH264 (CBR)", &format!("{size}, {}fps, {} kbps", self.fps, self.bitrate_kbps));
-        ui.add_space(10.0);
+        format_box(ui, "Audio", "MP3 – MPEG-1 Layer III", &format!("48.0KHz, stereo, 160kbps – {}", self.audio_sources_label()));
+        ui.horizontal(|ui| {
+            ui.add_space(134.0);
+            if ui.add(egui::Button::new("Settings").min_size(Vec2::new(150.0, 26.0))).clicked() {
+                self.video_tab = VideoTab::Format;
+            }
+        });
+    }
+
+    fn audio_sources_label(&self) -> &'static str {
+        match (self.system_audio, self.mic_enabled) {
+            (true, true) => "system audio + microphone",
+            (true, false) => "system audio",
+            (false, true) => "microphone",
+            (false, false) => "no audio",
+        }
+    }
+
+    fn video_format_tab(&mut self, ui: &mut egui::Ui) {
+        section_title(ui, "Video");
         ui.add_enabled_ui(!self.is_recording(), |ui| {
+            settings_row(ui, "Codec", |ui| {
+                ui.label(RichText::new("H264 – OpenH264 (CBR), MP4 container").color(TEXT_BRIGHT));
+            });
             settings_row(ui, "Frame rate", |ui| {
                 for f in [15u32, 24, 30, 60] {
                     ui.selectable_value(&mut self.fps, f, format!("{f} fps"));
@@ -727,44 +871,64 @@ impl App {
             settings_row(ui, "Size", |ui| {
                 ui.selectable_value(&mut self.half_resolution, false, "Full size");
                 ui.selectable_value(&mut self.half_resolution, true, "Half size");
-                ui.label(RichText::new("(half size is faster and produces smaller files)").color(TEXT_DIM));
+            });
+            ui.label(
+                RichText::new(
+                    "Frames are timestamped, so dropped or skipped frames never desynchronise audio. \
+                     If the status bar reports drops at 1080p, choose Half size or a lower frame rate.",
+                )
+                .color(TEXT_DIM)
+                .small(),
+            );
+            ui.add_space(14.0);
+            section_title(ui, "Audio");
+            settings_row(ui, "Codec", |ui| {
+                ui.label(RichText::new("MP3 – 48.0KHz, stereo, 160kbps").color(TEXT_BRIGHT));
+            });
+            settings_row(ui, "System audio", |ui| {
+                ui.checkbox(&mut self.system_audio, "Record what you hear (speakers / headphones)");
+            });
+            settings_row(ui, "Microphone", |ui| {
+                ui.checkbox(&mut self.mic_enabled, "Record microphone");
+            });
+            settings_row(ui, "Device", |ui| {
+                ui.add_enabled_ui(self.mic_enabled && !self.mics.is_empty(), |ui| {
+                    let label = self.mics.get(self.mic_idx).cloned().unwrap_or("No input devices".into());
+                    let w = ui.available_width().min(360.0);
+                    egui::ComboBox::from_id_salt("mic").width(w).selected_text(label).show_ui(ui, |ui| {
+                        for (i, m) in self.mics.iter().enumerate() {
+                            ui.selectable_value(&mut self.mic_idx, i, m);
+                        }
+                    });
+                });
             });
         });
-        ui.add_space(14.0);
-        section_title(ui, "Performance");
-        ui.label(
-            RichText::new(
-                "Frames are timestamped, so dropped or skipped frames never desynchronise audio. \
-                 If the status bar reports drops at 1080p, choose Half size or a lower frame rate.",
-            )
-            .color(TEXT_DIM),
-        );
     }
 
-    fn page_mouse(&mut self, ui: &mut egui::Ui) {
+    fn video_mouse_tab(&mut self, ui: &mut egui::Ui) {
         section_title(ui, "Mouse effects");
         let current = self.mouse_fx.read().unwrap().clone();
         let mut fx = current.clone();
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
-                ui.set_width(440.0);
+                ui.set_width(350.0);
                 ui.checkbox(&mut fx.show_cursor, "Show mouse cursor");
                 ui.add_enabled_ui(fx.show_cursor, |ui| {
                     settings_row(ui, "      Size", |ui| {
                         size_combo(ui, "cursor_size", &mut fx.cursor_size);
                         if fx.cursor_size != 100 {
-                            ui.label(RichText::new("(app-drawn arrow)").color(TEXT_DIM));
+                            ui.label(RichText::new("(app-drawn)").color(TEXT_DIM).small());
                         }
                     });
                 });
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 ui.checkbox(&mut fx.click_effect, "Add mouse click effect");
                 ui.add_enabled_ui(fx.click_effect, |ui| {
                     settings_row(ui, "      Size", |ui| size_combo(ui, "click_size", &mut fx.click_size));
                     settings_row(ui, "      Left click color", |ui| color_swatch(ui, &mut fx.left_color));
                     settings_row(ui, "      Right click color", |ui| color_swatch(ui, &mut fx.right_color));
                 });
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 ui.checkbox(&mut fx.highlight, "Add mouse highlight effect");
                 ui.add_enabled_ui(fx.highlight, |ui| {
                     settings_row(ui, "      Size", |ui| size_combo(ui, "highlight_size", &mut fx.highlight_size));
@@ -775,13 +939,13 @@ impl App {
                     });
                 });
             });
-            ui.add_space(20.0);
+            ui.add_space(12.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new("Preview").color(TEXT_NORMAL));
                 ui.add_space(4.0);
                 self.fx_preview(ui, &fx);
                 ui.add_space(6.0);
-                ui.label(RichText::new("Click inside the preview to test the click effect.").color(TEXT_DIM).small());
+                ui.label(RichText::new("Click inside to test the click effect.").color(TEXT_DIM).small());
             });
         });
         if fx != current {
@@ -791,10 +955,10 @@ impl App {
 
     /// Checkerboard square showing the cursor, halo and (on click) ripples.
     fn fx_preview(&mut self, ui: &mut egui::Ui, fx: &MouseFx) {
-        let size = Vec2::splat(220.0);
+        let size = Vec2::splat(200.0);
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         let p = ui.painter_at(rect);
-        let cell = 11.0;
+        let cell = 10.0;
         let cols = (size.x / cell).ceil() as i32;
         for cy in 0..cols {
             for cx in 0..cols {
@@ -852,34 +1016,6 @@ impl App {
         resp.on_hover_cursor(egui::CursorIcon::Crosshair);
     }
 
-    fn page_audio(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, "Format – MP4");
-        let sources = match (self.system_audio, self.mic_enabled) {
-            (true, true) => "system audio + microphone",
-            (true, false) => "system audio",
-            (false, true) => "microphone",
-            (false, false) => "no audio",
-        };
-        format_box(ui, "Audio", "MP3 – MPEG-1 Layer III", &format!("48.0KHz, stereo, 160kbps – {sources}"));
-        ui.add_space(10.0);
-        ui.add_enabled_ui(!self.is_recording(), |ui| {
-            settings_row(ui, "System audio", |ui| {
-                ui.checkbox(&mut self.system_audio, "Record what you hear (speakers / headphones)");
-            });
-            settings_row(ui, "Microphone", |ui| {
-                ui.checkbox(&mut self.mic_enabled, "Record microphone");
-                ui.add_enabled_ui(self.mic_enabled && !self.mics.is_empty(), |ui| {
-                    let label = self.mics.get(self.mic_idx).cloned().unwrap_or("No input devices".into());
-                    egui::ComboBox::from_id_salt("mic").width(320.0).selected_text(label).show_ui(ui, |ui| {
-                        for (i, m) in self.mics.iter().enumerate() {
-                            ui.selectable_value(&mut self.mic_idx, i, m);
-                        }
-                    });
-                });
-            });
-        });
-    }
-
     fn page_image(&mut self, ui: &mut egui::Ui) {
         section_title(ui, "Snapshot");
         format_box(ui, "Image", "PNG", "Full size, saved next to your recordings");
@@ -888,7 +1024,9 @@ impl App {
             if ui.button("📷  Take snapshot now").clicked() {
                 self.take_snapshot();
             }
-            ui.label(RichText::new(format!("of {}", self.source_label())).color(TEXT_DIM));
+        });
+        settings_row(ui, "Source", |ui| {
+            ui.label(RichText::new(self.source_label()).color(TEXT_DIM));
         });
     }
 
@@ -915,7 +1053,7 @@ impl App {
             match &self.message {
                 Some((msg, is_err)) => {
                     let color = if *is_err { ERR_RED } else { OK_GREEN };
-                    ui.label(RichText::new(msg).color(color));
+                    ui.label(RichText::new(msg).color(color).small());
                     if !*is_err
                         && let Some(path) = self.last_file.clone()
                         && ui.small_button("Open folder").clicked()
@@ -978,21 +1116,21 @@ impl eframe::App for App {
         }
 
         egui::Panel::top("toolbar")
-            .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(4, 8)))
+            .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(4, 6)))
             .show(ui, |ui| self.toolbar(ui, &ctx));
         egui::Panel::top("status")
-            .frame(egui::Frame::new().fill(STATUS_BG).inner_margin(Margin::symmetric(4, 6)))
+            .frame(egui::Frame::new().fill(STATUS_BG).inner_margin(Margin::symmetric(4, 5)))
             .show(ui, |ui| self.status_strip(ui, &ctx));
         egui::Panel::bottom("footer")
-            .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(4, 6)))
+            .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(4, 5)))
             .show(ui, |ui| self.footer(ui));
         egui::Panel::left("nav")
             .resizable(false)
-            .exact_size(170.0)
+            .exact_size(160.0)
             .frame(egui::Frame::new().fill(NAV_BG))
             .show(ui, |ui| self.nav(ui));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(PAGE_BG).inner_margin(Margin::same(18)))
+            .frame(egui::Frame::new().fill(PAGE_BG).inner_margin(Margin::same(14)))
             .show(ui, |ui| self.page(ui));
 
         self.delete_dialog(&ctx);
@@ -1008,9 +1146,31 @@ impl eframe::App for App {
 
 // ----- widgets -------------------------------------------------------------------
 
+/// Horizontal tab strip (Videos | Images | …). Returns true when the selection changed.
+fn tab_strip<T: PartialEq + Copy>(ui: &mut egui::Ui, items: &[(T, &str)], selected: &mut T) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        for (value, label) in items {
+            let is_sel = *selected == *value;
+            let text = RichText::new(*label).size(15.0);
+            let text = if is_sel { text.strong().color(TEXT_BRIGHT) } else { text.color(TEXT_NORMAL) };
+            if ui.selectable_label(is_sel, text).clicked() && !is_sel {
+                *selected = *value;
+                changed = true;
+            }
+            ui.add_space(4.0);
+        }
+    });
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().hline(rect.x_range(), rect.top() + 1.0, Stroke::new(1.0, SEPARATOR));
+    ui.add_space(4.0);
+    changed
+}
+
 /// Large recording-mode button (icon over label), highlighted when selected.
 fn mode_button(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> egui::Response {
-    let size = Vec2::new(92.0, 58.0);
+    let size = Vec2::new(84.0, 54.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let fill = if selected {
         ACCENT
@@ -1022,14 +1182,14 @@ fn mode_button(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> eg
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(3), fill);
     let text_color = if ui.is_enabled() { TEXT_BRIGHT } else { TEXT_DIM };
-    p.text(rect.center() - Vec2::new(0.0, 9.0), Align2::CENTER_CENTER, icon, FontId::proportional(22.0), text_color);
-    p.text(rect.center() + Vec2::new(0.0, 15.0), Align2::CENTER_CENTER, label, FontId::proportional(12.0), text_color);
+    p.text(rect.center() - Vec2::new(0.0, 8.0), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), text_color);
+    p.text(rect.center() + Vec2::new(0.0, 14.0), Align2::CENTER_CENTER, label, FontId::proportional(12.0), text_color);
     resp.on_hover_text(format!("{label} recording mode"))
 }
 
 /// Square toggle with an icon; a small ✕ marks the "off" state.
 fn toggle_button(ui: &mut egui::Ui, icon: &str, tip: &str, value: &mut bool) {
-    let size = Vec2::new(58.0, 58.0);
+    let size = Vec2::new(50.0, 54.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.clicked() {
         *value = !*value;
@@ -1038,22 +1198,51 @@ fn toggle_button(ui: &mut egui::Ui, icon: &str, tip: &str, value: &mut bool) {
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(3), fill);
     let color = if *value { TEXT_BRIGHT } else { TEXT_DIM };
-    p.text(rect.center() - Vec2::new(0.0, 6.0), Align2::CENTER_CENTER, icon, FontId::proportional(22.0), color);
+    p.text(rect.center() - Vec2::new(0.0, 6.0), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), color);
     if *value {
-        p.text(rect.center() + Vec2::new(0.0, 17.0), Align2::CENTER_CENTER, "on", FontId::proportional(11.0), OK_GREEN);
+        p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, "on", FontId::proportional(11.0), OK_GREEN);
     } else {
-        p.text(rect.center() + Vec2::new(0.0, 17.0), Align2::CENTER_CENTER, "✕", FontId::proportional(12.0), ERR_RED);
+        p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, "✕", FontId::proportional(12.0), ERR_RED);
     }
     resp.on_hover_text(format!("{tip}: {}", if *value { "on" } else { "off" }));
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(46.0, 46.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(40.0, 44.0), Sense::click());
     let fill = if resp.hovered() { BUTTON_HOVER } else { Color32::TRANSPARENT };
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(3), fill);
-    p.text(rect.center(), Align2::CENTER_CENTER, icon, FontId::proportional(24.0), TEXT_BRIGHT);
+    p.text(rect.center(), Align2::CENTER_CENTER, icon, FontId::proportional(22.0), TEXT_BRIGHT);
     resp.on_hover_text(tip)
+}
+
+/// Pause / resume button next to REC; only active while recording. Returns true on click.
+fn pause_button(ui: &mut egui::Ui, recording: bool, paused: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(44.0, 44.0), Sense::click());
+    let p = ui.painter();
+    let fill = if resp.hovered() && recording { BUTTON_HOVER } else { Color32::TRANSPARENT };
+    p.rect_filled(rect, CornerRadius::same(3), fill);
+    let color = if !recording {
+        TEXT_DIM
+    } else if paused {
+        WARN_YELLOW
+    } else {
+        TEXT_BRIGHT
+    };
+    let c = rect.center();
+    if paused {
+        // Play triangle.
+        p.add(egui::Shape::convex_polygon(
+            vec![c + Vec2::new(-7.0, -10.0), c + Vec2::new(10.0, 0.0), c + Vec2::new(-7.0, 10.0)],
+            color,
+            Stroke::NONE,
+        ));
+    } else {
+        p.rect_filled(egui::Rect::from_center_size(c + Vec2::new(-5.0, 0.0), Vec2::new(5.0, 20.0)), CornerRadius::same(1), color);
+        p.rect_filled(egui::Rect::from_center_size(c + Vec2::new(5.0, 0.0), Vec2::new(5.0, 20.0)), CornerRadius::same(1), color);
+    }
+    let resp = resp.on_hover_text(if paused { "Resume recording" } else { "Pause recording" });
+    recording && resp.clicked()
 }
 
 enum RecClick {
@@ -1064,20 +1253,20 @@ enum RecClick {
 
 /// The big round REC button; shows a stop square while recording.
 fn rec_button(ui: &mut egui::Ui, recording: bool, enabled: bool) -> RecClick {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(66.0, 66.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(60.0, 60.0), Sense::click());
     let center = rect.center();
     let p = ui.painter();
     let color = if !enabled && !recording { TEXT_DIM } else { REC_RED };
     let hovered = resp.hovered() && (enabled || recording);
     if recording {
-        p.circle_filled(center, 30.0, if hovered { REC_RED_HOVER } else { REC_RED });
-        p.rect_filled(egui::Rect::from_center_size(center, Vec2::splat(20.0)), CornerRadius::same(2), TEXT_BRIGHT);
+        p.circle_filled(center, 27.0, if hovered { REC_RED_HOVER } else { REC_RED });
+        p.rect_filled(egui::Rect::from_center_size(center, Vec2::splat(18.0)), CornerRadius::same(2), TEXT_BRIGHT);
     } else {
-        p.circle_stroke(center, 30.0, Stroke::new(3.0, color));
+        p.circle_stroke(center, 27.0, Stroke::new(3.0, color));
         if hovered {
-            p.circle_filled(center, 27.0, Color32::from_rgba_unmultiplied(230, 40, 40, 40));
+            p.circle_filled(center, 24.0, Color32::from_rgba_unmultiplied(230, 40, 40, 40));
         }
-        p.text(center, Align2::CENTER_CENTER, "REC", FontId::proportional(18.0), color);
+        p.text(center, Align2::CENTER_CENTER, "REC", FontId::proportional(17.0), color);
     }
     let resp = resp.on_hover_text(if recording { "Stop recording" } else { "Start recording" });
     if !resp.clicked() {
@@ -1117,7 +1306,7 @@ fn section_title(ui: &mut egui::Ui, title: &str) {
 
 fn settings_row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.add_sized(Vec2::new(150.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
+        ui.add_sized(Vec2::new(130.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
         add(ui);
     });
     ui.add_space(4.0);
@@ -1143,7 +1332,7 @@ fn color_swatch(ui: &mut egui::Ui, rgb: &mut [u8; 3]) {
 /// Dark "format summary" box like the Video/Audio boxes in classic recorders.
 fn format_box(ui: &mut egui::Ui, label: &str, title: &str, detail: &str) {
     ui.horizontal(|ui| {
-        ui.add_sized(Vec2::new(150.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
+        ui.add_sized(Vec2::new(130.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
         let width = ui.available_width().min(520.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::hover());
         let p = ui.painter();
@@ -1152,6 +1341,7 @@ fn format_box(ui: &mut egui::Ui, label: &str, title: &str, detail: &str) {
         p.text(rect.min + Vec2::new(12.0, 12.0), Align2::LEFT_TOP, title, FontId::proportional(14.0), TEXT_BRIGHT);
         p.text(rect.min + Vec2::new(12.0, 34.0), Align2::LEFT_TOP, detail, FontId::proportional(13.0), TEXT_DIM);
     });
+    ui.add_space(4.0);
 }
 
 // ----- helpers -------------------------------------------------------------------

@@ -100,6 +100,10 @@ pub type PreviewCallback = Arc<dyn Fn() + Send + Sync>;
 
 pub struct Recorder {
     stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    /// Total paused wall time in microseconds (grows only at resume).
+    paused_total_us: Arc<AtomicU64>,
+    pause_started: Option<Instant>,
     capture: Option<CaptureHandle>,
     encode_thread: Option<JoinHandle<Result<()>>>,
     audio_thread: Option<JoinHandle<Result<()>>>,
@@ -113,6 +117,8 @@ impl Recorder {
     pub fn start(config: RecordConfig, on_preview: Option<PreviewCallback>) -> Result<Recorder> {
         let epoch = Instant::now();
         let stop = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let paused_total_us = Arc::new(AtomicU64::new(0));
         let stats = Arc::new(Stats::default());
         let preview = Arc::new(PreviewSlot::default());
         // Timeline origin (first video pts) shared with the audio thread, in µs; u64::MAX = unknown.
@@ -122,14 +128,16 @@ impl Recorder {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<Mp3Frame>(256);
 
         let audio_thread = if config.wants_audio() {
-            Some(spawn_audio_thread(
-                config.clone(),
+            Some(spawn_audio_thread(AudioArgs {
+                config: config.clone(),
                 epoch,
-                stop.clone(),
-                audio_origin.clone(),
-                audio_tx,
-                stats.clone(),
-            )?)
+                stop: stop.clone(),
+                paused: paused.clone(),
+                paused_total: paused_total_us.clone(),
+                origin: audio_origin.clone(),
+                tx: audio_tx,
+                stats: stats.clone(),
+            })?)
         } else {
             drop(audio_tx);
             None
@@ -142,6 +150,8 @@ impl Recorder {
             audio_rx,
             audio_origin,
             stop: stop.clone(),
+            paused: paused.clone(),
+            paused_total: paused_total_us.clone(),
             stats: stats.clone(),
             preview: preview.clone(),
             on_preview,
@@ -151,6 +161,9 @@ impl Recorder {
 
         Ok(Recorder {
             stop,
+            paused,
+            paused_total_us,
+            pause_started: None,
             capture: Some(capture),
             encode_thread: Some(encode_thread),
             audio_thread,
@@ -169,8 +182,31 @@ impl Recorder {
         &self.preview
     }
 
+    /// Recorded time: wall time minus everything spent paused.
     pub fn elapsed(&self) -> Duration {
-        self.started.elapsed()
+        let paused = Duration::from_micros(self.paused_total_us.load(Ordering::Relaxed))
+            + self.pause_started.map(|t| t.elapsed()).unwrap_or_default();
+        self.started.elapsed().saturating_sub(paused)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.pause_started.is_some()
+    }
+
+    /// Pauses recording: frames and audio captured until [`Self::resume`] are discarded.
+    pub fn pause(&mut self) {
+        if self.pause_started.is_none() {
+            self.pause_started = Some(Instant::now());
+            self.paused.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Resumes recording; the paused wall time is removed from the timeline.
+    pub fn resume(&mut self) {
+        if let Some(t) = self.pause_started.take() {
+            self.paused_total_us.fetch_add(t.elapsed().as_micros() as u64, Ordering::SeqCst);
+            self.paused.store(false, Ordering::SeqCst);
+        }
     }
 
     pub fn output(&self) -> &PathBuf {
@@ -184,6 +220,7 @@ impl Recorder {
 
     /// Stops recording and finalizes the file.
     pub fn stop(mut self) -> Result<PathBuf> {
+        self.resume();
         self.stop.store(true, Ordering::SeqCst);
         if let Some(capture) = self.capture.take()
             && let Err(e) = capture.stop()
@@ -258,6 +295,8 @@ struct EncodeArgs {
     audio_rx: Receiver<Mp3Frame>,
     audio_origin: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    paused_total: Arc<AtomicU64>,
     stats: Arc<Stats>,
     preview: Arc<PreviewSlot>,
     on_preview: Option<PreviewCallback>,
@@ -275,8 +314,22 @@ fn spawn_encode_thread(args: EncodeArgs) -> Result<JoinHandle<Result<()>>> {
 }
 
 fn encode_loop(args: EncodeArgs) -> Result<()> {
-    let EncodeArgs { config, epoch, video_rx, audio_rx, audio_origin, stop, stats, preview, on_preview } =
-        args;
+    let EncodeArgs {
+        config,
+        epoch,
+        video_rx,
+        audio_rx,
+        audio_origin,
+        stop,
+        paused,
+        paused_total,
+        stats,
+        preview,
+        on_preview,
+    } = args;
+    // Recording-time clock: wall time since epoch minus paused time.
+    let paused_dur = || Duration::from_micros(paused_total.load(Ordering::Relaxed));
+    let rec_now = || epoch.elapsed().saturating_sub(paused_dur());
     let fps = config.fps.max(1);
     let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
     let min_delta = Duration::from_secs_f64(0.75 / fps as f64);
@@ -308,7 +361,13 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
 
     loop {
         let (frame, is_heartbeat) = match video_rx.recv_timeout(heartbeat) {
-            Ok(f) => (f, false),
+            Ok(mut f) => {
+                if paused.load(Ordering::Relaxed) {
+                    continue;
+                }
+                f.pts = f.pts.saturating_sub(paused_dur());
+                (f, false)
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::Relaxed) {
                     break;
@@ -316,13 +375,16 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
                 if let Some(st) = state.as_mut() {
                     push_audio(&mut st.mux, &stats)?;
                 }
+                if paused.load(Ordering::Relaxed) {
+                    continue;
+                }
                 match &last_frame {
                     Some(f)
-                        if epoch.elapsed().saturating_sub(last_pts.unwrap_or_default())
+                        if rec_now().saturating_sub(last_pts.unwrap_or_default())
                             >= frame_interval.mul_f64(0.9) =>
                     {
                         let mut f = f.clone();
-                        f.pts = epoch.elapsed();
+                        f.pts = rec_now();
                         (f, true)
                     }
                     _ => continue,
@@ -489,14 +551,19 @@ impl EncodeState {
     }
 }
 
-fn spawn_audio_thread(
+struct AudioArgs {
     config: RecordConfig,
     epoch: Instant,
     stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    paused_total: Arc<AtomicU64>,
     origin: Arc<AtomicU64>,
     tx: SyncSender<Mp3Frame>,
     stats: Arc<Stats>,
-) -> Result<JoinHandle<Result<()>>> {
+}
+
+fn spawn_audio_thread(args: AudioArgs) -> Result<JoinHandle<Result<()>>> {
+    let AudioArgs { config, epoch, stop, paused, paused_total, origin, tx, stats } = args;
     // Open devices on the calling thread so errors surface immediately, then
     // hand them to the worker. cpal streams are created and kept on that thread.
     let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
@@ -550,8 +617,18 @@ fn spawn_audio_thread(
             }
             Ok(())
         };
+        let mut seen_paused_us = 0u64;
         loop {
             let stopping = stop.load(Ordering::Relaxed);
+            let total_paused_us = paused_total.load(Ordering::SeqCst);
+            if total_paused_us != seen_paused_us {
+                mixer.shift_origin(Duration::from_micros(total_paused_us - seen_paused_us));
+                seen_paused_us = total_paused_us;
+            }
+            if paused.load(Ordering::Relaxed) && !stopping {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
             let until = if stopping { Instant::now() } else { Instant::now() - AUDIO_LAG };
             pcm.clear();
             mixer.mix_until(until, &mut pcm);

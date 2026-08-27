@@ -69,6 +69,19 @@ impl Mixer {
         self.out_pos
     }
 
+    /// Removes `delta` of wall-clock time from the timeline (used after a
+    /// pause): anything captured meanwhile is discarded and every source
+    /// re-aligns by arrival time on its next chunk.
+    pub fn shift_origin(&mut self, delta: Duration) {
+        self.origin += delta;
+        for src in &mut self.sources {
+            src.queue.lock().unwrap().chunks.clear();
+            src.buffer.clear();
+            src.buffer_start = self.out_pos;
+            src.next_pos = None;
+        }
+    }
+
     fn timeline_frames(&self, at: Instant) -> i64 {
         let t = at.duration_since(self.epoch).as_secs_f64() - self.origin.as_secs_f64();
         (t * self.rate as f64).round() as i64

@@ -56,10 +56,33 @@ fn main() -> anyhow::Result<()> {
         microphone: mic.then_some(None),
         output: out.clone(),
     };
-    let recorder = Recorder::start(config, None)?;
+    // --pause-at S --resume-at S: exercise pause/resume (wall-clock seconds).
+    let flag_secs = |name: &str| -> Option<f64> {
+        args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok())
+    };
+    let pause_at = flag_secs("--pause-at");
+    let resume_at = flag_secs("--resume-at");
+
+    let mut recorder = Recorder::start(config, None)?;
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(seconds) {
         std::thread::sleep(Duration::from_millis(500));
+        let t = start.elapsed().as_secs_f64();
+        if let Some(p) = pause_at
+            && t >= p
+            && !recorder.is_paused()
+            && resume_at.map(|r| t < r).unwrap_or(true)
+        {
+            recorder.pause();
+            println!("  paused");
+        }
+        if let Some(r) = resume_at
+            && t >= r
+            && recorder.is_paused()
+        {
+            recorder.resume();
+            println!("  resumed");
+        }
         let s = recorder.stats();
         println!(
             "  {:>4.1}s captured {} encoded {} dropped {} skipped {} repeated {} enc {:.1}ms audio {} bytes {}",
@@ -81,8 +104,9 @@ fn main() -> anyhow::Result<()> {
             println!("  note: {n}");
         }
     }
+    let recorded = recorder.elapsed();
     let path = recorder.stop()?;
     let size = std::fs::metadata(&path)?.len();
-    println!("done: {} ({} KiB)", path.display(), size / 1024);
+    println!("done: {} ({} KiB), recorded time {:.2}s", path.display(), size / 1024, recorded.as_secs_f64());
     Ok(())
 }
