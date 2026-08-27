@@ -42,7 +42,11 @@ impl H264Encoder {
             .usage_type(UsageType::ScreenContentRealTime)
             .intra_frame_period(IntraFramePeriod::from_num_frames(keyint))
             .sps_pps_strategy(SpsPpsStrategy::ConstantId)
-            .skip_frames(false)
+            // Required for bitrate mode to actually cap the bitrate; skipped
+            // frames simply extend the previous sample (durations are real).
+            .skip_frames(true)
+            .adaptive_quantization(false)
+            .background_detection(false)
             .num_threads(threads);
         let inner = Encoder::with_api_config(OpenH264API::from_source(), config)
             .context("failed to create OpenH264 encoder")?;

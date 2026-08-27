@@ -88,7 +88,7 @@ fn build(device: Device, supported: cpal::SupportedStreamConfig, what: &str) -> 
     let queue: SharedQueue = Arc::new(Mutex::new(Queue::default()));
     let err_fn = {
         let what = what.to_string();
-        move |e| log::error!("{what} stream error: {e}")
+        move |e| log::warn!("{what} stream: {e}")
     };
     let q = queue.clone();
     let push = move |data: Vec<f32>| {
@@ -101,25 +101,25 @@ fn build(device: Device, supported: cpal::SupportedStreamConfig, what: &str) -> 
     };
     let stream = match sample_format {
         SampleFormat::F32 => device.build_input_stream(
-            config.clone(),
+            config,
             move |d: &[f32], _| push(d.to_vec()),
             err_fn,
             None,
         )?,
         SampleFormat::I16 => device.build_input_stream(
-            config.clone(),
+            config,
             move |d: &[i16], _| push(d.iter().map(|&s| s as f32 / 32768.0).collect()),
             err_fn,
             None,
         )?,
         SampleFormat::U16 => device.build_input_stream(
-            config.clone(),
+            config,
             move |d: &[u16], _| push(d.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()),
             err_fn,
             None,
         )?,
         SampleFormat::I32 => device.build_input_stream(
-            config.clone(),
+            config,
             move |d: &[i32], _| push(d.iter().map(|&s| s as f32 / 2147483648.0).collect()),
             err_fn,
             None,

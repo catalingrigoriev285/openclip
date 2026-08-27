@@ -168,10 +168,10 @@ impl<W: Write + Seek> Mp4Writer<W> {
         let first = *track.first_pts.get_or_insert(pts);
         let rel = pts.saturating_sub(first);
         let mut ticks = duration_to_ticks(rel, track.timescale);
-        if let Some(last) = track.samples.last() {
-            if ticks <= last.pts {
-                ticks = last.pts + 1;
-            }
+        if let Some(last) = track.samples.last()
+            && ticks <= last.pts
+        {
+            ticks = last.pts + 1;
         }
         let sample = Sample { size: data.len() as u32, pts: ticks, keyframe };
         Self::push_sample(&mut self.out, &mut self.pos, track, sample, data)
@@ -284,27 +284,27 @@ impl<W: Write + Seek> Mp4Writer<W> {
             tracks.push((trak, movie_dur));
             next_track_id += 1;
         }
-        if let Some((track, cfg)) = &self.audio {
-            if !track.samples.is_empty() {
-                let deltas = track.deltas(cfg.samples_per_frame);
-                let dur_ticks = track.duration_ticks(cfg.samples_per_frame);
-                let movie_dur = rescale(dur_ticks, track.timescale, MOVIE_TIMESCALE);
-                let stsd = build_mp4a(cfg);
-                let trak = build_trak(&TrakParams {
-                    track_id: next_track_id,
-                    now,
-                    track,
-                    deltas: &deltas,
-                    movie_duration: movie_dur,
-                    handler: b"soun",
-                    handler_name: "SoundHandler",
-                    dims: None,
-                    stsd_entry: stsd,
-                    is_video: false,
-                });
-                tracks.push((trak, movie_dur));
-                next_track_id += 1;
-            }
+        if let Some((track, cfg)) = &self.audio
+            && !track.samples.is_empty()
+        {
+            let deltas = track.deltas(cfg.samples_per_frame);
+            let dur_ticks = track.duration_ticks(cfg.samples_per_frame);
+            let movie_dur = rescale(dur_ticks, track.timescale, MOVIE_TIMESCALE);
+            let stsd = build_mp4a(cfg);
+            let trak = build_trak(&TrakParams {
+                track_id: next_track_id,
+                now,
+                track,
+                deltas: &deltas,
+                movie_duration: movie_dur,
+                handler: b"soun",
+                handler_name: "SoundHandler",
+                dims: None,
+                stsd_entry: stsd,
+                is_video: false,
+            });
+            tracks.push((trak, movie_dur));
+            next_track_id += 1;
         }
         if tracks.is_empty() {
             bail!("no samples were written");

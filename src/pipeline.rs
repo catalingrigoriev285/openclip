@@ -52,6 +52,12 @@ pub struct Stats {
     pub frames_captured: AtomicU64,
     pub frames_encoded: AtomicU64,
     pub frames_dropped: AtomicU64,
+    /// Frames the encoder chose not to output (rate control).
+    pub frames_skipped: AtomicU64,
+    /// Heartbeat frames (re-encoded last frame while the screen was static).
+    pub frames_repeated: AtomicU64,
+    /// Rolling average encode time per frame, in microseconds.
+    pub encode_us: AtomicU64,
     pub audio_frames: AtomicU64,
     pub bytes_written: AtomicU64,
     pub width: AtomicU64,
@@ -129,6 +135,7 @@ impl Recorder {
 
         let encode_thread = spawn_encode_thread(EncodeArgs {
             config: config.clone(),
+            epoch,
             video_rx,
             audio_rx,
             audio_origin,
@@ -176,10 +183,10 @@ impl Recorder {
     /// Stops recording and finalizes the file.
     pub fn stop(mut self) -> Result<PathBuf> {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(capture) = self.capture.take() {
-            if let Err(e) = capture.stop() {
-                log::warn!("capture stop: {e:#}");
-            }
+        if let Some(capture) = self.capture.take()
+            && let Err(e) = capture.stop()
+        {
+            log::warn!("capture stop: {e:#}");
         }
         if let Some(t) = self.audio_thread.take() {
             match t.join() {
@@ -244,6 +251,7 @@ fn start_capture(
 
 struct EncodeArgs {
     config: RecordConfig,
+    epoch: Instant,
     video_rx: Receiver<RawFrame>,
     audio_rx: Receiver<Mp3Frame>,
     audio_origin: Arc<AtomicU64>,
@@ -265,16 +273,24 @@ fn spawn_encode_thread(args: EncodeArgs) -> Result<JoinHandle<Result<()>>> {
 }
 
 fn encode_loop(args: EncodeArgs) -> Result<()> {
-    let EncodeArgs { config, video_rx, audio_rx, audio_origin, stop, stats, preview, on_preview } = args;
+    let EncodeArgs { config, epoch, video_rx, audio_rx, audio_origin, stop, stats, preview, on_preview } =
+        args;
     let fps = config.fps.max(1);
+    let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
     let min_delta = Duration::from_secs_f64(0.75 / fps as f64);
+    // Capture APIs only deliver frames when the screen changes; when nothing
+    // arrives for this long we re-encode the last frame so the video keeps a
+    // steady cadence and stays as long as the audio.
+    let heartbeat = frame_interval.max(Duration::from_millis(20));
     let preview_every = (fps / 10).max(1) as u64;
+    let mut avg_encode_us = 0f64;
 
     let mut state: Option<EncodeState> = None;
     let mut last_pts: Option<Duration> = None;
     let mut last_size = (0u32, 0u32);
+    let mut last_frame: Option<RawFrame> = None;
 
-    let mut push_audio = |mux: &mut Mp4Writer<BufWriter<File>>, stats: &Stats| -> Result<()> {
+    let push_audio = |mux: &mut Mp4Writer<BufWriter<File>>, stats: &Stats| -> Result<()> {
         if mux.has_audio() {
             while let Ok(f) = audio_rx.try_recv() {
                 mux.push_audio(&f.data)?;
@@ -285,8 +301,8 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
     };
 
     loop {
-        let frame = match video_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(f) => f,
+        let (frame, is_heartbeat) = match video_rx.recv_timeout(heartbeat) {
+            Ok(f) => (f, false),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::Relaxed) {
                     break;
@@ -294,17 +310,28 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
                 if let Some(st) = state.as_mut() {
                     push_audio(&mut st.mux, &stats)?;
                 }
-                continue;
+                match &last_frame {
+                    Some(f)
+                        if epoch.elapsed().saturating_sub(last_pts.unwrap_or_default())
+                            >= frame_interval.mul_f64(0.9) =>
+                    {
+                        let mut f = f.clone();
+                        f.pts = epoch.elapsed();
+                        (f, true)
+                    }
+                    _ => continue,
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let mut frame = frame;
-        if config.half_resolution && frame.width >= 64 && frame.height >= 64 {
+        if !is_heartbeat && config.half_resolution && frame.width >= 64 && frame.height >= 64 {
             frame = frame.downscale_half();
         }
         if let Some(last) = last_pts {
+            // Pacing: frames arriving faster than the target rate are skipped
+            // (not counted as drops; they are by design).
             if frame.pts.saturating_sub(last) < min_delta {
-                stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
         }
@@ -331,20 +358,54 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         let st = state.as_mut().unwrap();
         last_pts = Some(frame.pts);
 
-        st.converter.convert(&frame)?;
-        if let Some(enc) = st.encoder.encode(&st.converter.yuv(), frame.pts)? {
-            if let (Some(sps), Some(pps)) = (st.encoder.sps(), st.encoder.pps()) {
-                st.mux.set_parameter_sets(sps, pps);
-            }
-            st.mux.push_video(&enc.data, enc.pts, enc.keyframe)?;
-            let n = stats.frames_encoded.fetch_add(1, Ordering::Relaxed) + 1;
-            stats.bytes_written.store(st.mux.bytes_written(), Ordering::Relaxed);
-            if n % preview_every == 0 {
-                *preview.image.lock().unwrap() = Some(make_preview(&frame, PREVIEW_MAX_SIDE));
-                if let Some(cb) = &on_preview {
-                    cb();
+        // Heartbeats reuse the previous conversion; real frames are converted fresh.
+        let t0 = Instant::now();
+        if !is_heartbeat {
+            st.converter.convert(&frame)?;
+        }
+        let t1 = Instant::now();
+        let encoded = st.encoder.encode(&st.converter.yuv(), frame.pts)?;
+        let t2 = Instant::now();
+        if is_heartbeat {
+            stats.frames_repeated.fetch_add(1, Ordering::Relaxed);
+        }
+        match encoded {
+            Some(enc) => {
+                if let (Some(sps), Some(pps)) = (st.encoder.sps(), st.encoder.pps()) {
+                    st.mux.set_parameter_sets(sps, pps);
+                }
+                st.mux.push_video(&enc.data, enc.pts, enc.keyframe)?;
+                let n = stats.frames_encoded.fetch_add(1, Ordering::Relaxed) + 1;
+                stats.bytes_written.store(st.mux.bytes_written(), Ordering::Relaxed);
+                if n % preview_every == 0 && !is_heartbeat {
+                    *preview.image.lock().unwrap() = Some(make_preview(&frame, PREVIEW_MAX_SIDE));
+                    if let Some(cb) = &on_preview {
+                        cb();
+                    }
                 }
             }
+            None => {
+                stats.frames_skipped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let t3 = Instant::now();
+        let enc_us = (t2 - t1).as_micros() as f64;
+        avg_encode_us = if avg_encode_us == 0.0 { enc_us } else { avg_encode_us * 0.9 + enc_us * 0.1 };
+        stats.encode_us.store(avg_encode_us as u64, Ordering::Relaxed);
+        let total = t3 - t0;
+        if total > frame_interval * 2 {
+            log::warn!(
+                "slow frame: convert {:.1} ms, encode {:.1} ms, mux {:.1} ms{}",
+                (t1 - t0).as_secs_f64() * 1e3,
+                (t2 - t1).as_secs_f64() * 1e3,
+                (t3 - t2).as_secs_f64() * 1e3,
+                if is_heartbeat { " (heartbeat)" } else { "" }
+            );
+        } else {
+            log::trace!("frame: convert {:?} encode {:?} mux {:?}", t1 - t0, t2 - t1, t3 - t2);
+        }
+        if !is_heartbeat {
+            last_frame = Some(frame);
         }
         push_audio(&mut st.mux, &stats)?;
         if stop.load(Ordering::Relaxed) && video_rx.try_recv().is_err() {
@@ -380,14 +441,14 @@ impl EncodeState {
         let converter = Converter::new(first.width, first.height)?;
         let dims = converter.dimensions();
         let encoder = H264Encoder::new(config.fps as f32, config.bitrate_kbps.max(200) * 1000)?;
-        if let Some(parent) = config.output.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).ok();
-            }
+        if let Some(parent) = config.output.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).ok();
         }
         let file = File::create(&config.output)
             .with_context(|| format!("creating {}", config.output.display()))?;
-        let audio = config.wants_audio().then(|| AudioTrackConfig {
+        let audio = config.wants_audio().then_some(AudioTrackConfig {
             sample_rate: AUDIO_RATE,
             channels: 2,
             bitrate_bps: 160_000,
@@ -456,7 +517,7 @@ fn spawn_audio_thread(
         }
         let mut encoder = Mp3Encoder::new(AUDIO_RATE, 2, 160)?;
         let mut pcm = Vec::new();
-        let mut send = |frames: Vec<Mp3Frame>| -> Result<()> {
+        let send = |frames: Vec<Mp3Frame>| -> Result<()> {
             for f in frames {
                 if tx.send(f).is_err() {
                     return Err(anyhow!("encoder went away"));

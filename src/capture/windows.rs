@@ -89,17 +89,32 @@ impl GraphicsCaptureApiHandler for Handler {
 
 pub fn start(config: CaptureConfig, epoch: Instant, sink: FrameSink) -> Result<CaptureHandle> {
     let stop = Arc::new(AtomicBool::new(false));
-    let (item, crop): (GraphicsCaptureItemType, Option<Rect>) = match &config.source {
-        Source::Monitor { id } => (monitor_item(*id)?, None),
-        Source::Region { monitor_id, rect } => (monitor_item(*monitor_id)?, Some(*rect)),
+    match &config.source {
+        Source::Monitor { id } => launch(monitor(*id)?, None, &config, epoch, stop, sink),
+        Source::Region { monitor_id, rect } => {
+            launch(monitor(*monitor_id)?, Some(*rect), &config, epoch, stop, sink)
+        }
         Source::Window { id } => {
             let w = Window::from_raw_hwnd(*id as usize as *mut std::ffi::c_void);
             if !w.is_valid() {
                 return Err(anyhow!("window {id} is no longer valid"));
             }
-            (w.try_into().map_err(|e| anyhow!("window capture item: {e:?}"))?, None)
+            launch(w, None, &config, epoch, stop, sink)
         }
-    };
+    }
+}
+
+fn launch<T>(
+    item: T,
+    crop: Option<Rect>,
+    config: &CaptureConfig,
+    epoch: Instant,
+    stop: Arc<AtomicBool>,
+    sink: FrameSink,
+) -> Result<CaptureHandle>
+where
+    T: TryInto<GraphicsCaptureItemType> + Send + 'static,
+{
     let flags = Flags { sink, epoch, stop: stop.clone(), crop, fps: config.fps };
     let cursor = if config.show_cursor {
         CursorCaptureSettings::WithCursor
@@ -135,7 +150,9 @@ pub fn start(config: CaptureConfig, epoch: Instant, sink: FrameSink) -> Result<C
     Ok(CaptureHandle::new(stop, stopper))
 }
 
-fn monitor_item(id: u32) -> Result<GraphicsCaptureItemType> {
+fn monitor(id: u32) -> Result<Monitor> {
     let m = Monitor::from_raw_hmonitor(id as usize as *mut std::ffi::c_void);
-    m.try_into().map_err(|e| anyhow!("monitor capture item: {e:?}")).context("monitor not found")
+    // Validate the handle by asking for its size.
+    m.width().map_err(|e| anyhow!("monitor {id}: {e:?}")).context("monitor not found")?;
+    Ok(m)
 }

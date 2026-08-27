@@ -61,10 +61,16 @@ impl WindowInfo {
 
 pub fn list_monitors() -> Result<Vec<MonitorInfo>> {
     let mut out = Vec::new();
-    for m in Monitor::all().context("enumerating monitors")? {
+    for (i, m) in Monitor::all().context("enumerating monitors")?.into_iter().enumerate() {
+        let name = m.friendly_name().or_else(|_| m.name()).unwrap_or_default();
+        let name = if name.trim().is_empty() || name.starts_with("Unknown") {
+            format!("Display {}", i + 1)
+        } else {
+            name
+        };
         let info = MonitorInfo {
             id: m.id()?,
-            name: m.friendly_name().or_else(|_| m.name()).unwrap_or_else(|_| "Display".into()),
+            name,
             x: m.x()?,
             y: m.y()?,
             width: m.width()?,

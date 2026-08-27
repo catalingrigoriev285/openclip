@@ -5,4 +5,6 @@
 pub mod audio;
 pub mod capture;
 pub mod mux;
+pub mod pipeline;
+pub mod ui;
 pub mod video;

@@ -78,7 +78,7 @@ fn build(with_audio: bool) -> Built {
             let x = (n as u32 % W + i * 3) % W;
             px[0] = (x * 255 / W) as u8;
             px[1] = ((n as u32 / W) * 255 / H) as u8;
-            px[2] = if (x / 32) % 2 == 0 { 200 } else { 30 };
+            px[2] = if (x / 32).is_multiple_of(2) { 200 } else { 30 };
             px[3] = 255;
         }
         frame.pts = Duration::from_secs_f64(i as f64 / FPS as f64);
