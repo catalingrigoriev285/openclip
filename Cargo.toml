@@ -1,0 +1,37 @@
+[package]
+name = "openclip"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Cross-platform screen recorder with an egui GUI and no external runtime dependencies"
+repository = "https://github.com/catalingrigoriev285/openclip"
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
+openh264 = "0.9"
+yuv = "0.8"
+cpal = "0.18"
+mp3lame-encoder = "0.2"
+xcap = "0.9"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+rfd = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2.0"
+
+[dev-dependencies]
+mp4-atom = "0.15"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
