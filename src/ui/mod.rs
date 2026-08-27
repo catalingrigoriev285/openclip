@@ -2,6 +2,7 @@
 //! toolbar (recording modes, audio toggles, pause, REC), a left navigation
 //! with settings pages, and a file browser (+ optional preview tab) on Home.
 
+mod format_dialog;
 pub mod icons;
 mod library;
 mod minibar;
@@ -11,7 +12,7 @@ mod theme;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -25,9 +26,12 @@ use crate::capture::monitors::{
 };
 use crate::capture::{self as cap, CaptureConfig, CaptureHandle, Rect, Source};
 use crate::pipeline::{RecordConfig, Recorder};
+use crate::settings::{FormatSettings, Settings};
+use crate::video::encoder::{available_encoders, refresh_encoders, EncoderInfo};
 use crate::video::mouse_fx::{MouseFx, MouseSampler, ARROW, CLICK_DURATION};
 use crate::video::preview::{make_preview, PreviewImage};
 
+use format_dialog::{DialogOutcome, FormatDialog};
 use library::{open_with_default, reveal_in_folder, Library, LibraryTab};
 use picker::{Picker, PickerOutcome};
 use theme::*;
@@ -80,7 +84,6 @@ impl HomeTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VideoTab {
     Record,
-    Format,
     Mouse,
 }
 
@@ -152,7 +155,7 @@ impl LivePreview {
                 {
                     origin = o;
                 }
-                let (cursor, clicks) = s.mapped(origin, 1.0);
+                let (cursor, clicks) = s.mapped(origin, (1.0, 1.0));
                 fx.apply(&mut frame, cursor, &clicks, 1.0);
             }
             *slot.lock().unwrap() = Some(make_preview(&frame, 720));
@@ -190,9 +193,12 @@ pub struct App {
     monitor_idx: usize,
     window_idx: usize,
     region: Option<(u32, Rect)>,
-    fps: u32,
-    bitrate_kbps: u32,
-    half_resolution: bool,
+    /// Container / codec / size / quality settings (the Format dialog).
+    format: FormatSettings,
+    format_dialog: FormatDialog,
+    /// Encoders found on this machine (Media Foundation); empty until the scan finishes.
+    encoders: Vec<EncoderInfo>,
+    encoder_rx: Option<mpsc::Receiver<Vec<EncoderInfo>>>,
     mouse_fx: SharedFx,
     fx_demo_clicks: Vec<(Instant, bool)>,
     system_audio: bool,
@@ -232,9 +238,19 @@ impl App {
         let monitors = list_monitors().unwrap_or_default();
         let windows = list_windows().unwrap_or_default();
         let mics = list_input_devices();
-        let output_dir = default_output_dir();
+        let settings = Settings::load();
+        let output_dir = settings.output_dir.clone().filter(|d| d.is_dir()).unwrap_or_else(default_output_dir);
+        let mic_idx = settings.mic_name.as_ref().and_then(|n| mics.iter().position(|m| m == n)).unwrap_or(0);
         let mut library = Library::new();
         library.refresh(&output_dir, true);
+        // Enumerating Media Foundation encoders takes a moment; do it off the GUI thread.
+        let (tx, encoder_rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("openclip-encoders".into())
+            .spawn(move || {
+                let _ = tx.send(available_encoders());
+            })
+            .ok();
         Self {
             monitors,
             windows,
@@ -243,16 +259,17 @@ impl App {
             monitor_idx: 0,
             window_idx: 0,
             region: None,
-            fps: 30,
-            bitrate_kbps: 6000,
-            half_resolution: false,
-            mouse_fx: Arc::new(RwLock::new(MouseFx::default())),
+            format: settings.format,
+            format_dialog: FormatDialog::new(),
+            encoders: Vec::new(),
+            encoder_rx: Some(encoder_rx),
+            mouse_fx: Arc::new(RwLock::new(settings.mouse_fx)),
             fx_demo_clicks: Vec::new(),
-            system_audio: true,
-            mic_enabled: false,
-            mic_idx: 0,
+            system_audio: settings.system_audio,
+            mic_enabled: settings.mic_enabled,
+            mic_idx,
             output_dir,
-            file_prefix: "openclip".into(),
+            file_prefix: settings.file_prefix,
             tab: Tab::Home,
             home_tab: HomeTab::Videos,
             video_tab: VideoTab::Record,
@@ -279,6 +296,86 @@ impl App {
             SourceKind::Monitor => self.monitors.get(self.monitor_idx).map(|m| Source::Monitor { id: m.id }),
             SourceKind::Window => self.windows.get(self.window_idx).map(|w| Source::Window { id: w.id }),
             SourceKind::Region => self.region.map(|(monitor_id, rect)| Source::Region { monitor_id, rect }),
+        }
+    }
+
+    /// Pixel size of the selected source, if known.
+    pub(super) fn source_size(&self) -> Option<(u32, u32)> {
+        let (w, h) = match self.source_kind {
+            SourceKind::Monitor => self.monitors.get(self.monitor_idx).map(|m| (m.width, m.height)).unwrap_or((0, 0)),
+            SourceKind::Window => self.windows.get(self.window_idx).map(|w| (w.width, w.height)).unwrap_or((0, 0)),
+            SourceKind::Region => self.region.map(|(_, r)| (r.width, r.height)).unwrap_or((0, 0)),
+        };
+        (w > 0 && h > 0).then_some((w, h))
+    }
+
+    /// Persists everything the user can change (called on dialog OK, folder change and exit).
+    pub(super) fn save_settings(&self) {
+        let settings = Settings {
+            format: self.format.clone(),
+            output_dir: Some(self.output_dir.clone()),
+            file_prefix: self.file_prefix.clone(),
+            system_audio: self.system_audio,
+            mic_enabled: self.mic_enabled,
+            mic_name: self.mics.get(self.mic_idx).cloned(),
+            mouse_fx: self.mouse_fx.read().unwrap().clone(),
+        };
+        if let Err(e) = settings.save() {
+            log::warn!("could not save settings: {e:#}");
+        }
+    }
+
+    pub(super) fn open_format_dialog(&mut self) {
+        self.wait_for_encoders(Duration::from_millis(1500));
+        self.format_dialog.open(&self.format, &self.encoders);
+    }
+
+    /// Runs the Format dialog (both layouts call this last, like the delete dialog).
+    fn show_format_dialog(&mut self, ctx: &egui::Context) {
+        let recording = self.is_recording();
+        match self.format_dialog.show(ctx, &self.encoders, self.source_size(), recording) {
+            DialogOutcome::Ok(f) => {
+                self.format = f;
+                self.save_settings();
+            }
+            DialogOutcome::Cancel | DialogOutcome::None => {}
+        }
+        if self.format_dialog.take_rescan() {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(refresh_encoders());
+            });
+            self.encoder_rx = Some(rx);
+        }
+    }
+
+    /// Picks up the encoder list once the background scan is done.
+    fn poll_encoders(&mut self) {
+        let Some(rx) = &self.encoder_rx else { return };
+        if let Ok(list) = rx.try_recv() {
+            self.encoders = list;
+            self.encoder_rx = None;
+            self.apply_encoder_list();
+        }
+    }
+
+    /// Blocks briefly for a pending encoder scan (before recording / opening the dialog).
+    fn wait_for_encoders(&mut self, timeout: Duration) {
+        if let Some(rx) = self.encoder_rx.take() {
+            if let Ok(list) = rx.recv_timeout(timeout) {
+                self.encoders = list;
+                self.apply_encoder_list();
+            } else {
+                log::warn!("encoder scan did not finish in time");
+            }
+        }
+    }
+
+    fn apply_encoder_list(&mut self) {
+        log::info!("encoders: {:?}", self.encoders.iter().map(|e| e.label.as_str()).collect::<Vec<_>>());
+        let notes = self.format.normalize(&self.encoders);
+        if !notes.is_empty() {
+            self.message = Some((notes.join(" "), true));
         }
     }
 
@@ -341,15 +438,20 @@ impl App {
         };
         // Release the preview capture before opening the recording session.
         self.live.stop();
+        self.wait_for_encoders(Duration::from_secs(2));
+        let mut format = self.format.clone();
+        let notes = format.normalize(&self.encoders);
+        if !notes.is_empty() {
+            log::warn!("format settings adjusted: {}", notes.join(" "));
+        }
+        let output = self.timestamped(format.container.extension());
         let config = RecordConfig {
             source,
-            fps: self.fps,
-            bitrate_kbps: self.bitrate_kbps,
-            half_resolution: self.half_resolution,
+            format,
             mouse_fx: self.mouse_fx.read().unwrap().clone(),
             system_audio: self.system_audio,
             microphone: self.mic_enabled.then(|| self.mics.get(self.mic_idx).cloned()),
-            output: self.timestamped("mp4"),
+            output,
         };
         let ctx2 = ctx.clone();
         let cb: crate::pipeline::PreviewCallback = Arc::new(move || ctx2.request_repaint());
@@ -526,9 +628,9 @@ impl App {
                     }
                     ui.separator();
                     ui.label(format!("{w}×{h}   {fps:.1} fps   {dropped} dropped   {}", human_bytes(bytes)));
-                    if let Some(n) = s.audio_note.lock().unwrap().as_ref() {
+                    for note in [s.note(), s.audio_note.lock().unwrap().clone()].into_iter().flatten() {
                         ui.separator();
-                        ui.label(RichText::new(n).color(WARN_YELLOW));
+                        ui.label(RichText::new(note).color(WARN_YELLOW));
                     }
                     if s.error().is_some() || rec.is_finished() {
                         self.stop_recording();
@@ -799,6 +901,7 @@ impl App {
             {
                 self.output_dir = dir;
                 self.library.refresh(&self.output_dir, true);
+                self.save_settings();
             }
             if ui.button("Open").clicked() {
                 open_folder(&self.output_dir);
@@ -806,7 +909,15 @@ impl App {
         });
         settings_row(ui, "File name prefix", |ui| {
             ui.add(egui::TextEdit::singleline(&mut self.file_prefix).desired_width(160.0));
-            ui.label(RichText::new(format!("→ {}-YYYYMMDD-HHMMSS.mp4", self.file_prefix.trim())).color(TEXT_DIM).small());
+            ui.label(
+                RichText::new(format!(
+                    "→ {}-YYYYMMDD-HHMMSS.{}",
+                    self.file_prefix.trim(),
+                    self.format.container.extension()
+                ))
+                .color(TEXT_DIM)
+                .small(),
+            );
         });
         ui.add_space(14.0);
         section_title(ui, "Sources");
@@ -819,12 +930,11 @@ impl App {
 
     fn page_video(&mut self, ui: &mut egui::Ui) {
         let mut vt = self.video_tab;
-        tab_strip(ui, &[(VideoTab::Record, "Record"), (VideoTab::Format, "Format"), (VideoTab::Mouse, "Mouse")], &mut vt);
+        tab_strip(ui, &[(VideoTab::Record, "Record"), (VideoTab::Mouse, "Mouse")], &mut vt);
         self.video_tab = vt;
         ui.add_space(6.0);
         match self.video_tab {
             VideoTab::Record => self.video_record_tab(ui),
-            VideoTab::Format => self.video_format_tab(ui),
             VideoTab::Mouse => self.video_mouse_tab(ui),
         }
     }
@@ -849,65 +959,8 @@ impl App {
             *self.mouse_fx.write().unwrap() = fx;
         }
         ui.add_space(6.0);
-        ui.add_enabled_ui(!self.is_recording(), |ui| {
-            settings_row(ui, "Size", |ui| {
-                ui.selectable_value(&mut self.half_resolution, false, "Full size");
-                ui.selectable_value(&mut self.half_resolution, true, "Half size");
-            });
-        });
-        ui.add_space(14.0);
-        section_title(ui, "Format – MP4");
-        let size = if self.half_resolution { "Half size" } else { "Full size" };
-        format_box(ui, "Video", "H264 – OpenH264 (CBR)", &format!("{size}, {}fps, {} kbps", self.fps, self.bitrate_kbps));
-        format_box(ui, "Audio", "MP3 – MPEG-1 Layer III", &format!("48.0KHz, stereo, 160kbps – {}", self.audio_sources_label()));
-        ui.horizontal(|ui| {
-            ui.add_space(134.0);
-            if ui.add(egui::Button::new("Settings").min_size(Vec2::new(150.0, 26.0))).clicked() {
-                self.video_tab = VideoTab::Format;
-            }
-        });
-    }
-
-    fn audio_sources_label(&self) -> &'static str {
-        match (self.system_audio, self.mic_enabled) {
-            (true, true) => "system audio + microphone",
-            (true, false) => "system audio",
-            (false, true) => "microphone",
-            (false, false) => "no audio",
-        }
-    }
-
-    fn video_format_tab(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, "Video");
-        ui.add_enabled_ui(!self.is_recording(), |ui| {
-            settings_row(ui, "Codec", |ui| {
-                ui.label(RichText::new("H264 – OpenH264 (CBR), MP4 container").color(TEXT_BRIGHT));
-            });
-            settings_row(ui, "Frame rate", |ui| {
-                for f in [15u32, 24, 30, 60] {
-                    ui.selectable_value(&mut self.fps, f, format!("{f} fps"));
-                }
-            });
-            settings_row(ui, "Bitrate", |ui| {
-                ui.add(egui::Slider::new(&mut self.bitrate_kbps, 500..=20_000).suffix(" kbps").logarithmic(true));
-            });
-            settings_row(ui, "Size", |ui| {
-                ui.selectable_value(&mut self.half_resolution, false, "Full size");
-                ui.selectable_value(&mut self.half_resolution, true, "Half size");
-            });
-            ui.label(
-                RichText::new(
-                    "Frames are timestamped, so dropped or skipped frames never desynchronise audio. \
-                     If the status bar reports drops at 1080p, choose Half size or a lower frame rate.",
-                )
-                .color(TEXT_DIM)
-                .small(),
-            );
-            ui.add_space(14.0);
-            section_title(ui, "Audio");
-            settings_row(ui, "Codec", |ui| {
-                ui.label(RichText::new("MP3 – 48.0KHz, stereo, 160kbps").color(TEXT_BRIGHT));
-            });
+        let recording = self.is_recording();
+        ui.add_enabled_ui(!recording, |ui| {
             settings_row(ui, "System audio", |ui| {
                 ui.checkbox(&mut self.system_audio, "Record what you hear (speakers / headphones)");
             });
@@ -926,6 +979,31 @@ impl App {
                 });
             });
         });
+        ui.add_space(14.0);
+        section_title(ui, &format!("Format – {}", self.format.container.label()));
+        let (video_title, video_detail) = self.format.video_summary(&self.encoders, self.source_size());
+        format_box(ui, "Video", &video_title, &video_detail);
+        let (audio_title, audio_detail) = self.format.audio_summary(self.audio_sources_label());
+        format_box(ui, "Audio", &audio_title, &audio_detail);
+        ui.horizontal(|ui| {
+            ui.add_space(134.0);
+            let button = egui::Button::new("Settings").min_size(Vec2::new(150.0, 26.0));
+            if ui.add_enabled(!recording, button).on_hover_text("Container, codecs, size and quality").clicked() {
+                self.open_format_dialog();
+            }
+            if self.encoder_rx.is_some() {
+                ui.label(RichText::new("scanning encoders…").color(TEXT_DIM).small());
+            }
+        });
+    }
+
+    fn audio_sources_label(&self) -> &'static str {
+        match (self.system_audio, self.mic_enabled) {
+            (true, true) => "system audio + microphone",
+            (true, false) => "system audio",
+            (false, true) => "microphone",
+            (false, false) => "no audio",
+        }
     }
 
     fn video_mouse_tab(&mut self, ui: &mut egui::Ui) {
@@ -1057,8 +1135,9 @@ impl App {
         section_title(ui, "openclip");
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         ui.add_space(6.0);
-        ui.label("A self-contained screen recorder: no ffmpeg, no system codecs.");
-        ui.label("Video: H.264 via bundled OpenH264 · Audio: MP3 via bundled LAME · Container: in-house MP4 muxer");
+        ui.label("A self-contained screen recorder: no ffmpeg, no codec packs.");
+        ui.label("Video: H.264 via bundled OpenH264, plus hardware H.264 / HEVC (NVENC, AMF, Quick Sync) through Windows Media Foundation");
+        ui.label("Audio: MP3 via bundled LAME, AAC (Windows Media Foundation) or PCM · Containers: in-house MP4 and AVI muxers");
         ui.add_space(6.0);
         ui.label(
             RichText::new(
@@ -1124,6 +1203,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_encoders();
         self.poll_preview(&ctx);
         self.track_message();
 
@@ -1152,6 +1232,7 @@ impl eframe::App for App {
                 .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(8, 6)))
                 .show(ui, |ui| self.minibar(ui, &ctx));
             self.delete_dialog(&ctx);
+            self.show_format_dialog(&ctx);
             return;
         }
 
@@ -1174,9 +1255,11 @@ impl eframe::App for App {
             .show(ui, |ui| self.page(ui));
 
         self.delete_dialog(&ctx);
+        self.show_format_dialog(&ctx);
     }
 
     fn on_exit(&mut self) {
+        self.save_settings();
         self.live.stop();
         if let State::Recording(rec) = std::mem::replace(&mut self.state, State::Idle) {
             let _ = rec.stop();
@@ -1247,7 +1330,7 @@ pub(super) fn toggle_button(ui: &mut egui::Ui, icon: &str, tip: &str, value: &mu
     resp.on_hover_text(format!("{tip}: {}", if *value { "on" } else { "off" }));
 }
 
-fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
+pub(super) fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(40.0, 44.0), Sense::click());
     let fill = if resp.hovered() { BUTTON_HOVER } else { Color32::TRANSPARENT };
     let p = ui.painter();

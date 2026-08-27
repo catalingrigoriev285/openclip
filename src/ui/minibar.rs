@@ -9,10 +9,10 @@ use eframe::egui::{self, Align, Align2, CornerRadius, FontId, Layout, RichText, 
 use super::icons;
 use super::region_frame::{GAP_PX, THICKNESS_PT};
 use super::theme::*;
-use super::{format_duration, human_bytes, pause_button, rec_button, App, RecClick, SourceKind, State};
+use super::{format_duration, human_bytes, icon_button, pause_button, rec_button, App, RecClick, SourceKind, State};
 
 /// Inner size of the bar window, in points.
-pub const BAR_SIZE: Vec2 = Vec2::new(750.0, 104.0);
+pub const BAR_SIZE: Vec2 = Vec2::new(800.0, 104.0);
 const GROUP_H: f32 = 86.0;
 const TOAST_TTL: Duration = Duration::from_secs(5);
 /// How long after one of our own position commands the bar is left to settle
@@ -119,17 +119,12 @@ impl App {
     }
 
     fn source_dimensions(&self) -> String {
-        let (w, h) = match self.source_kind {
-            SourceKind::Monitor => self.monitors.get(self.monitor_idx).map(|m| (m.width, m.height)).unwrap_or((0, 0)),
-            SourceKind::Window => self.windows.get(self.window_idx).map(|w| (w.width, w.height)).unwrap_or((0, 0)),
-            SourceKind::Region => self.region.map(|(_, r)| (r.width, r.height)).unwrap_or((0, 0)),
-        };
-        if w == 0 {
-            "—".into()
-        } else if self.half_resolution {
-            format!("{}×{}", w / 2, h / 2)
-        } else {
-            format!("{w}×{h}")
+        match self.source_size() {
+            Some((w, h)) => {
+                let (ow, oh) = self.format.size.resolve(w, h);
+                format!("{ow}×{oh}")
+            }
+            None => "—".into(),
         }
     }
 
@@ -211,7 +206,7 @@ impl App {
             });
 
             // ----- Recorded inputs -----
-            group_box(ui, "Recorded inputs", 300.0, |ui| {
+            group_box(ui, "Recorded inputs", 350.0, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(!recording, |ui| {
                         input_toggle(ui, icons::MIC, "Microphone", &mut self.mic_enabled, self.mics.get(self.mic_idx).cloned());
@@ -221,6 +216,11 @@ impl App {
                         input_toggle(ui, icons::CURSOR, "Cursor", &mut show_cursor, None);
                         if show_cursor != before {
                             self.mouse_fx.write().unwrap().show_cursor = show_cursor;
+                        }
+                        let (title, _) = self.format.video_summary(&self.encoders, self.source_size());
+                        let tip = format!("Format settings – {} / {}", self.format.container.label(), title);
+                        if icon_button(ui, icons::GEAR, &tip).clicked() {
+                            self.open_format_dialog();
                         }
                     });
                 });

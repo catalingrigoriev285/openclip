@@ -2,9 +2,9 @@
 //!
 //! Layout: `ftyp` | `mdat` (64-bit largesize, samples interleaved in ~0.5 s
 //! chunks) | `moov`. The `moov` box is assembled from in-memory sample tables
-//! at [`Mp4Writer::finalize`]. Video is `avc1` (H.264, AVCC length-prefixed
-//! samples); audio is `mp4a` with an MPEG-1 Layer III (`objectTypeIndication`
-//! 0x6B) `esds`, one MP3 frame per sample.
+//! at [`Mp4Writer::finalize`]. Video is `avc1` (H.264) or `hvc1` (HEVC) with
+//! length-prefixed samples; audio is `mp4a` with an MPEG-1 Layer III
+//! (`objectTypeIndication` 0x6B) or AAC (0x40) `esds`, one codec frame per sample.
 
 use std::io::{Seek, SeekFrom, Write};
 use std::time::Duration;
@@ -13,6 +13,9 @@ use anyhow::{bail, Context, Result};
 
 use super::avc;
 use super::boxes::{mp4_now, unity_matrix, Buf};
+use super::hevc;
+use crate::audio::encoder::AudioCodecConfig;
+use crate::video::encoder::CodecParams;
 
 /// Timescale of the video track (ticks per second).
 pub const VIDEO_TIMESCALE: u32 = 90_000;
@@ -21,12 +24,19 @@ const MOVIE_TIMESCALE: u32 = 1_000;
 /// Samples are grouped into chunks covering about this much time.
 const CHUNK_DURATION: Duration = Duration::from_millis(500);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoCodecConfig {
+    H264,
+    Hevc,
+}
+
 #[derive(Debug, Clone)]
 pub struct VideoTrackConfig {
     pub width: u32,
     pub height: u32,
     /// Used only for the duration of the final sample.
     pub fps: f64,
+    pub codec: VideoCodecConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -34,8 +44,9 @@ pub struct AudioTrackConfig {
     pub sample_rate: u32,
     pub channels: u16,
     pub bitrate_bps: u32,
-    /// PCM samples per encoded frame (1152 for MPEG-1 Layer III).
+    /// PCM samples per encoded frame (1152 for MPEG-1 Layer III, 1024 for AAC).
     pub samples_per_frame: u32,
+    pub codec: AudioCodecConfig,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,8 +115,8 @@ pub struct Mp4Writer<W: Write + Seek> {
     mdat_start: u64,
     video: Option<(Track, VideoTrackConfig)>,
     audio: Option<(Track, AudioTrackConfig)>,
-    sps: Option<Vec<u8>>,
-    pps: Option<Vec<u8>>,
+    params: Option<CodecParams>,
+    scratch: Vec<u8>,
     finalized: bool,
 }
 
@@ -119,10 +130,16 @@ impl<W: Write + Seek> Mp4Writer<W> {
         if video.is_none() && audio.is_none() {
             bail!("MP4 needs at least one track");
         }
+        if let Some(a) = &audio
+            && matches!(a.codec, AudioCodecConfig::Pcm { .. })
+        {
+            bail!("PCM audio is not supported in MP4; use AVI");
+        }
+        let hevc = video.as_ref().map(|v| v.codec == VideoCodecConfig::Hevc).unwrap_or(false);
         let mut ftyp = Buf::new();
         ftyp.atom(b"ftyp", |b| {
             b.fourcc(b"isom").u32(0x200);
-            for brand in [b"isom", b"iso2", b"avc1", b"mp41"] {
+            for brand in [b"isom", b"iso2", if hevc { b"hvc1" } else { b"avc1" }, b"mp41"] {
                 b.fourcc(brand);
             }
         });
@@ -138,8 +155,8 @@ impl<W: Write + Seek> Mp4Writer<W> {
             mdat_start,
             video: video.map(|c| (Track::new(VIDEO_TIMESCALE), c)),
             audio: audio.map(|c| (Track::new(c.sample_rate), c)),
-            sps: None,
-            pps: None,
+            params: None,
+            scratch: Vec::new(),
             finalized: false,
         })
     }
@@ -152,19 +169,39 @@ impl<W: Write + Seek> Mp4Writer<W> {
         self.audio.is_some()
     }
 
-    /// Registers SPS/PPS (start-code-free NALs). Only the first pair is kept.
-    pub fn set_parameter_sets(&mut self, sps: &[u8], pps: &[u8]) {
-        if self.sps.is_none() {
-            self.sps = Some(sps.to_vec());
-        }
-        if self.pps.is_none() {
-            self.pps = Some(pps.to_vec());
+    /// Registers the codec parameter sets (start-code-free NALs). Only the
+    /// first set is kept; when none is registered, `push_video` harvests them
+    /// from the first keyframe.
+    pub fn set_codec_params(&mut self, params: &CodecParams) {
+        if self.params.is_none() {
+            self.params = Some(params.clone());
         }
     }
 
-    /// Appends one video access unit already in AVCC form (4-byte length prefixes).
-    pub fn push_video(&mut self, data: &[u8], pts: Duration, keyframe: bool) -> Result<()> {
-        let (track, _) = self.video.as_mut().context("no video track")?;
+    /// Appends one video access unit in Annex-B form. Parameter sets and
+    /// access-unit delimiters are stripped; the rest is length-prefixed.
+    pub fn push_video(&mut self, annexb: &[u8], pts: Duration, keyframe: bool) -> Result<()> {
+        let (track, cfg) = self.video.as_mut().context("no video track")?;
+        let is_hevc = cfg.codec == VideoCodecConfig::Hevc;
+        if self.params.is_none() && keyframe {
+            self.params = CodecParams::from_annexb(annexb, is_hevc);
+        }
+        self.scratch.clear();
+        for nal in avc::split_annexb(annexb) {
+            let skip = if is_hevc {
+                let t = hevc::nal_type(nal);
+                hevc::is_parameter_set(t) || t == hevc::NAL_AUD
+            } else {
+                let t = avc::nal_type(nal);
+                avc::is_parameter_set(t) || t == avc::NAL_AUD
+            };
+            if !skip {
+                avc::push_avcc(&mut self.scratch, nal);
+            }
+        }
+        if self.scratch.is_empty() {
+            return Ok(());
+        }
         let first = *track.first_pts.get_or_insert(pts);
         let rel = pts.saturating_sub(first);
         let mut ticks = duration_to_ticks(rel, track.timescale);
@@ -173,11 +210,11 @@ impl<W: Write + Seek> Mp4Writer<W> {
         {
             ticks = last.pts + 1;
         }
-        let sample = Sample { size: data.len() as u32, pts: ticks, keyframe };
-        Self::push_sample(&mut self.out, &mut self.pos, track, sample, data)
+        let sample = Sample { size: self.scratch.len() as u32, pts: ticks, keyframe };
+        Self::push_sample(&mut self.out, &mut self.pos, track, sample, &self.scratch)
     }
 
-    /// Appends one MP3 frame. Audio samples are assumed contiguous.
+    /// Appends one audio frame (MP3 frame / AAC access unit). Audio samples are assumed contiguous.
     pub fn push_audio(&mut self, frame: &[u8]) -> Result<()> {
         let (track, cfg) = self.audio.as_mut().context("no audio track")?;
         let ticks = track.samples.len() as u64 * cfg.samples_per_frame as u64;
@@ -262,13 +299,16 @@ impl<W: Write + Seek> Mp4Writer<W> {
             if track.samples.is_empty() {
                 bail!("video track has no samples");
             }
-            let sps = self.sps.as_deref().context("no SPS recorded for video track")?;
-            let pps = self.pps.as_deref().context("no PPS recorded for video track")?;
+            let params = self.params.as_ref().context("no parameter sets recorded for video track")?;
             let fallback = (track.timescale as f64 / cfg.fps.max(1.0)).round() as u32;
             let deltas = track.deltas(fallback);
             let dur_ticks = track.duration_ticks(*deltas.last().unwrap());
             let movie_dur = rescale(dur_ticks, track.timescale, MOVIE_TIMESCALE);
-            let stsd = build_avc1(cfg, sps, pps);
+            let stsd = match (cfg.codec, params) {
+                (VideoCodecConfig::H264, CodecParams::H264 { sps, pps }) => build_avc1(cfg, sps, pps),
+                (VideoCodecConfig::Hevc, CodecParams::Hevc { vps, sps, pps }) => build_hvc1(cfg, vps, sps, pps),
+                _ => bail!("codec parameter sets do not match the video track codec"),
+            };
             let trak = build_trak(&TrakParams {
                 track_id: next_track_id,
                 now,
@@ -494,20 +534,55 @@ fn build_stco(b: &mut Buf, track: &Track) {
     }
 }
 
+/// The VisualSampleEntry fields shared by `avc1` and `hvc1`.
+fn visual_sample_entry(b: &mut Buf, cfg: &VideoTrackConfig) {
+    b.zeros(6).u16(1); // reserved, data_reference_index
+    b.u16(0).u16(0).zeros(12); // pre_defined, reserved, pre_defined
+    b.u16(cfg.width as u16).u16(cfg.height as u16);
+    b.u32(0x0048_0000).u32(0x0048_0000); // 72 dpi
+    b.u32(0);
+    b.u16(1); // frame_count
+    let name = b"openclip";
+    b.u8(name.len() as u8).bytes(name).zeros(31 - name.len());
+    b.u16(0x0018); // depth
+    b.u16(0xFFFF); // pre_defined = -1
+}
+
+fn build_hvc1(cfg: &VideoTrackConfig, vps: &[u8], sps: &[u8], pps: &[u8]) -> Vec<u8> {
+    let info = hevc::parse_sps_profile(sps).unwrap_or_default();
+    let mut b = Buf::new();
+    b.atom(b"hvc1", |b| {
+        visual_sample_entry(b, cfg);
+        b.atom(b"hvcC", |b| {
+            b.u8(1); // configurationVersion
+            b.u8((info.profile_space << 6) | (info.tier << 5) | (info.profile_idc & 0x1F));
+            b.u32(info.compat_flags);
+            b.bytes(&info.constraint_flags);
+            b.u8(info.level_idc);
+            b.u16(0xF000); // min_spatial_segmentation_idc = 0
+            b.u8(0xFC); // parallelismType = 0
+            b.u8(0xFC | (info.chroma_format_idc & 3));
+            b.u8(0xF8 | (info.bit_depth_luma.saturating_sub(8) & 7));
+            b.u8(0xF8 | (info.bit_depth_chroma.saturating_sub(8) & 7));
+            b.u16(0); // avgFrameRate
+            // constantFrameRate 0, numTemporalLayers 1, temporalIdNested 0, lengthSizeMinusOne 3
+            b.u8((1 << 3) | 3);
+            b.u8(3); // numOfArrays
+            for (t, nal) in [(hevc::NAL_VPS, vps), (hevc::NAL_SPS, sps), (hevc::NAL_PPS, pps)] {
+                b.u8(0x80 | t); // array_completeness + NAL type
+                b.u16(1);
+                b.u16(nal.len() as u16).bytes(nal);
+            }
+        });
+    });
+    b.into_vec()
+}
+
 fn build_avc1(cfg: &VideoTrackConfig, sps: &[u8], pps: &[u8]) -> Vec<u8> {
     let (profile, compat, level) = avc::sps_profile_info(sps).unwrap_or((66, 0xC0, 31));
     let mut b = Buf::new();
     b.atom(b"avc1", |b| {
-        b.zeros(6).u16(1); // reserved, data_reference_index
-        b.u16(0).u16(0).zeros(12); // pre_defined, reserved, pre_defined
-        b.u16(cfg.width as u16).u16(cfg.height as u16);
-        b.u32(0x0048_0000).u32(0x0048_0000); // 72 dpi
-        b.u32(0);
-        b.u16(1); // frame_count
-        let name = b"openclip";
-        b.u8(name.len() as u8).bytes(name).zeros(31 - name.len());
-        b.u16(0x0018); // depth
-        b.u16(0xFFFF); // pre_defined = -1
+        visual_sample_entry(b, cfg);
         b.atom(b"avcC", |b| {
             b.u8(1).u8(profile).u8(compat).u8(level);
             b.u8(0xFC | 3); // lengthSizeMinusOne = 3
@@ -524,6 +599,11 @@ fn build_avc1(cfg: &VideoTrackConfig, sps: &[u8], pps: &[u8]) -> Vec<u8> {
 }
 
 fn build_mp4a(cfg: &AudioTrackConfig) -> Vec<u8> {
+    // objectTypeIndication: 0x6B = MPEG-1 audio (Layer III), 0x40 = MPEG-4 audio (AAC).
+    let (oti, dsi, buffer_size) = match &cfg.codec {
+        AudioCodecConfig::Aac { asc } => (0x40u8, Some(asc.as_slice()), 0x1800u32),
+        AudioCodecConfig::Mp3 | AudioCodecConfig::Pcm { .. } => (0x6B, None, 0),
+    };
     let mut b = Buf::new();
     b.atom(b"mp4a", |b| {
         b.zeros(6).u16(1);
@@ -535,10 +615,15 @@ fn build_mp4a(cfg: &AudioTrackConfig) -> Vec<u8> {
             b.descriptor(0x03, |b| {
                 b.u16(0).u8(0); // ES_ID, flags
                 b.descriptor(0x04, |b| {
-                    b.u8(0x6B); // objectTypeIndication: MPEG-1 audio (Layer III)
+                    b.u8(oti);
                     b.u8(0x15); // streamType audio (5) << 2 | reserved 1
-                    b.u24(0); // bufferSizeDB
+                    b.u24(buffer_size); // bufferSizeDB
                     b.u32(cfg.bitrate_bps).u32(cfg.bitrate_bps);
+                    if let Some(asc) = dsi {
+                        b.descriptor(0x05, |b| {
+                            b.bytes(asc);
+                        });
+                    }
                 });
                 b.descriptor(0x06, |b| {
                     b.u8(0x02);

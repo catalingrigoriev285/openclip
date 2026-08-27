@@ -1,5 +1,6 @@
 //! Round-trips a small A+V recording through the in-house muxer and validates
-//! the result with the independent `mp4-atom` parser.
+//! the result with the independent `mp4-atom` parser. Also checks the HEVC
+//! (`hvc1`/`hvcC`) and AAC (`esds`) sample entries with synthetic streams.
 
 use std::cell::RefCell;
 use std::io::{Cursor, Seek, SeekFrom, Write};
@@ -7,9 +8,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use mp4_atom::{Any, Codec, FourCC, ReadFrom, StszSamples};
-use openclip::audio::Mp3Encoder;
-use openclip::mux::{AudioTrackConfig, Mp4Writer, VideoTrackConfig, VIDEO_TIMESCALE};
-use openclip::video::{Converter, H264Encoder, PixelFormat, RawFrame};
+use openclip::audio::{AudioCodecConfig, AudioEncoder, Mp3Encoder};
+use openclip::mux::{AudioTrackConfig, Mp4Writer, VideoCodecConfig, VideoTrackConfig, VIDEO_TIMESCALE};
+use openclip::video::{Converter, EncoderRequest, H264Encoder, InputLayout, PixelFormat, RawFrame, VideoEncoder};
 
 const W: u32 = 320;
 const H: u32 = 180;
@@ -20,6 +21,16 @@ const RATE: u32 = 48_000;
 /// In-memory writer we can still read after the muxer consumed it.
 #[derive(Clone)]
 struct Shared(Rc<RefCell<Cursor<Vec<u8>>>>);
+
+impl Shared {
+    fn new() -> Self {
+        Shared(Rc::new(RefCell::new(Cursor::new(Vec::new()))))
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        self.0.borrow().get_ref().clone()
+    }
+}
 
 impl Write for Shared {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -44,19 +55,20 @@ struct Built {
 }
 
 fn build(with_audio: bool) -> Built {
-    let shared = Shared(Rc::new(RefCell::new(Cursor::new(Vec::new()))));
-    let mut converter = Converter::new(W, H).unwrap();
-    let mut video = H264Encoder::new(FPS as f32, 800_000).unwrap();
+    let shared = Shared::new();
+    let mut converter = Converter::new(W, H, InputLayout::I420).unwrap();
+    let mut video = H264Encoder::new(&EncoderRequest::simple(W, H, FPS, 800_000)).unwrap();
     let mut audio = Mp3Encoder::new(RATE, 2, 128).unwrap();
     let audio_cfg = with_audio.then(|| AudioTrackConfig {
         sample_rate: RATE,
         channels: 2,
         bitrate_bps: audio.bitrate_bps(),
         samples_per_frame: audio.samples_per_frame(),
+        codec: audio.codec_config(),
     });
     let mut mux = Mp4Writer::new(
         shared.clone(),
-        Some(VideoTrackConfig { width: W, height: H, fps: FPS as f64 }),
+        Some(VideoTrackConfig { width: W, height: H, fps: FPS as f64, codec: VideoCodecConfig::H264 }),
         audio_cfg,
     )
     .unwrap();
@@ -84,12 +96,13 @@ fn build(with_audio: bool) -> Built {
         }
         frame.pts = Duration::from_secs_f64(i as f64 / FPS as f64);
         converter.convert(&frame).unwrap();
-        let enc = video.encode(&converter.yuv(), frame.pts).unwrap();
-        if let (Some(sps), Some(pps)) = (video.sps(), video.pps()) {
-            mux.set_parameter_sets(sps, pps);
+        let enc = video.encode(converter.frame(), frame.pts).unwrap();
+        if let Some(p) = video.codec_params() {
+            mux.set_codec_params(p);
         }
-        if let Some(f) = enc {
+        for f in enc {
             assert!(f.data.len() > 4);
+            assert!(f.data.starts_with(&[0, 0, 0, 1]), "encoder output must be Annex-B");
             mux.push_video(&f.data, f.pts, f.keyframe).unwrap();
             keyframes.push(f.keyframe);
             video_samples += 1;
@@ -102,21 +115,20 @@ fn build(with_audio: bool) -> Built {
                 pcm.push(v);
                 pcm.push(v);
             }
-            for f in audio.encode(&pcm).unwrap() {
+            for f in AudioEncoder::encode(&mut audio, &pcm).unwrap() {
                 mux.push_audio(&f.data).unwrap();
                 audio_samples += 1;
             }
         }
     }
     if with_audio {
-        for f in audio.flush().unwrap() {
+        for f in AudioEncoder::flush(&mut audio).unwrap() {
             mux.push_audio(&f.data).unwrap();
             audio_samples += 1;
         }
     }
     mux.finalize().unwrap();
-    let bytes = shared.0.borrow().get_ref().clone();
-    Built { bytes, video_samples, keyframes, audio_samples }
+    Built { bytes: shared.bytes(), video_samples, keyframes, audio_samples }
 }
 
 fn parse(bytes: &[u8]) -> Vec<Any> {
@@ -209,7 +221,8 @@ fn video_and_audio_roundtrip() {
         b.keyframes.iter().enumerate().filter(|(_, k)| **k).map(|(i, _)| i as u32 + 1).collect();
     assert_eq!(stss.entries, expected_keys);
 
-    // Walk chunks and verify every sample is a sequence of length-prefixed NALs.
+    // Walk chunks and verify every sample is a sequence of length-prefixed NALs
+    // with the parameter sets stripped out.
     let stco = stbl.stco.as_ref().expect("stco present");
     let counts = chunk_sample_counts(stbl, stco.entries.len());
     let mut sample_idx = 0usize;
@@ -225,7 +238,7 @@ fn video_and_audio_roundtrip() {
                     "bad NAL length {len} in sample {sample_idx}"
                 );
                 let nal_type = bytes[p + 4] & 0x1F;
-                assert!(matches!(nal_type, 1 | 5 | 6 | 9), "unexpected NAL type {nal_type}");
+                assert!(matches!(nal_type, 1 | 5 | 6), "unexpected NAL type {nal_type}");
                 p += 4 + len;
             }
             pos += size;
@@ -277,4 +290,141 @@ fn video_only_roundtrip() {
     let stbl = &moov.trak[0].mdia.minf.stbl;
     let n: u32 = stbl.stts.entries.iter().map(|e| e.sample_count).sum();
     assert_eq!(n as usize, b.video_samples);
+}
+
+/// Finds a box by fourcc anywhere in `bytes` and returns its payload.
+fn find_box<'a>(bytes: &'a [u8], fourcc: &[u8; 4]) -> Option<&'a [u8]> {
+    let pos = bytes.windows(4).position(|w| w == fourcc)?;
+    let start = pos - 4;
+    let size = u32::from_be_bytes(bytes[start..start + 4].try_into().unwrap()) as usize;
+    Some(&bytes[start + 8..start + size])
+}
+
+/// Synthetic HEVC stream (VPS/SPS/PPS from a real x265 encode, fake slices):
+/// the muxer must write `hvc1` + `hvcC`, strip parameter sets from samples
+/// and length-prefix the rest.
+#[test]
+fn hevc_sample_entry() {
+    const VPS: [u8; 24] = [
+        0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x03, 0x00, 0x5d, 0x95, 0x98, 0x09,
+    ];
+    const SPS: [u8; 41] = [
+        0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x5d,
+        0xa0, 0x02, 0x80, 0x80, 0x2d, 0x16, 0x59, 0x59, 0xa4, 0x93, 0x2b, 0x9a, 0x02, 0x00, 0x00, 0x03, 0x00, 0x02,
+        0x00, 0x00, 0x03, 0x00, 0x3c,
+    ];
+    const PPS: [u8; 7] = [0x44, 0x01, 0xc1, 0x72, 0xb4, 0x62, 0x40];
+    let annexb = |nals: &[&[u8]]| -> Vec<u8> {
+        let mut v = Vec::new();
+        for n in nals {
+            v.extend_from_slice(&[0, 0, 0, 1]);
+            v.extend_from_slice(n);
+        }
+        v
+    };
+    let idr: Vec<u8> = [0x26u8, 0x01, 0xaf, 0x12, 0x34].to_vec(); // NAL type 19 (IDR_W_RADL)
+    let slice: Vec<u8> = [0x02u8, 0x01, 0xd0, 0x56].to_vec(); // NAL type 1 (TRAIL_R)
+
+    let shared = Shared::new();
+    let mut mux = Mp4Writer::new(
+        shared.clone(),
+        Some(VideoTrackConfig { width: 1280, height: 720, fps: 30.0, codec: VideoCodecConfig::Hevc }),
+        None,
+    )
+    .unwrap();
+    // No set_codec_params: the writer must harvest VPS/SPS/PPS from the keyframe.
+    mux.push_video(&annexb(&[&VPS, &SPS, &PPS, &idr]), Duration::ZERO, true).unwrap();
+    for i in 1..5u64 {
+        mux.push_video(&annexb(&[&slice]), Duration::from_millis(i * 33), false).unwrap();
+    }
+    mux.finalize().unwrap();
+    let bytes = shared.bytes();
+
+    let ftyp = find_box(&bytes, b"ftyp").unwrap();
+    assert!(ftyp.windows(4).any(|w| w == b"hvc1"), "ftyp should carry the hvc1 brand");
+    let hvc1 = find_box(&bytes, b"hvc1").expect("hvc1 sample entry");
+    assert_eq!(u16::from_be_bytes([hvc1[24], hvc1[25]]), 1280);
+    assert_eq!(u16::from_be_bytes([hvc1[26], hvc1[27]]), 720);
+    let hvcc = find_box(&bytes, b"hvcC").expect("hvcC");
+    assert_eq!(hvcc[0], 1, "configurationVersion");
+    assert_eq!(hvcc[1] & 0x1F, 1, "general_profile_idc Main");
+    assert_eq!(u32::from_be_bytes(hvcc[2..6].try_into().unwrap()), 0x6000_0000);
+    assert_eq!(hvcc[12], 93, "level_idc");
+    assert_eq!(hvcc[16] & 3, 1, "chroma 4:2:0");
+    assert_eq!(hvcc[21] & 3, 3, "lengthSizeMinusOne");
+    assert_eq!(hvcc[22], 3, "three parameter-set arrays");
+    let mut p = 23;
+    for (t, nal) in [(32u8, &VPS[..]), (33, &SPS[..]), (34, &PPS[..])] {
+        assert_eq!(hvcc[p] & 0x3F, t);
+        assert_eq!(u16::from_be_bytes([hvcc[p + 1], hvcc[p + 2]]), 1);
+        let len = u16::from_be_bytes([hvcc[p + 3], hvcc[p + 4]]) as usize;
+        assert_eq!(&hvcc[p + 5..p + 5 + len], nal);
+        p += 5 + len;
+    }
+
+    // Samples: parameter sets stripped, each NAL length-prefixed.
+    let stsz = find_box(&bytes, b"stsz").unwrap();
+    let count = u32::from_be_bytes(stsz[8..12].try_into().unwrap());
+    assert_eq!(count, 5);
+    let first_size = u32::from_be_bytes(stsz[12..16].try_into().unwrap()) as usize;
+    assert_eq!(first_size, 4 + idr.len(), "keyframe sample holds only the IDR NAL");
+    let mdat = find_box(&bytes, b"mdat").unwrap();
+    // 64-bit mdat: payload begins after the 8-byte largesize.
+    let payload = &mdat[8..];
+    assert_eq!(&payload[..4], &(idr.len() as u32).to_be_bytes());
+    assert_eq!(&payload[4..4 + idr.len()], &idr[..]);
+    assert_eq!(&payload[4 + idr.len()..8 + idr.len()], &(slice.len() as u32).to_be_bytes());
+}
+
+/// AAC audio gets an `esds` with objectTypeIndication 0x40 and the
+/// AudioSpecificConfig as DecoderSpecificInfo.
+#[test]
+fn aac_sample_entry() {
+    let asc = vec![0x11, 0x90]; // AAC-LC, 48 kHz, stereo
+    let shared = Shared::new();
+    let mut mux = Mp4Writer::new(
+        shared.clone(),
+        None,
+        Some(AudioTrackConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            bitrate_bps: 192_000,
+            samples_per_frame: 1024,
+            codec: AudioCodecConfig::Aac { asc: asc.clone() },
+        }),
+    )
+    .unwrap();
+    for i in 0..10u8 {
+        mux.push_audio(&[0x21, i, 0x00, 0x03]).unwrap();
+    }
+    mux.finalize().unwrap();
+    let bytes = shared.bytes();
+
+    let atoms = parse(&bytes);
+    let moov = atoms.iter().find_map(|a| if let Any::Moov(m) = a { Some(m) } else { None }).unwrap();
+    let stbl = &moov.trak[0].mdia.minf.stbl;
+    let mp4a = match &stbl.stsd.codecs[0] {
+        Codec::Mp4a(a) => a,
+        other => panic!("expected mp4a, got {other:?}"),
+    };
+    assert_eq!(mp4a.audio.sample_rate.integer(), 48_000);
+    assert_eq!(mp4a.esds.es_desc.dec_config.object_type_indication, 0x40);
+    assert_eq!(mp4a.esds.es_desc.dec_config.dec_specific.as_ref().map(|d| d.as_slice()), Some(asc.as_slice()));
+    assert_eq!(stbl.stts.entries[0].sample_delta, 1024);
+    assert_eq!(stbl.stts.entries[0].sample_count, 10);
+
+    // PCM is refused in MP4.
+    let err = Mp4Writer::new(
+        Shared::new(),
+        None,
+        Some(AudioTrackConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            bitrate_bps: 1_536_000,
+            samples_per_frame: 960,
+            codec: AudioCodecConfig::Pcm { bits: 16 },
+        }),
+    );
+    assert!(err.is_err());
 }

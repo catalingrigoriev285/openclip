@@ -49,6 +49,10 @@ pub fn split_annexb(stream: &[u8]) -> Vec<&[u8]> {
     out
 }
 
+pub fn is_parameter_set(nal_type: u8) -> bool {
+    matches!(nal_type, NAL_SPS | NAL_PPS)
+}
+
 /// Profile / compatibility / level bytes from an SPS NAL (without start code).
 pub fn sps_profile_info(sps: &[u8]) -> Option<(u8, u8, u8)> {
     if sps.len() >= 4 && nal_type(sps) == NAL_SPS {

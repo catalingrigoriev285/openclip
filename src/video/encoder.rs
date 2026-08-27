@@ -1,118 +1,205 @@
-//! OpenH264 wrapper producing AVCC-formatted access units for the muxer.
+//! Video encoder abstraction: OpenH264 (bundled, CPU) and, on Windows, Media
+//! Foundation transforms (hardware H.264 / HEVC and Microsoft's software H.264).
+//!
+//! Encoders produce Annex-B access units (start codes, parameter-set NALs kept
+//! in-band on keyframes). Container writers convert as they need: the MP4 muxer
+//! length-prefixes and strips parameter sets, the AVI muxer stores them verbatim.
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use openh264::encoder::{
-    BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, RateControlMode,
-    SpsPpsStrategy, UsageType,
-};
-use openh264::formats::YUVSource;
-use openh264::{OpenH264API, Timestamp};
+use anyhow::Result;
 
-use crate::mux::avc;
+use crate::mux::{avc, hevc};
+use crate::settings::{Profiles, RateControl, VideoCodec};
 
-/// One encoded access unit.
+/// One encoded access unit in Annex-B form.
 #[derive(Debug, Clone)]
 pub struct EncodedFrame {
-    /// NAL units with 4-byte length prefixes (SPS/PPS removed).
     pub data: Vec<u8>,
     pub keyframe: bool,
     pub pts: Duration,
 }
 
-pub struct H264Encoder {
-    inner: Encoder,
-    sps: Option<Vec<u8>>,
-    pps: Option<Vec<u8>>,
-    frames: u64,
+/// Start-code-free parameter sets needed for the MP4 sample entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodecParams {
+    H264 { sps: Vec<u8>, pps: Vec<u8> },
+    Hevc { vps: Vec<u8>, sps: Vec<u8>, pps: Vec<u8> },
 }
 
-impl H264Encoder {
-    /// Creates an encoder tuned for real-time screen content.
-    pub fn new(fps: f32, bitrate_bps: u32) -> Result<Self> {
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get().min(16) as u16)
-            .unwrap_or(1);
-        let keyint = (fps.max(1.0) * 2.0).round() as u32;
-        let config = EncoderConfig::new()
-            .bitrate(BitRate::from_bps(bitrate_bps))
-            .max_frame_rate(FrameRate::from_hz(fps))
-            .rate_control_mode(RateControlMode::Bitrate)
-            .usage_type(UsageType::ScreenContentRealTime)
-            .intra_frame_period(IntraFramePeriod::from_num_frames(keyint))
-            .sps_pps_strategy(SpsPpsStrategy::ConstantId)
-            // Required for bitrate mode to actually cap the bitrate; skipped
-            // frames simply extend the previous sample (durations are real).
-            .skip_frames(true)
-            .adaptive_quantization(false)
-            .background_detection(false)
-            .num_threads(threads);
-        let inner = Encoder::with_api_config(OpenH264API::from_source(), config)
-            .context("failed to create OpenH264 encoder")?;
-        Ok(Self { inner, sps: None, pps: None, frames: 0 })
-    }
-
-    pub fn sps(&self) -> Option<&[u8]> {
-        self.sps.as_deref()
-    }
-
-    pub fn pps(&self) -> Option<&[u8]> {
-        self.pps.as_deref()
-    }
-
-    pub fn frames_encoded(&self) -> u64 {
-        self.frames
-    }
-
-    /// Encodes one frame. Returns `None` if the encoder skipped it.
-    pub fn encode<S: YUVSource>(&mut self, yuv: &S, pts: Duration) -> Result<Option<EncodedFrame>> {
-        let ts = Timestamp::from_millis(pts.as_millis() as u64);
-        let bs = self.inner.encode_at(yuv, ts).context("OpenH264 encode failed")?;
-        let frame_type = bs.frame_type();
-        if matches!(frame_type, FrameType::Skip | FrameType::Invalid) {
-            return Ok(None);
+impl CodecParams {
+    /// Harvests parameter sets from an Annex-B access unit, if all are present.
+    pub fn from_annexb(data: &[u8], is_hevc: bool) -> Option<CodecParams> {
+        let nals = avc::split_annexb(data);
+        if is_hevc {
+            let find = |t: u8| nals.iter().find(|n| hevc::nal_type(n) == t).map(|n| n.to_vec());
+            Some(CodecParams::Hevc { vps: find(hevc::NAL_VPS)?, sps: find(hevc::NAL_SPS)?, pps: find(hevc::NAL_PPS)? })
+        } else {
+            let find = |t: u8| nals.iter().find(|n| avc::nal_type(n) == t).map(|n| n.to_vec());
+            Some(CodecParams::H264 { sps: find(avc::NAL_SPS)?, pps: find(avc::NAL_PPS)? })
         }
-        let mut data = Vec::new();
-        for l in 0..bs.num_layers() {
-            let layer = bs.layer(l).unwrap();
-            for n in 0..layer.nal_count() {
-                let raw = layer.nal_unit(n).unwrap();
-                debug_assert!(
-                    raw.starts_with(&[0, 0, 0, 1]) || raw.starts_with(&[0, 0, 1]),
-                    "OpenH264 NAL without Annex-B start code"
-                );
-                // A NAL slot may hold several concatenated NALs; split defensively.
-                for nal in avc::split_annexb(raw) {
-                    match avc::nal_type(nal) {
-                        avc::NAL_SPS => {
-                            if self.sps.is_none() {
-                                self.sps = Some(nal.to_vec());
-                            }
-                        }
-                        avc::NAL_PPS => {
-                            if self.pps.is_none() {
-                                self.pps = Some(nal.to_vec());
-                            }
-                        }
-                        _ => avc::push_avcc(&mut data, nal),
-                    }
+    }
+
+    pub fn is_hevc(&self) -> bool {
+        matches!(self, CodecParams::Hevc { .. })
+    }
+}
+
+/// Pixel layout an encoder wants its input in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputLayout {
+    I420,
+    Nv12,
+}
+
+/// One converted frame, borrowed from the [`crate::video::Converter`].
+#[derive(Debug, Clone, Copy)]
+pub enum FrameInput<'a> {
+    I420 { y: &'a [u8], u: &'a [u8], v: &'a [u8], strides: (usize, usize, usize), dims: (u32, u32) },
+    Nv12 { y: &'a [u8], uv: &'a [u8], strides: (usize, usize), dims: (u32, u32) },
+}
+
+impl FrameInput<'_> {
+    pub fn dims(&self) -> (u32, u32) {
+        match self {
+            FrameInput::I420 { dims, .. } | FrameInput::Nv12 { dims, .. } => *dims,
+        }
+    }
+}
+
+pub trait VideoEncoder: Send {
+    fn input_layout(&self) -> InputLayout;
+    /// Whether the output bitstream is HEVC (else H.264).
+    fn is_hevc(&self) -> bool;
+    /// Encodes one frame. Returns nothing when the encoder skipped the frame
+    /// (rate control) or is still buffering (asynchronous hardware encoders),
+    /// and possibly several frames when a backlog is released.
+    fn encode(&mut self, frame: FrameInput<'_>, pts: Duration) -> Result<Vec<EncodedFrame>>;
+    /// Drains everything still buffered; called once when recording stops.
+    fn flush(&mut self) -> Result<Vec<EncodedFrame>>;
+    /// Parameter sets, available once the first keyframe has been produced.
+    fn codec_params(&self) -> Option<&CodecParams>;
+    fn force_keyframe(&mut self);
+    /// Human-readable description for logs and the status strip.
+    fn describe(&self) -> String;
+}
+
+/// Everything an encoder needs to be configured, resolved from the settings
+/// and the measured output size.
+#[derive(Debug, Clone)]
+pub struct EncoderRequest {
+    pub codec: VideoCodec,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub rate_control: RateControl,
+    /// Target bitrate in bits per second (derived from the quality when in quality mode).
+    pub target_bitrate_bps: u32,
+    pub keyframe_interval_frames: u32,
+    pub profiles: Profiles,
+}
+
+impl EncoderRequest {
+    /// Plain OpenH264 request at a fixed bitrate, for tests and examples.
+    pub fn simple(width: u32, height: u32, fps: u32, bitrate_bps: u32) -> Self {
+        Self {
+            codec: VideoCodec::OpenH264,
+            width,
+            height,
+            fps,
+            rate_control: RateControl::ConstantBitrate { kbps: bitrate_bps / 1000 },
+            target_bitrate_bps: bitrate_bps,
+            keyframe_interval_frames: fps.max(1) * 2,
+            profiles: Profiles::default(),
+        }
+    }
+}
+
+/// GPU / codec vendor of an enumerated encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vendor {
+    Nvidia,
+    Amd,
+    Intel,
+    Microsoft,
+    Other,
+}
+
+impl Vendor {
+    pub fn label(self) -> &'static str {
+        match self {
+            Vendor::Nvidia => "NVIDIA",
+            Vendor::Amd => "AMD",
+            Vendor::Intel => "Intel",
+            Vendor::Microsoft => "Microsoft",
+            Vendor::Other => "Other",
+        }
+    }
+}
+
+/// An encoder found on this machine (Media Foundation on Windows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderInfo {
+    pub codec: VideoCodec,
+    /// Short user-facing label, e.g. "H264 (NVIDIA® NVENC)".
+    pub label: String,
+    /// The transform's own name, e.g. "NVIDIA H264 Encoder MFT".
+    pub friendly_name: String,
+    pub vendor: Vendor,
+    pub hardware: bool,
+    /// Transform CLSID as a 128-bit integer (platform-neutral storage).
+    pub clsid: u128,
+}
+
+/// Encoders available on this machine besides the bundled OpenH264. Empty on
+/// platforms without Media Foundation. Enumeration can take a few hundred
+/// milliseconds the first time; the result is cached.
+pub fn available_encoders() -> Vec<EncoderInfo> {
+    #[cfg(windows)]
+    {
+        super::mf::available_encoders()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Re-runs the enumeration (e.g. after a driver change) and updates the cache.
+pub fn refresh_encoders() -> Vec<EncoderInfo> {
+    #[cfg(windows)]
+    {
+        super::mf::refresh_encoders()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Creates the requested encoder, falling back to OpenH264 when a Media
+/// Foundation encoder is unavailable or refuses the configuration. The note
+/// explains the fallback for the user.
+pub fn create_video_encoder(req: &EncoderRequest) -> Result<(Box<dyn VideoEncoder>, Option<String>)> {
+    if req.codec.needs_mf() {
+        #[cfg(windows)]
+        {
+            match super::mf::create_encoder(req) {
+                Ok(enc) => return Ok((enc, None)),
+                Err(e) => {
+                    log::warn!("{}: {e:#}; falling back to OpenH264", req.codec.generic_label());
+                    let enc = super::openh264::H264Encoder::new(req)?;
+                    let note = format!("{} unavailable ({e}); recorded with OpenH264", req.codec.generic_label());
+                    return Ok((Box::new(enc), Some(note)));
                 }
             }
         }
-        if data.is_empty() {
-            return Ok(None);
+        #[cfg(not(windows))]
+        {
+            let enc = super::openh264::H264Encoder::new(req)?;
+            let note = format!("{} needs Windows; recorded with OpenH264", req.codec.generic_label());
+            return Ok((Box::new(enc), Some(note)));
         }
-        self.frames += 1;
-        Ok(Some(EncodedFrame {
-            data,
-            keyframe: matches!(frame_type, FrameType::IDR | FrameType::I),
-            pts,
-        }))
     }
-
-    /// Requests that the next frame be an IDR frame.
-    pub fn force_keyframe(&mut self) {
-        self.inner.force_intra_frame();
-    }
+    Ok((Box::new(super::openh264::H264Encoder::new(req)?), None))
 }

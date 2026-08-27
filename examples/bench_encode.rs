@@ -1,36 +1,55 @@
 //! Encodes a synthetic moving-gradient sequence to measure encoder throughput
 //! and produce a test MP4 (video + 440 Hz tone that beeps on white flashes).
 //!
-//! Usage: cargo run --release --example bench_encode [-- WIDTH HEIGHT SECONDS OUT.mp4]
+//! Usage: cargo run --release --example bench_encode [-- WIDTH HEIGHT SECONDS OUT.mp4 [--codec openh264|h264-hw|h264-sw|hevc]]
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::time::{Duration, Instant};
 
-use openclip::audio::Mp3Encoder;
-use openclip::mux::{AudioTrackConfig, Mp4Writer, VideoTrackConfig};
-use openclip::video::{Converter, H264Encoder, PixelFormat, RawFrame};
+use openclip::audio::{AudioEncoder, Mp3Encoder};
+use openclip::mux::{AudioTrackConfig, Mp4Writer, VideoCodecConfig, VideoTrackConfig};
+use openclip::settings::VideoCodec;
+use openclip::video::{create_video_encoder, Converter, EncoderRequest, PixelFormat, RawFrame};
 
 fn main() -> anyhow::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args: Vec<String> = std::env::args().collect();
     let width: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1920);
     let height: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1080);
     let seconds: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
     let out = args.get(4).cloned().unwrap_or_else(|| "bench.mp4".to_string());
+    let codec = match args.iter().position(|a| a == "--codec").and_then(|i| args.get(i + 1)).map(|s| s.as_str()) {
+        Some("h264-hw") => VideoCodec::MfH264Hardware,
+        Some("h264-sw") => VideoCodec::MfH264Software,
+        Some("hevc") => VideoCodec::MfHevcHardware,
+        _ => VideoCodec::OpenH264,
+    };
     let fps = 30u32;
     let sample_rate = 48_000u32;
 
-    let mut converter = Converter::new(width, height)?;
-    let mut video = H264Encoder::new(fps as f32, 6_000_000)?;
+    let req = EncoderRequest { codec, ..EncoderRequest::simple(width, height, fps, 6_000_000) };
+    let (mut video, note) = create_video_encoder(&req)?;
+    if let Some(n) = note {
+        println!("note: {n}");
+    }
+    println!("encoder: {}", video.describe());
+    let mut converter = Converter::new(width, height, video.input_layout())?;
     let mut audio = Mp3Encoder::new(sample_rate, 2, 160)?;
     let mut mux = Mp4Writer::new(
         BufWriter::new(File::create(&out)?),
-        Some(VideoTrackConfig { width, height, fps: fps as f64 }),
+        Some(VideoTrackConfig {
+            width,
+            height,
+            fps: fps as f64,
+            codec: if video.is_hevc() { VideoCodecConfig::Hevc } else { VideoCodecConfig::H264 },
+        }),
         Some(AudioTrackConfig {
             sample_rate,
             channels: 2,
             bitrate_bps: audio.bitrate_bps(),
             samples_per_frame: audio.samples_per_frame(),
+            codec: audio.codec_config(),
         }),
     )?;
 
@@ -50,6 +69,10 @@ fn main() -> anyhow::Result<()> {
     let mut pcm = Vec::new();
     let mut audio_pos = 0u64; // samples generated so far
 
+    let mut push = |mux: &mut Mp4Writer<BufWriter<File>>, f: &openclip::video::EncodedFrame| -> anyhow::Result<()> {
+        mux.push_video(&f.data, f.pts, f.keyframe)
+    };
+
     for i in 0..total {
         let t = i as f32 / fps as f32;
         let flash = i % fps == 0; // one white flash per second
@@ -61,14 +84,14 @@ fn main() -> anyhow::Result<()> {
         convert_time += c0.elapsed();
 
         let e0 = Instant::now();
-        let encoded = video.encode(&converter.yuv(), frame.pts)?;
+        let encoded = video.encode(converter.frame(), frame.pts)?;
         encode_time += e0.elapsed();
 
-        if let (Some(sps), Some(pps)) = (video.sps(), video.pps()) {
-            mux.set_parameter_sets(sps, pps);
+        if let Some(p) = video.codec_params() {
+            mux.set_codec_params(p);
         }
-        if let Some(f) = encoded {
-            mux.push_video(&f.data, f.pts, f.keyframe)?;
+        for f in &encoded {
+            push(&mut mux, f)?;
         }
 
         // Audio for this frame interval: 100 ms beep at each flash.
@@ -82,11 +105,14 @@ fn main() -> anyhow::Result<()> {
             pcm.push(v);
             audio_pos += 1;
         }
-        for mp3 in audio.encode(&pcm)? {
+        for mp3 in AudioEncoder::encode(&mut audio, &pcm)? {
             mux.push_audio(&mp3.data)?;
         }
     }
-    for mp3 in audio.flush()? {
+    for f in video.flush()? {
+        push(&mut mux, &f)?;
+    }
+    for mp3 in AudioEncoder::flush(&mut audio)? {
         mux.push_audio(&mp3.data)?;
     }
     let elapsed = start.elapsed();

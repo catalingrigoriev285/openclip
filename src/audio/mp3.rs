@@ -4,6 +4,8 @@
 use anyhow::{anyhow, Context, Result};
 use mp3lame_encoder::{Bitrate, Builder, Encoder, FlushNoGap, InterleavedPcm, Mode, Quality};
 
+use super::encoder::{AudioCodecConfig, AudioEncoder, AudioFrame};
+
 /// Samples per frame for MPEG-1 Layer III (32/44.1/48 kHz).
 pub const MPEG1_SAMPLES_PER_FRAME: u32 = 1152;
 /// LAME encoder delay (576) + standard decoder delay (529): the first samples
@@ -11,12 +13,8 @@ pub const MPEG1_SAMPLES_PER_FRAME: u32 = 1152;
 /// samples so the decoded stream lines up with the video timeline.
 pub const CODEC_DELAY_SAMPLES: usize = 1105;
 
-#[derive(Debug, Clone)]
-pub struct Mp3Frame {
-    pub data: Vec<u8>,
-    /// PCM samples (per channel) represented by this frame.
-    pub samples: u32,
-}
+/// One MP3 frame (kept as an alias of the generic audio frame).
+pub type Mp3Frame = AudioFrame;
 
 pub struct Mp3Encoder {
     inner: Encoder,
@@ -60,22 +58,6 @@ impl Mp3Encoder {
             skip_samples: CODEC_DELAY_SAMPLES,
             frames_emitted: 0,
         })
-    }
-
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    pub fn channels(&self) -> u8 {
-        self.channels
-    }
-
-    pub fn bitrate_bps(&self) -> u32 {
-        self.bitrate_kbps * 1000
-    }
-
-    pub fn samples_per_frame(&self) -> u32 {
-        MPEG1_SAMPLES_PER_FRAME
     }
 
     /// Encodes interleaved f32 PCM (in -1..1). Returns complete frames.
@@ -145,6 +127,40 @@ impl Mp3Encoder {
             self.pending.drain(..pos);
         }
         frames
+    }
+}
+
+impl AudioEncoder for Mp3Encoder {
+    fn encode(&mut self, interleaved: &[f32]) -> Result<Vec<AudioFrame>> {
+        Mp3Encoder::encode(self, interleaved)
+    }
+
+    fn flush(&mut self) -> Result<Vec<AudioFrame>> {
+        Mp3Encoder::flush(self)
+    }
+
+    fn samples_per_frame(&self) -> u32 {
+        MPEG1_SAMPLES_PER_FRAME
+    }
+
+    fn bitrate_bps(&self) -> u32 {
+        self.bitrate_kbps * 1000
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels as u16
+    }
+
+    fn codec_config(&self) -> AudioCodecConfig {
+        AudioCodecConfig::Mp3
+    }
+
+    fn describe(&self) -> String {
+        format!("MP3 (LAME) {} Hz {}ch {} kbps", self.sample_rate, self.channels, self.bitrate_kbps)
     }
 }
 

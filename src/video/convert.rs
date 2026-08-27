@@ -1,14 +1,15 @@
-//! Raw frame representation and BGRA/RGBA → I420 conversion.
+//! Raw frame representation and BGRA/RGBA → I420 / NV12 conversion.
 
 use std::time::Duration;
 
 use anyhow::{bail, Result};
 use openh264::formats::YUVSlices;
 
+use super::encoder::{FrameInput, InputLayout};
 use super::mouse_fx::MouseSnapshot;
 use yuv::{
-    bgra_to_yuv420, rgba_to_yuv420, BufferStoreMut, YuvChromaSubsampling, YuvConversionMode,
-    YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
+    bgra_to_yuv420, bgra_to_yuv_nv12, rgba_to_yuv420, rgba_to_yuv_nv12, BufferStoreMut, YuvBiPlanarImageMut,
+    YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,73 +77,100 @@ impl RawFrame {
     }
 }
 
-/// Reusable BGRA/RGBA → I420 converter. Output dimensions are forced even
-/// (4:2:0 requires it); odd source frames lose their last column/row.
+/// Reusable BGRA/RGBA → I420 or NV12 converter. Output dimensions are forced
+/// even (4:2:0 requires it); odd source frames lose their last column/row.
 pub struct Converter {
-    planar: YuvPlanarImageMut<'static, u8>,
+    layout: InputLayout,
+    i420: Option<YuvPlanarImageMut<'static, u8>>,
+    nv12: Option<YuvBiPlanarImageMut<'static, u8>>,
+    dims: (u32, u32),
 }
 
 impl Converter {
-    pub fn new(width: u32, height: u32) -> Result<Self> {
+    pub fn new(width: u32, height: u32, layout: InputLayout) -> Result<Self> {
         let (w, h) = even_dims(width, height);
         if w == 0 || h == 0 {
             bail!("frame too small to encode: {width}x{height}");
         }
-        Ok(Self { planar: YuvPlanarImageMut::alloc(w, h, YuvChromaSubsampling::Yuv420) })
+        let (i420, nv12) = match layout {
+            InputLayout::I420 => (Some(YuvPlanarImageMut::alloc(w, h, YuvChromaSubsampling::Yuv420)), None),
+            InputLayout::Nv12 => (None, Some(YuvBiPlanarImageMut::alloc(w, h, YuvChromaSubsampling::Yuv420))),
+        };
+        Ok(Self { layout, i420, nv12, dims: (w, h) })
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
-        (self.planar.width, self.planar.height)
+        self.dims
     }
 
-    /// Converts `frame` into the internal I420 buffers. The frame must match
-    /// the converter dimensions after even rounding.
+    pub fn layout(&self) -> InputLayout {
+        self.layout
+    }
+
+    /// Converts `frame` into the internal buffers. The frame must match the
+    /// converter dimensions after even rounding.
     pub fn convert(&mut self, frame: &RawFrame) -> Result<()> {
         let (w, h) = even_dims(frame.width, frame.height);
-        if (w, h) != self.dimensions() {
-            bail!(
-                "frame size {}x{} does not match converter {}x{}",
-                frame.width,
-                frame.height,
-                self.planar.width,
-                self.planar.height
-            );
+        if (w, h) != self.dims {
+            bail!("frame size {}x{} does not match converter {}x{}", frame.width, frame.height, self.dims.0, self.dims.1);
         }
         let needed = frame.stride as usize * (h as usize - 1) + w as usize * 4;
         if frame.data.len() < needed {
             bail!("frame buffer too small: {} < {}", frame.data.len(), needed);
         }
         let data = &frame.data[..needed];
-        let res = match frame.format {
-            PixelFormat::Bgra => bgra_to_yuv420(
-                &mut self.planar,
-                data,
-                frame.stride,
-                YuvRange::Limited,
-                YuvStandardMatrix::Bt709,
-                YuvConversionMode::Balanced,
-            ),
-            PixelFormat::Rgba => rgba_to_yuv420(
-                &mut self.planar,
-                data,
-                frame.stride,
-                YuvRange::Limited,
-                YuvStandardMatrix::Bt709,
-                YuvConversionMode::Balanced,
-            ),
+        let (range, matrix, mode) = (YuvRange::Limited, YuvStandardMatrix::Bt709, YuvConversionMode::Balanced);
+        let res = match (self.layout, frame.format) {
+            (InputLayout::I420, PixelFormat::Bgra) => {
+                bgra_to_yuv420(self.i420.as_mut().unwrap(), data, frame.stride, range, matrix, mode)
+            }
+            (InputLayout::I420, PixelFormat::Rgba) => {
+                rgba_to_yuv420(self.i420.as_mut().unwrap(), data, frame.stride, range, matrix, mode)
+            }
+            (InputLayout::Nv12, PixelFormat::Bgra) => {
+                bgra_to_yuv_nv12(self.nv12.as_mut().unwrap(), data, frame.stride, range, matrix, mode)
+            }
+            (InputLayout::Nv12, PixelFormat::Rgba) => {
+                rgba_to_yuv_nv12(self.nv12.as_mut().unwrap(), data, frame.stride, range, matrix, mode)
+            }
         };
         res.map_err(|e| anyhow::anyhow!("yuv conversion failed: {e}"))?;
         Ok(())
     }
 
     /// Zero-copy view of the converted planes for the encoder.
+    pub fn frame(&self) -> FrameInput<'_> {
+        match self.layout {
+            InputLayout::I420 => {
+                let p = self.i420.as_ref().unwrap();
+                FrameInput::I420 {
+                    y: plane(&p.y_plane),
+                    u: plane(&p.u_plane),
+                    v: plane(&p.v_plane),
+                    strides: (p.y_stride as usize, p.u_stride as usize, p.v_stride as usize),
+                    dims: self.dims,
+                }
+            }
+            InputLayout::Nv12 => {
+                let p = self.nv12.as_ref().unwrap();
+                FrameInput::Nv12 {
+                    y: plane(&p.y_plane),
+                    uv: plane(&p.uv_plane),
+                    strides: (p.y_stride as usize, p.uv_stride as usize),
+                    dims: self.dims,
+                }
+            }
+        }
+    }
+
+    /// I420 planes as OpenH264 slices (I420 converters only).
     pub fn yuv(&self) -> YUVSlices<'_> {
-        let p = &self.planar;
-        YUVSlices::new(
-            (plane(&p.y_plane), plane(&p.u_plane), plane(&p.v_plane)),
-            (p.width as usize, p.height as usize),
-            (p.y_stride as usize, p.u_stride as usize, p.v_stride as usize),
-        )
+        match self.frame() {
+            FrameInput::I420 { y, u, v, strides, dims } => {
+                YUVSlices::new((y, u, v), (dims.0 as usize, dims.1 as usize), strides)
+            }
+            FrameInput::Nv12 { .. } => panic!("yuv() called on an NV12 converter"),
+        }
     }
 }
 
@@ -171,7 +199,7 @@ mod tests {
     #[test]
     fn converts_solid_white_to_limited_range_y() {
         let frame = solid(16, 8, [255, 255, 255, 255]);
-        let mut c = Converter::new(16, 8).unwrap();
+        let mut c = Converter::new(16, 8, InputLayout::I420).unwrap();
         c.convert(&frame).unwrap();
         let yuv = c.yuv();
         assert_eq!(yuv.dimensions(), (16, 8));
@@ -180,9 +208,24 @@ mod tests {
     }
 
     #[test]
+    fn converts_to_nv12() {
+        let frame = solid(16, 8, [0, 0, 255, 255]); // pure red (BGRA)
+        let mut c = Converter::new(16, 8, InputLayout::Nv12).unwrap();
+        c.convert(&frame).unwrap();
+        let FrameInput::Nv12 { y, uv, strides, dims } = c.frame() else { panic!("nv12") };
+        assert_eq!(dims, (16, 8));
+        assert_eq!(strides, (16, 16));
+        assert_eq!(y.len(), 16 * 8);
+        assert_eq!(uv.len(), 16 * 4);
+        // Red: low luma, low Cb, high Cr.
+        assert!(y[0] < 90, "y={}", y[0]);
+        assert!(uv[0] < 128 && uv[1] > 200, "uv={:?}", &uv[..2]);
+    }
+
+    #[test]
     fn odd_sizes_round_down() {
         let frame = solid(15, 9, [0, 0, 0, 255]);
-        let mut c = Converter::new(15, 9).unwrap();
+        let mut c = Converter::new(15, 9, InputLayout::I420).unwrap();
         assert_eq!(c.dimensions(), (14, 8));
         c.convert(&frame).unwrap();
     }

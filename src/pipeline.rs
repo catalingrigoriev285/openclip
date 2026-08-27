@@ -1,8 +1,6 @@
-//! Recording pipeline: capture thread → encode thread (H.264 + MP4 muxer),
-//! plus an audio thread (cpal → mixer → MP3) feeding the muxer.
+//! Recording pipeline: capture thread → encode thread (video encoder + muxer),
+//! plus an audio thread (cpal → mixer → audio encoder) feeding the muxer.
 
-use std::fs::File;
-use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -14,16 +12,16 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::audio::capture::{open_microphone, open_system_loopback, AudioSource};
 use crate::audio::mixer::Mixer;
-use crate::audio::{Mp3Encoder, Mp3Frame};
+use crate::audio::{create_audio_encoder, AudioFrame};
 use crate::capture::monitors::source_origin;
 use crate::capture::{self, CaptureConfig, CaptureHandle, Source};
+use crate::mux::{AudioTrackConfig, Muxer, VideoCodecConfig, VideoTrackConfig};
+use crate::settings::{FormatSettings, SizeMode};
+use crate::video::convert::even_dims;
 use crate::video::mouse_fx::{MouseFx, MouseSampler};
-use crate::mux::{AudioTrackConfig, Mp4Writer, VideoTrackConfig};
 use crate::video::preview::{make_preview, PreviewImage};
-use crate::video::{Converter, H264Encoder, RawFrame};
+use crate::video::{create_video_encoder, Converter, EncoderRequest, RawFrame, Scaler, VideoEncoder};
 
-/// Master audio sample rate of the recording.
-pub const AUDIO_RATE: u32 = 48_000;
 /// Longest side of preview images handed to the GUI.
 const PREVIEW_MAX_SIDE: u32 = 640;
 /// Audio is mixed this far behind wall-clock so device latency never causes gaps.
@@ -32,9 +30,7 @@ const AUDIO_LAG: Duration = Duration::from_millis(150);
 #[derive(Debug, Clone)]
 pub struct RecordConfig {
     pub source: Source,
-    pub fps: u32,
-    pub bitrate_kbps: u32,
-    pub half_resolution: bool,
+    pub format: FormatSettings,
     pub mouse_fx: MouseFx,
     pub system_audio: bool,
     /// `Some(None)` = default microphone, `Some(Some(name))` = named device.
@@ -46,6 +42,10 @@ impl RecordConfig {
     pub fn wants_audio(&self) -> bool {
         self.system_audio || self.microphone.is_some()
     }
+
+    pub fn fps(&self) -> u32 {
+        self.format.fps.max(1)
+    }
 }
 
 /// Live counters, readable from the GUI.
@@ -54,7 +54,7 @@ pub struct Stats {
     pub frames_captured: AtomicU64,
     pub frames_encoded: AtomicU64,
     pub frames_dropped: AtomicU64,
-    /// Frames the encoder chose not to output (rate control).
+    /// Frames the encoder chose not to output (rate control) or the container could not place.
     pub frames_skipped: AtomicU64,
     /// Heartbeat frames (re-encoded last frame while the screen was static).
     pub frames_repeated: AtomicU64,
@@ -66,6 +66,8 @@ pub struct Stats {
     pub height: AtomicU64,
     pub error: Mutex<Option<String>>,
     pub audio_note: Mutex<Option<String>>,
+    /// Encoder / container notes (e.g. a hardware encoder fell back to OpenH264).
+    pub note: Mutex<Option<String>>,
 }
 
 impl Stats {
@@ -80,6 +82,23 @@ impl Stats {
 
     pub fn error(&self) -> Option<String> {
         self.error.lock().unwrap().clone()
+    }
+
+    pub fn add_note(&self, msg: impl Into<String>) {
+        let msg = msg.into();
+        log::warn!("{msg}");
+        let mut n = self.note.lock().unwrap();
+        match n.as_mut() {
+            Some(existing) => {
+                existing.push_str("; ");
+                existing.push_str(&msg);
+            }
+            None => *n = Some(msg),
+        }
+    }
+
+    pub fn note(&self) -> Option<String> {
+        self.note.lock().unwrap().clone()
     }
 }
 
@@ -125,10 +144,10 @@ impl Recorder {
         let audio_origin = Arc::new(AtomicU64::new(u64::MAX));
 
         let (video_tx, video_rx) = mpsc::sync_channel::<RawFrame>(4);
-        let (audio_tx, audio_rx) = mpsc::sync_channel::<Mp3Frame>(256);
+        let (audio_tx, audio_rx) = mpsc::sync_channel::<AudioFrame>(256);
 
-        let audio_thread = if config.wants_audio() {
-            Some(spawn_audio_thread(AudioArgs {
+        let (audio_thread, audio_cfg) = if config.wants_audio() {
+            let (handle, cfg) = spawn_audio_thread(AudioArgs {
                 config: config.clone(),
                 epoch,
                 stop: stop.clone(),
@@ -137,10 +156,11 @@ impl Recorder {
                 origin: audio_origin.clone(),
                 tx: audio_tx,
                 stats: stats.clone(),
-            })?)
+            })?;
+            (Some(handle), Some(cfg))
         } else {
             drop(audio_tx);
-            None
+            (None, None)
         };
 
         let sampler = config.mouse_fx.any_overlay().then(|| Arc::new(Mutex::new(MouseSampler::new())));
@@ -149,6 +169,7 @@ impl Recorder {
             epoch,
             video_rx,
             audio_rx,
+            audio_cfg,
             audio_origin,
             stop: stop.clone(),
             paused: paused.clone(),
@@ -289,7 +310,7 @@ fn start_capture(
         }
     });
     capture::start(
-        CaptureConfig { source: config.source.clone(), fps: config.fps, show_cursor: config.mouse_fx.native_cursor() },
+        CaptureConfig { source: config.source.clone(), fps: config.fps(), show_cursor: config.mouse_fx.native_cursor() },
         epoch,
         sink,
     )
@@ -300,7 +321,8 @@ struct EncodeArgs {
     config: RecordConfig,
     epoch: Instant,
     video_rx: Receiver<RawFrame>,
-    audio_rx: Receiver<Mp3Frame>,
+    audio_rx: Receiver<AudioFrame>,
+    audio_cfg: Option<AudioTrackConfig>,
     audio_origin: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
@@ -329,6 +351,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         epoch,
         video_rx,
         audio_rx,
+        mut audio_cfg,
         audio_origin,
         stop,
         paused,
@@ -341,7 +364,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
     // Recording-time clock: wall time since epoch minus paused time.
     let paused_dur = || Duration::from_micros(paused_total.load(Ordering::Relaxed));
     let rec_now = || epoch.elapsed().saturating_sub(paused_dur());
-    let fps = config.fps.max(1);
+    let fps = config.fps();
     let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
     let min_delta = Duration::from_secs_f64(0.75 / fps as f64);
     // Capture APIs only deliver frames when the screen changes; when nothing
@@ -356,13 +379,13 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
     let mut last_size = (0u32, 0u32);
     let mut last_frame: Option<RawFrame> = None;
     let mut origin = source_origin(&config.source).unwrap_or((0, 0));
-    let fx_scale = if config.half_resolution { 0.5 } else { 1.0 };
     let mut frames_since_origin = 0u32;
+    let mut frames_in = 0u64;
 
-    let push_audio = |mux: &mut Mp4Writer<BufWriter<File>>, stats: &Stats| -> Result<()> {
+    let push_audio = |mux: &mut Muxer, stats: &Stats| -> Result<()> {
         if mux.has_audio() {
             while let Ok(f) = audio_rx.try_recv() {
-                mux.push_audio(&f.data)?;
+                mux.push_audio(&f)?;
                 stats.audio_frames.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -406,10 +429,6 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        let mut frame = frame;
-        if !is_heartbeat && config.half_resolution && frame.width >= 64 && frame.height >= 64 {
-            frame = frame.downscale_half();
-        }
         if let Some(last) = last_pts {
             // Pacing: frames arriving faster than the target rate are skipped
             // (not counted as drops; they are by design).
@@ -418,26 +437,30 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
             }
         }
 
-        let size = (frame.width, frame.height);
-        if state.is_none() {
-            let st = EncodeState::new(&config, &frame)?;
-            stats.width.store(st.dims.0 as u64, Ordering::Relaxed);
-            stats.height.store(st.dims.1 as u64, Ordering::Relaxed);
-            state = Some(st);
-            audio_origin.store(frame.pts.as_micros() as u64, Ordering::SeqCst);
-            last_size = size;
-        } else if size != last_size {
-            // Source resized (window capture). Keep encoding at the original
-            // size by cropping/padding is complex; simplest robust option is to
-            // skip frames of a different size and note it once.
-            if stats.audio_note.lock().unwrap().is_none() {
-                *stats.audio_note.lock().unwrap() =
-                    Some(format!("source resized to {}×{}; frames skipped", size.0, size.1));
+        if !is_heartbeat {
+            let size = (frame.width, frame.height);
+            if state.is_none() {
+                let st = EncodeState::new(&config, &frame, audio_cfg.take(), &stats)?;
+                stats.width.store(st.dims.0 as u64, Ordering::Relaxed);
+                stats.height.store(st.dims.1 as u64, Ordering::Relaxed);
+                state = Some(st);
+                audio_origin.store(frame.pts.as_micros() as u64, Ordering::SeqCst);
+                last_size = size;
+            } else if size != last_size {
+                // Source resized (window capture). Keep encoding at the original
+                // size by cropping/padding is complex; simplest robust option is to
+                // skip frames of a different size and note it once.
+                if stats.audio_note.lock().unwrap().is_none() {
+                    *stats.audio_note.lock().unwrap() =
+                        Some(format!("source resized to {}×{}; frames skipped", size.0, size.1));
+                }
+                stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                continue;
             }
-            stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
-            continue;
         }
         let st = state.as_mut().unwrap();
+        // Heartbeats re-use the already scaled last frame.
+        let frame = if is_heartbeat { frame } else { st.prepare(frame) };
         last_pts = Some(frame.pts);
 
         let t0 = Instant::now();
@@ -453,9 +476,9 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
                     }
                 }
             }
-            let (cursor, clicks) = snap.mapped(origin, fx_scale);
+            let (cursor, clicks) = snap.mapped(origin, st.fx_scale);
             let mut f = frame.clone();
-            config.mouse_fx.apply(&mut f, cursor, &clicks, fx_scale);
+            config.mouse_fx.apply(&mut f, cursor, &clicks, st.fx_scale.0.min(st.fx_scale.1));
             painted = Some(f);
         }
         let shown: &RawFrame = painted.as_ref().unwrap_or(&frame);
@@ -464,28 +487,22 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
             st.converter.convert(shown)?;
         }
         let t1 = Instant::now();
-        let encoded = st.encoder.encode(&st.converter.yuv(), frame.pts)?;
+        let encoded = st.encoder.encode(st.converter.frame(), frame.pts)?;
         let t2 = Instant::now();
+        frames_in += 1;
         if is_heartbeat {
             stats.frames_repeated.fetch_add(1, Ordering::Relaxed);
         }
-        match encoded {
-            Some(enc) => {
-                if let (Some(sps), Some(pps)) = (st.encoder.sps(), st.encoder.pps()) {
-                    st.mux.set_parameter_sets(sps, pps);
-                }
-                st.mux.push_video(&enc.data, enc.pts, enc.keyframe)?;
-                let n = stats.frames_encoded.fetch_add(1, Ordering::Relaxed) + 1;
-                stats.bytes_written.store(st.mux.bytes_written(), Ordering::Relaxed);
-                if n % preview_every == 0 && !is_heartbeat {
-                    *preview.image.lock().unwrap() = Some(make_preview(shown, PREVIEW_MAX_SIDE));
-                    if let Some(cb) = &on_preview {
-                        cb();
-                    }
-                }
-            }
-            None => {
-                stats.frames_skipped.fetch_add(1, Ordering::Relaxed);
+        if encoded.is_empty() {
+            stats.frames_skipped.fetch_add(1, Ordering::Relaxed);
+        }
+        for enc in encoded {
+            st.push(&enc, &stats)?;
+        }
+        if frames_in % preview_every == 0 && !is_heartbeat {
+            *preview.image.lock().unwrap() = Some(make_preview(shown, PREVIEW_MAX_SIDE));
+            if let Some(cb) = &on_preview {
+                cb();
             }
         }
         let t3 = Instant::now();
@@ -513,54 +530,118 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         }
     }
 
-    let Some(st) = state else {
+    let Some(mut st) = state else {
         return Err(anyhow!("no frames were captured"));
     };
+    for enc in st.encoder.flush()? {
+        st.push(&enc, &stats)?;
+    }
     let EncodeState { mut mux, .. } = st;
     // Audio thread flushes and closes its channel after the stop flag; drain everything.
     if mux.has_audio() {
         for f in audio_rx.iter() {
-            mux.push_audio(&f.data)?;
+            mux.push_audio(&f)?;
             stats.audio_frames.fetch_add(1, Ordering::Relaxed);
         }
     }
     stats.bytes_written.store(mux.bytes_written(), Ordering::Relaxed);
-    mux.finalize().context("finalizing MP4")?;
+    mux.finalize()?;
     Ok(())
 }
 
 struct EncodeState {
+    /// Half size uses the exact 2×2 box filter; everything else the scaler.
+    half: bool,
+    scaler: Option<Scaler>,
     converter: Converter,
-    encoder: H264Encoder,
-    mux: Mp4Writer<BufWriter<File>>,
+    encoder: Box<dyn VideoEncoder>,
+    mux: Muxer,
     dims: (u32, u32),
+    /// Encoded-frame / source ratio per axis, for mouse-effect placement.
+    fx_scale: (f32, f32),
+    params_sent: bool,
 }
 
 impl EncodeState {
-    fn new(config: &RecordConfig, first: &RawFrame) -> Result<Self> {
-        let converter = Converter::new(first.width, first.height)?;
-        let dims = converter.dimensions();
-        let encoder = H264Encoder::new(config.fps as f32, config.bitrate_kbps.max(200) * 1000)?;
-        if let Some(parent) = config.output.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).ok();
+    fn new(
+        config: &RecordConfig,
+        first: &RawFrame,
+        audio: Option<AudioTrackConfig>,
+        stats: &Stats,
+    ) -> Result<Self> {
+        let fmt = &config.format;
+        let src = (first.width, first.height);
+        let (half, scaled) = match fmt.size {
+            SizeMode::Full => (false, src),
+            SizeMode::Half if src.0 >= 64 && src.1 >= 64 => (true, ((src.0 / 2).max(1), (src.1 / 2).max(1))),
+            SizeMode::Half => (false, src),
+            other => (false, other.resolve(src.0, src.1)),
+        };
+        let dims = even_dims(scaled.0, scaled.1);
+        if dims.0 == 0 || dims.1 == 0 {
+            return Err(anyhow!("frame too small to encode: {}x{}", src.0, src.1));
         }
-        let file = File::create(&config.output)
-            .with_context(|| format!("creating {}", config.output.display()))?;
-        let audio = config.wants_audio().then_some(AudioTrackConfig {
-            sample_rate: AUDIO_RATE,
-            channels: 2,
-            bitrate_bps: 160_000,
-            samples_per_frame: 1152,
-        });
-        let mux = Mp4Writer::new(
-            BufWriter::with_capacity(1 << 20, file),
-            Some(VideoTrackConfig { width: dims.0, height: dims.1, fps: config.fps as f64 }),
-            audio,
-        )?;
-        log::info!("encoding {}×{} @ {} fps, {} kbps", dims.0, dims.1, config.fps, config.bitrate_kbps);
-        Ok(Self { converter, encoder, mux, dims })
+        let req = EncoderRequest {
+            codec: fmt.video_codec,
+            width: dims.0,
+            height: dims.1,
+            fps: config.fps(),
+            rate_control: fmt.rate_control,
+            target_bitrate_bps: fmt.target_bitrate_kbps(dims.0, dims.1).saturating_mul(1000),
+            keyframe_interval_frames: fmt.keyframe_interval_frames(),
+            profiles: fmt.profiles,
+        };
+        let (encoder, note) = create_video_encoder(&req)?;
+        if let Some(n) = note {
+            stats.add_note(n);
+        }
+        let converter = Converter::new(scaled.0, scaled.1, encoder.input_layout())?;
+        let scaler = (!half && scaled != src).then(|| Scaler::new(src, scaled));
+        let video = VideoTrackConfig {
+            width: dims.0,
+            height: dims.1,
+            fps: config.fps() as f64,
+            codec: if encoder.is_hevc() { VideoCodecConfig::Hevc } else { VideoCodecConfig::H264 },
+        };
+        let mux = Muxer::create(fmt.container, &config.output, video, audio)?;
+        let fx_scale = (dims.0 as f32 / src.0.max(1) as f32, dims.1 as f32 / src.1.max(1) as f32);
+        log::info!(
+            "encoding {}×{} → {}×{} into {} with {}",
+            src.0,
+            src.1,
+            dims.0,
+            dims.1,
+            fmt.container.label(),
+            encoder.describe()
+        );
+        Ok(Self { half, scaler, converter, encoder, mux, dims, fx_scale, params_sent: false })
+    }
+
+    /// Scales a freshly captured frame to the output size.
+    fn prepare(&mut self, frame: RawFrame) -> RawFrame {
+        if self.half {
+            frame.downscale_half()
+        } else if let Some(s) = &mut self.scaler {
+            s.scale(&frame)
+        } else {
+            frame
+        }
+    }
+
+    fn push(&mut self, enc: &crate::video::EncodedFrame, stats: &Stats) -> Result<()> {
+        if !self.params_sent
+            && let Some(p) = self.encoder.codec_params()
+        {
+            self.mux.set_codec_params(p);
+            self.params_sent = true;
+        }
+        if self.mux.push_video(&enc.data, enc.pts, enc.keyframe)? {
+            stats.frames_encoded.fetch_add(1, Ordering::Relaxed);
+            stats.bytes_written.store(self.mux.bytes_written(), Ordering::Relaxed);
+        } else {
+            stats.frames_skipped.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
     }
 }
 
@@ -571,15 +652,15 @@ struct AudioArgs {
     paused: Arc<AtomicBool>,
     paused_total: Arc<AtomicU64>,
     origin: Arc<AtomicU64>,
-    tx: SyncSender<Mp3Frame>,
+    tx: SyncSender<AudioFrame>,
     stats: Arc<Stats>,
 }
 
-fn spawn_audio_thread(args: AudioArgs) -> Result<JoinHandle<Result<()>>> {
+fn spawn_audio_thread(args: AudioArgs) -> Result<(JoinHandle<Result<()>>, AudioTrackConfig)> {
     let AudioArgs { config, epoch, stop, paused, paused_total, origin, tx, stats } = args;
-    // Open devices on the calling thread so errors surface immediately, then
-    // hand them to the worker. cpal streams are created and kept on that thread.
-    let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
+    // Open devices and create the encoder on the worker thread (Media
+    // Foundation objects are thread-affine), reporting back before mixing.
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<AudioTrackConfig>>();
     let handle = std::thread::Builder::new().name("openclip-audio".into()).spawn(move || {
         let mut sources: Vec<(AudioSource, f32)> = Vec::new();
         let mut notes = Vec::new();
@@ -602,7 +683,29 @@ fn spawn_audio_thread(args: AudioArgs) -> Result<JoinHandle<Result<()>>> {
             let _ = ready_tx.send(Err(anyhow!("no audio source could be opened")));
             return Ok(());
         }
-        let _ = ready_tx.send(Ok(()));
+        let fmt = &config.format;
+        let (mut encoder, note) =
+            match create_audio_encoder(fmt.audio_codec, fmt.audio_sample_rate, fmt.audio_channels, fmt.audio_bitrate_kbps) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return Ok(());
+                }
+            };
+        if let Some(n) = note {
+            stats.add_note(n);
+        }
+        log::info!("audio: {}", encoder.describe());
+        let channels = encoder.channels().clamp(1, 2) as usize;
+        let rate = encoder.sample_rate();
+        let track = AudioTrackConfig {
+            sample_rate: rate,
+            channels: channels as u16,
+            bitrate_bps: encoder.bitrate_bps(),
+            samples_per_frame: encoder.samples_per_frame(),
+            codec: encoder.codec_config(),
+        };
+        let _ = ready_tx.send(Ok(track));
 
         // Wait for the first video frame to define the timeline origin.
         let origin_us = loop {
@@ -616,13 +719,13 @@ fn spawn_audio_thread(args: AudioArgs) -> Result<JoinHandle<Result<()>>> {
             std::thread::sleep(Duration::from_millis(5));
         };
         let origin = Duration::from_micros(origin_us);
-        let mut mixer = Mixer::new(AUDIO_RATE, epoch, origin);
+        let mut mixer = Mixer::new(rate, epoch, origin);
         for (s, gain) in &sources {
             mixer.add_source(s.queue.clone(), s.sample_rate, s.channels, *gain);
         }
-        let mut encoder = Mp3Encoder::new(AUDIO_RATE, 2, 160)?;
         let mut pcm = Vec::new();
-        let send = |frames: Vec<Mp3Frame>| -> Result<()> {
+        let mut mono = Vec::new();
+        let send = |frames: Vec<AudioFrame>| -> Result<()> {
             for f in frames {
                 if tx.send(f).is_err() {
                     return Err(anyhow!("encoder went away"));
@@ -646,7 +749,15 @@ fn spawn_audio_thread(args: AudioArgs) -> Result<JoinHandle<Result<()>>> {
             pcm.clear();
             mixer.mix_until(until, &mut pcm);
             if !pcm.is_empty() {
-                send(encoder.encode(&pcm)?)?;
+                let input: &[f32] = if channels == 1 {
+                    // The mixer always produces stereo; fold it down.
+                    mono.clear();
+                    mono.extend(pcm.chunks_exact(2).map(|lr| (lr[0] + lr[1]) * 0.5));
+                    &mono
+                } else {
+                    &pcm
+                };
+                send(encoder.encode(input)?)?;
             }
             if stopping {
                 break;
@@ -654,16 +765,12 @@ fn spawn_audio_thread(args: AudioArgs) -> Result<JoinHandle<Result<()>>> {
             std::thread::sleep(Duration::from_millis(20));
         }
         send(encoder.flush()?)?;
-        log::info!(
-            "audio: {} frames, {} silence samples inserted",
-            encoder.frames_emitted(),
-            mixer.silence_inserted
-        );
+        log::info!("audio: done, {} silence samples inserted", mixer.silence_inserted);
         drop(sources);
         Ok(())
     })?;
     match ready_rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(())) => Ok(handle),
+        Ok(Ok(cfg)) => Ok((handle, cfg)),
         Ok(Err(e)) => {
             let _ = handle.join();
             Err(e)

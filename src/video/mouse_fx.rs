@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use device_query::{DeviceQuery, DeviceState};
+use serde::{Deserialize, Serialize};
 
 use super::{PixelFormat, RawFrame};
 
@@ -17,7 +18,8 @@ const RIPPLE_END: f32 = 42.0;
 const RIPPLE_THICKNESS: f32 = 3.0;
 
 /// User-facing mouse effect settings (mirrors classic recorder options).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MouseFx {
     pub show_cursor: bool,
     /// Cursor size in percent; 100 keeps the native cursor drawn by the capture API.
@@ -101,10 +103,12 @@ pub struct MouseSnapshot {
 }
 
 impl MouseSnapshot {
-    /// Maps into frame coordinates for [`MouseFx::apply`].
-    pub fn mapped(&self, origin: (i32, i32), scale: f32) -> ((i32, i32), Vec<FrameClick>) {
+    /// Maps into frame coordinates for [`MouseFx::apply`]. `scale` is the
+    /// per-axis ratio between the encoded frame and the captured source.
+    pub fn mapped(&self, origin: (i32, i32), scale: (f32, f32)) -> ((i32, i32), Vec<FrameClick>) {
         let now = Instant::now();
-        let map = |p: (i32, i32)| (((p.0 - origin.0) as f32 * scale) as i32, ((p.1 - origin.1) as f32 * scale) as i32);
+        let map =
+            |p: (i32, i32)| (((p.0 - origin.0) as f32 * scale.0) as i32, ((p.1 - origin.1) as f32 * scale.1) as i32);
         let cursor = map(self.pos);
         let clicks = self
             .clicks
@@ -191,7 +195,7 @@ impl MouseSampler {
     }
 
     /// Maps the sampled state into frame coordinates for [`MouseFx::apply`].
-    pub fn mapped(&self, origin: (i32, i32), scale: f32) -> ((i32, i32), Vec<FrameClick>) {
+    pub fn mapped(&self, origin: (i32, i32), scale: (f32, f32)) -> ((i32, i32), Vec<FrameClick>) {
         MouseSnapshot { pos: self.pos, clicks: self.clicks.clone() }.mapped(origin, scale)
     }
 }
