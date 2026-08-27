@@ -3,6 +3,7 @@
 //! with settings pages, and a file browser (+ optional preview tab) on Home.
 
 mod library;
+mod minibar;
 pub mod picker;
 mod theme;
 
@@ -206,7 +207,13 @@ pub struct App {
     preview_tex: Option<TextureHandle>,
     preview_dims: (u32, u32),
     message: Option<(String, bool)>, // (text, is_error)
+    message_at: Option<Instant>,
+    last_message: Option<String>,
     last_file: Option<PathBuf>,
+    /// Compact "mini bar" mode (Camtasia-style floating recorder bar).
+    compact: bool,
+    /// Outer rect of the full window, restored when leaving compact mode.
+    saved_rect: Option<egui::Rect>,
 }
 
 impl App {
@@ -245,9 +252,14 @@ impl App {
             preview_tex: None,
             preview_dims: (0, 0),
             message: None,
+            message_at: None,
+            last_message: None,
             last_file: None,
+            compact: false,
+            saved_rect: None,
         }
     }
+
 
     fn selected_source(&self) -> Option<Source> {
         match self.source_kind {
@@ -443,6 +455,9 @@ impl App {
                 ui.add_space(4.0);
                 if icon_button(ui, "📷", "Take a snapshot (PNG)").clicked() {
                     self.take_snapshot();
+                }
+                if icon_button(ui, "▭", "Mini bar: collapse to a small floating recorder bar").clicked() {
+                    self.enter_compact(ctx);
                 }
                 let can_record = self.selected_source().is_some();
                 match rec_button(ui, recording, can_record) {
@@ -1102,6 +1117,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_preview(&ctx);
+        self.track_message();
 
         if let State::Picking(picker) = &mut self.state {
             match picker.show(&ctx) {
@@ -1113,6 +1129,14 @@ impl eframe::App for App {
                 }
                 PickerOutcome::Cancelled => self.state = State::Idle,
             }
+        }
+
+        if self.compact {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(8, 6)))
+                .show(ui, |ui| self.minibar(ui, &ctx));
+            self.delete_dialog(&ctx);
+            return;
         }
 
         egui::Panel::top("toolbar")
@@ -1188,7 +1212,7 @@ fn mode_button(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> eg
 }
 
 /// Square toggle with an icon; a small ✕ marks the "off" state.
-fn toggle_button(ui: &mut egui::Ui, icon: &str, tip: &str, value: &mut bool) {
+pub(super) fn toggle_button(ui: &mut egui::Ui, icon: &str, tip: &str, value: &mut bool) {
     let size = Vec2::new(50.0, 54.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if resp.clicked() {
@@ -1217,7 +1241,7 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
 }
 
 /// Pause / resume button next to REC; only active while recording. Returns true on click.
-fn pause_button(ui: &mut egui::Ui, recording: bool, paused: bool) -> bool {
+pub(super) fn pause_button(ui: &mut egui::Ui, recording: bool, paused: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(44.0, 44.0), Sense::click());
     let p = ui.painter();
     let fill = if resp.hovered() && recording { BUTTON_HOVER } else { Color32::TRANSPARENT };
@@ -1245,14 +1269,14 @@ fn pause_button(ui: &mut egui::Ui, recording: bool, paused: bool) -> bool {
     recording && resp.clicked()
 }
 
-enum RecClick {
+pub(super) enum RecClick {
     None,
     Start,
     Stop,
 }
 
 /// The big round REC button; shows a stop square while recording.
-fn rec_button(ui: &mut egui::Ui, recording: bool, enabled: bool) -> RecClick {
+pub(super) fn rec_button(ui: &mut egui::Ui, recording: bool, enabled: bool) -> RecClick {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(60.0, 60.0), Sense::click());
     let center = rect.center();
     let p = ui.painter();
@@ -1379,12 +1403,12 @@ fn timestamp() -> String {
     format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, (rem % 3600) / 60, rem % 60)
 }
 
-fn format_duration(d: Duration) -> String {
+pub(super) fn format_duration(d: Duration) -> String {
     let s = d.as_secs();
     format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
 }
 
-fn human_bytes(b: u64) -> String {
+pub(super) fn human_bytes(b: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut v = b as f64;
     let mut u = 0;
