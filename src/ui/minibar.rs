@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Align2, CornerRadius, FontId, Layout, RichText, Sense, Stroke, Vec2, ViewportCommand, WindowLevel};
 
+use super::icons;
 use super::theme::*;
 use super::{format_duration, human_bytes, pause_button, rec_button, App, RecClick, SourceKind, State};
 
@@ -83,16 +84,16 @@ impl App {
                 ui.add_enabled_ui(!recording, |ui| {
                     ui.horizontal(|ui| {
                         let (icon, label) = match self.source_kind {
-                            SourceKind::Region => ("▭", "Region"),
-                            SourceKind::Monitor => ("🖥", "Monitor"),
-                            SourceKind::Window => ("▣", "Window"),
+                            SourceKind::Region => (icons::REGION, "Region"),
+                            SourceKind::Monitor => (icons::MONITOR, "Monitor"),
+                            SourceKind::Window => (icons::WINDOW, "Window"),
                         };
                         let mut picked: Option<SourceKind> = None;
-                        let menu = ui.menu_button(RichText::new(format!("{icon}  {label}     ")).size(14.0), |ui| {
+                        ui.menu_button(RichText::new(format!("{icon}  {label}  {}", icons::CARET_DOWN)).size(14.0), |ui| {
                             for (kind, icon, label) in [
-                                (SourceKind::Region, "▭", "Region"),
-                                (SourceKind::Monitor, "🖥", "Monitor"),
-                                (SourceKind::Window, "▣", "Window"),
+                                (SourceKind::Region, icons::REGION, "Region"),
+                                (SourceKind::Monitor, icons::MONITOR, "Monitor"),
+                                (SourceKind::Window, icons::WINDOW, "Window"),
                             ] {
                                 if ui.button(format!("{icon}  {label}")).clicked() {
                                     picked = Some(kind);
@@ -100,14 +101,6 @@ impl App {
                                 }
                             }
                         });
-                        // Dropdown triangle (drawn: the ▾ glyph is not in the default fonts).
-                        let r = menu.response.rect;
-                        let c = egui::pos2(r.right() - 11.0, r.center().y + 1.0);
-                        ui.painter().add(egui::Shape::convex_polygon(
-                            vec![c + Vec2::new(-5.0, -3.0), c + Vec2::new(5.0, -3.0), c + Vec2::new(0.0, 3.0)],
-                            TEXT_NORMAL,
-                            Stroke::NONE,
-                        ));
                         if let Some(kind) = picked {
                             self.source_kind = kind;
                             if kind == SourceKind::Region && self.region.is_none() {
@@ -145,7 +138,7 @@ impl App {
                     ui.label(RichText::new("Dimensions").color(TEXT_DIM).small());
                     ui.label(RichText::new(self.source_dimensions()).color(TEXT_BRIGHT).small());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("⟳").on_hover_text("Refresh monitors and windows").clicked() {
+                        if ui.small_button(icons::REFRESH).on_hover_text("Refresh monitors and windows").clicked() {
                             self.refresh_sources();
                         }
                     });
@@ -156,11 +149,11 @@ impl App {
             group_box(ui, "Recorded inputs", 300.0, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(!recording, |ui| {
-                        input_toggle(ui, "🎤", "Microphone", &mut self.mic_enabled, self.mics.get(self.mic_idx).cloned());
-                        input_toggle(ui, "🔊", "System audio", &mut self.system_audio, None);
+                        input_toggle(ui, icons::MIC, "Microphone", &mut self.mic_enabled, self.mics.get(self.mic_idx).cloned());
+                        input_toggle(ui, icons::SPEAKER, "System audio", &mut self.system_audio, None);
                         let mut show_cursor = self.mouse_fx.read().unwrap().show_cursor;
                         let before = show_cursor;
-                        input_toggle(ui, "🖱", "Cursor", &mut show_cursor, None);
+                        input_toggle(ui, icons::CURSOR, "Cursor", &mut show_cursor, None);
                         if show_cursor != before {
                             self.mouse_fx.write().unwrap().show_cursor = show_cursor;
                         }
@@ -259,7 +252,7 @@ fn input_toggle(ui: &mut egui::Ui, icon: &str, name: &str, value: &mut bool, tip
             p.rect_filled(rect, CornerRadius::same(3), fill);
             let color = if *value { TEXT_BRIGHT } else { TEXT_DIM };
             p.text(rect.center(), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), color);
-            let badge = if *value { ("✔", OK_GREEN) } else { ("✕", ERR_RED) };
+            let badge = if *value { (icons::CHECK, OK_GREEN) } else { (icons::XMARK, ERR_RED) };
             p.text(rect.right_bottom() - Vec2::new(6.0, 6.0), Align2::CENTER_CENTER, badge.0, FontId::proportional(10.0), badge.1);
             let caption = format!("{name} {}", if *value { "on" } else { "off" });
             ui.label(RichText::new(caption).size(11.0).color(if *value { TEXT_NORMAL } else { TEXT_DIM }));
@@ -276,13 +269,7 @@ fn expand_button(ui: &mut egui::Ui) -> egui::Response {
     if resp.hovered() {
         p.rect_filled(rect, CornerRadius::same(3), BUTTON_HOVER);
     }
-    // "Restore window" icon: a frame with an outward arrow (drawn; no reliable glyph).
-    let c = rect.center();
-    let stroke = Stroke::new(1.6, TEXT_BRIGHT);
-    p.rect_stroke(egui::Rect::from_center_size(c, Vec2::splat(14.0)), CornerRadius::same(1), stroke, egui::StrokeKind::Middle);
-    p.line_segment([c + Vec2::new(-3.0, 3.0), c + Vec2::new(4.0, -4.0)], stroke);
-    p.line_segment([c + Vec2::new(0.0, -4.0), c + Vec2::new(4.0, -4.0)], stroke);
-    p.line_segment([c + Vec2::new(4.0, 0.0), c + Vec2::new(4.0, -4.0)], stroke);
+    p.text(rect.center(), Align2::CENTER_CENTER, icons::EXPAND, FontId::proportional(16.0), TEXT_BRIGHT);
     resp.on_hover_text("Back to the full window")
 }
 

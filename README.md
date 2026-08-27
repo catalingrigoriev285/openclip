@@ -79,4 +79,4 @@ cpal (mic / loopback) ──▶ mixer ───┴──▶ LAME MP3 ───�
 
 ## Licensing notes
 
-The code is Apache-2.0. Bundled third-party encoders: OpenH264 (BSD-2-Clause) and LAME (LGPL-2.1+). Note that Cisco's MPEG-LA H.264 patent coverage applies only to the binary they distribute, not to source builds like this one; whether that matters depends on your jurisdiction and use.
+The code is Apache-2.0. Bundled third-party encoders: OpenH264 (BSD-2-Clause) and LAME (LGPL-2.1+). UI icons are Font Awesome Free (SIL OFL 1.1 font, CC BY 4.0 icons — `assets/fonts/FONT-AWESOME-LICENSE.txt`). Note that Cisco's MPEG-LA H.264 patent coverage applies only to the binary they distribute, not to source builds like this one; whether that matters depends on your jurisdiction and use.

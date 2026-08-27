@@ -2,6 +2,7 @@
 //! toolbar (recording modes, audio toggles, pause, REC), a left navigation
 //! with settings pages, and a file browser (+ optional preview tab) on Home.
 
+pub mod icons;
 mod library;
 mod minibar;
 pub mod picker;
@@ -219,6 +220,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
+        icons::install(&cc.egui_ctx);
         let monitors = list_monitors().unwrap_or_default();
         let windows = list_windows().unwrap_or_default();
         let mics = list_input_devices();
@@ -432,20 +434,20 @@ impl App {
 
             ui.add_enabled_ui(!recording, |ui| {
                 for (kind, icon, label) in [
-                    (SourceKind::Region, "▭", "Region"),
-                    (SourceKind::Monitor, "🖥", "Monitor"),
-                    (SourceKind::Window, "▣", "Window"),
+                    (SourceKind::Region, icons::REGION, "Region"),
+                    (SourceKind::Monitor, icons::MONITOR, "Monitor"),
+                    (SourceKind::Window, icons::WINDOW, "Window"),
                 ] {
                     if mode_button(ui, icon, label, self.source_kind == kind).clicked() {
                         self.select_mode(kind);
                     }
                 }
                 ui.add_space(6.0);
-                toggle_button(ui, "🔊", "System audio", &mut self.system_audio);
-                toggle_button(ui, "🎤", "Microphone", &mut self.mic_enabled);
+                toggle_button(ui, icons::SPEAKER, "System audio", &mut self.system_audio);
+                toggle_button(ui, icons::MIC, "Microphone", &mut self.mic_enabled);
                 let mut show_cursor = self.mouse_fx.read().unwrap().show_cursor;
                 let before = show_cursor;
-                toggle_button(ui, "🖱", "Show cursor", &mut show_cursor);
+                toggle_button(ui, icons::CURSOR, "Show cursor", &mut show_cursor);
                 if show_cursor != before {
                     self.mouse_fx.write().unwrap().show_cursor = show_cursor;
                 }
@@ -453,10 +455,10 @@ impl App {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(4.0);
-                if icon_button(ui, "📷", "Take a snapshot (PNG)").clicked() {
+                if icon_button(ui, icons::CAMERA, "Take a snapshot (PNG)").clicked() {
                     self.take_snapshot();
                 }
-                if icon_button(ui, "▭", "Mini bar: collapse to a small floating recorder bar").clicked() {
+                if icon_button(ui, icons::MINIMIZE, "Mini bar: collapse to a small floating recorder bar").clicked() {
                     self.enter_compact(ctx);
                 }
                 let can_record = self.selected_source().is_some();
@@ -529,11 +531,11 @@ impl App {
                     }
                 }
                 State::Picking(_) => {
-                    ui.label(RichText::new("⬚").color(ACCENT));
+                    ui.label(RichText::new(icons::REGION).color(ACCENT));
                     ui.label("Drag a rectangle on the screen to select the recording region (Esc to cancel)");
                 }
                 State::Idle => {
-                    ui.label(RichText::new("▶").color(ACCENT));
+                    ui.label(RichText::new(icons::PLAY).color(ACCENT));
                     let text = if self.selected_source().is_some() {
                         format!("Ready to record: {}", self.source_label())
                     } else {
@@ -556,11 +558,11 @@ impl App {
     fn nav(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         for (tab, icon, label) in [
-            (Tab::Home, "🏠", "Home"),
-            (Tab::General, "⚙", "General"),
-            (Tab::Video, "🎞", "Video"),
-            (Tab::Image, "🖼", "Image"),
-            (Tab::About, "ℹ", "About"),
+            (Tab::Home, icons::HOME, "Home"),
+            (Tab::General, icons::GEAR, "General"),
+            (Tab::Video, icons::FILM, "Video"),
+            (Tab::Image, icons::IMAGE, "Image"),
+            (Tab::About, icons::INFO, "About"),
         ] {
             if nav_entry(ui, icon, label, self.tab == tab).clicked() {
                 self.tab = tab;
@@ -618,10 +620,10 @@ impl App {
             ui.label(RichText::new(self.output_dir.display().to_string()).color(TEXT_DIM).small())
                 .on_hover_text("Output folder (change it under General)");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("⟳").on_hover_text("Refresh list").clicked() {
+                if ui.small_button(icons::REFRESH).on_hover_text("Refresh list").clicked() {
                     self.library.refresh(&self.output_dir, true);
                 }
-                if ui.small_button("📂").on_hover_text("Open folder").clicked() {
+                if ui.small_button(icons::FOLDER).on_hover_text("Open folder").clicked() {
                     open_folder(&self.output_dir);
                 }
             });
@@ -696,17 +698,17 @@ impl App {
         ui.horizontal(|ui| {
             let w = (ui.available_width() - 16.0) / 3.0;
             let has = selected.is_some();
-            if ui.add_enabled(has, egui::Button::new("▶  Play").min_size(Vec2::new(w, 30.0))).clicked()
+            if ui.add_enabled(has, egui::Button::new(format!("{}  Play", icons::PLAY)).min_size(Vec2::new(w, 30.0))).clicked()
                 && let Some(p) = &selected
             {
                 open_with_default(p);
             }
-            if ui.add_enabled(has, egui::Button::new("📂  Folder").min_size(Vec2::new(w, 30.0))).clicked()
+            if ui.add_enabled(has, egui::Button::new(format!("{}  Folder", icons::FOLDER)).min_size(Vec2::new(w, 30.0))).clicked()
                 && let Some(p) = &selected
             {
                 reveal_in_folder(p);
             }
-            if ui.add_enabled(has, egui::Button::new("🗑  Delete").min_size(Vec2::new(w, 30.0))).clicked() {
+            if ui.add_enabled(has, egui::Button::new(format!("{}  Delete", icons::TRASH)).min_size(Vec2::new(w, 30.0))).clicked() {
                 self.library.confirm_delete = selected.clone();
             }
         });
@@ -744,7 +746,7 @@ impl App {
                         }
                     }
                 }
-                if ui.button("⟳").on_hover_text("Refresh monitors, windows and audio devices").clicked() {
+                if ui.button(icons::REFRESH).on_hover_text("Refresh monitors, windows and audio devices").clicked() {
                     self.refresh_sources();
                 }
             });
@@ -1036,7 +1038,7 @@ impl App {
         format_box(ui, "Image", "PNG", "Full size, saved next to your recordings");
         ui.add_space(10.0);
         settings_row(ui, "Capture", |ui| {
-            if ui.button("📷  Take snapshot now").clicked() {
+            if ui.button(format!("{}  Take snapshot now", icons::CAMERA)).clicked() {
                 self.take_snapshot();
             }
         });
@@ -1226,7 +1228,7 @@ pub(super) fn toggle_button(ui: &mut egui::Ui, icon: &str, tip: &str, value: &mu
     if *value {
         p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, "on", FontId::proportional(11.0), OK_GREEN);
     } else {
-        p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, "✕", FontId::proportional(12.0), ERR_RED);
+        p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, icons::XMARK, FontId::proportional(11.0), ERR_RED);
     }
     resp.on_hover_text(format!("{tip}: {}", if *value { "on" } else { "off" }));
 }
