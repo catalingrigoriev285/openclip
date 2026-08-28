@@ -28,6 +28,17 @@ You need a Rust toolchain (edition 2024 → Rust 1.85+) and a C/C++ compiler for
 
 Installing [nasm](https://www.nasm.us/) before building enables OpenH264's assembly kernels and roughly doubles encoder throughput; without it the build silently falls back to C.
 
+### Releasing
+
+Pushing a `v*` tag that matches the version in `Cargo.toml` runs the [release workflow](.github/workflows/release.yml), which builds the executable for Windows, Linux and macOS (with nasm) and publishes a GitHub Release with a `.zip` / `.tar.gz` per platform:
+
+```sh
+# bump version in Cargo.toml, commit, then
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+Running the workflow manually (Actions → Release → Run workflow) only builds and uploads the archives as artifacts, which is handy for checking a build before tagging.
+
 ## Usage
 
 The window is laid out like a classic recorder (about 800×640): a toolbar on top, a navigation on the left (Home / General / Video / Image / About) and pages on the right.
