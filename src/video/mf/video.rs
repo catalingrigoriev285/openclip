@@ -15,7 +15,7 @@ use windows::Win32::Media::MediaFoundation::{
     eAVEncH264VProfile_High, eAVEncH264VProfile_Main, eAVEncH265VProfile_Main_420_8,
 };
 
-use super::transform::{make_sample, sample_bytes, MftSession};
+use super::transform::{make_sample_with, sample_bytes, MftSession};
 use super::{activate_for, startup, ComGuard};
 use crate::mux::{avc, hevc};
 use crate::settings::{H264Profile, HevcProfile, RateControl};
@@ -33,7 +33,6 @@ pub struct MfVideoEncoder {
     frames_in: u64,
     frames_out: u64,
     description: String,
-    nv12: Vec<u8>,
     /// Must be dropped last (declaration order) so COM objects go first.
     _com: ComGuard,
 }
@@ -157,7 +156,6 @@ impl MfVideoEncoder {
             frames_in: 0,
             frames_out: 0,
             description,
-            nv12: Vec::new(),
             _com: com,
         })
     }
