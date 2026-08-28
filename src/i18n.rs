@@ -317,6 +317,57 @@ strings! {
         "Licențiat Apache-2.0. OpenH264 este BSD-2-Clause (compilat din surse, fără acoperirea brevetelor Cisco); LAME este LGPL.",
         "Лицензия Apache-2.0. OpenH264 — BSD-2-Clause (сборка из исходников, без патентного покрытия Cisco); LAME — LGPL.";
 
+    // ----- Updates (General page, About page, status strip, dialog) --------
+    SECTION_UPDATES => "Updates", "Actualizări", "Обновления";
+    ROW_UPDATES => "Check", "Verificare", "Проверка";
+    UPDATES_CHECKBOX => "Check for updates when openclip starts", "Verifică actualizările la pornirea openclip",
+        "Проверять обновления при запуске openclip";
+    UPDATES_NOTE => "one request to GitHub; nothing is installed without asking",
+        "o singură cerere către GitHub; nimic nu se instalează fără confirmare",
+        "один запрос к GitHub; ничего не устанавливается без подтверждения";
+    UPDATE_CHECK_BUTTON => "Check for updates", "Caută actualizări", "Проверить обновления";
+    UPDATE_CHECKING => "checking for updates…", "se caută actualizări…", "проверка обновлений…";
+    UPDATE_UP_TO_DATE => "You have the latest version.", "Ai cea mai nouă versiune.", "У вас последняя версия.";
+    UPDATE_AVAILABLE => "Version {0} is available.", "Versiunea {0} este disponibilă.", "Доступна версия {0}.";
+    UPDATE_INSTALLED_SHORT => "Version {0} is installed — restart to use it.",
+        "Versiunea {0} este instalată — repornește pentru a o folosi.",
+        "Версия {0} установлена — перезапустите, чтобы использовать её.";
+    UPDATE_CHECK_FAILED => "Could not check for updates: {0}", "Nu s-au putut verifica actualizările: {0}",
+        "Не удалось проверить обновления: {0}";
+    UPDATE_CHIP => "Update to {0}", "Actualizează la {0}", "Обновить до {0}";
+    UPDATE_CHIP_TIP => "A newer version of openclip is available", "Este disponibilă o versiune mai nouă de openclip",
+        "Доступна новая версия openclip";
+    UPDATE_DETAILS => "Details…", "Detalii…", "Подробнее…";
+    UPDATE_TITLE => "Update available", "Actualizare disponibilă", "Доступно обновление";
+    UPDATE_VERSIONS => "openclip {0} — you have {1}", "openclip {0} — ai {1}", "openclip {0} — у вас {1}";
+    UPDATE_NOTES => "Release notes", "Note de lansare", "Примечания к выпуску";
+    UPDATE_NO_NOTES => "(no release notes)", "(fără note de lansare)", "(без примечаний к выпуску)";
+    UPDATE_DOWNLOAD_INSTALL => "Download and install", "Descarcă și instalează", "Скачать и установить";
+    UPDATE_OPEN_PAGE => "Open release page", "Deschide pagina versiunii", "Открыть страницу выпуска";
+    UPDATE_LATER => "Later", "Mai târziu", "Позже";
+    UPDATE_DOWNLOADING => "Downloading… {0} / {1}", "Se descarcă… {0} / {1}", "Загрузка… {0} / {1}";
+    UPDATE_INSTALLING => "Verifying and installing…", "Se verifică și se instalează…", "Проверка и установка…";
+    UPDATE_INSTALLED => "Version {0} is installed. Restart openclip to use it.",
+        "Versiunea {0} este instalată. Repornește openclip pentru a o folosi.",
+        "Версия {0} установлена. Перезапустите openclip, чтобы использовать её.";
+    UPDATE_RESTART_NOW => "Restart now", "Repornește acum", "Перезапустить сейчас";
+    UPDATE_FAILED => "Update failed: {0}", "Actualizarea a eșuat: {0}", "Ошибка обновления: {0}";
+    UPDATE_RETRY => "Retry", "Reîncearcă", "Повторить";
+    UPDATE_MANUAL_ONLY => "The program folder is not writable — download the new version from the release page.",
+        "Folderul programului nu poate fi scris — descarcă noua versiune de pe pagina versiunii.",
+        "Папка программы недоступна для записи — скачайте новую версию со страницы выпуска.";
+    UPDATE_NO_ASSET => "No download for this platform — see the release page.",
+        "Nu există descărcare pentru această platformă — vezi pagina versiunii.",
+        "Для этой платформы нет сборки — см. страницу выпуска.";
+    UPDATE_LOCKED_RECORDING => "Finish the recording before installing the update.",
+        "Termină înregistrarea înainte de a instala actualizarea.",
+        "Завершите запись перед установкой обновления.";
+    UPDATE_RESTART_FAILED => "Could not start the new version: {0}", "Nu s-a putut porni noua versiune: {0}",
+        "Не удалось запустить новую версию: {0}";
+    MSG_UPDATE_AVAILABLE => "openclip {0} is available — see the status bar or About.",
+        "openclip {0} este disponibil — vezi bara de stare sau Despre.",
+        "Доступен openclip {0} — см. строку состояния или «О программе».";
+
     // ----- footer / messages ------------------------------------------------
     FOOTER_IDLE => "openclip – screen recorder", "openclip – recorder de ecran", "openclip — запись экрана";
     WHAT_RECORDING => "Recording", "Înregistrarea", "Запись";

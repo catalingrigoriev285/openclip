@@ -437,6 +437,8 @@ pub struct Settings {
     pub countdown_secs: u32,
     /// Interface language; applied to [`crate::i18n`] by [`Settings::load`].
     pub language: Lang,
+    /// Look for a newer release on GitHub when the app starts (see [`crate::update`]).
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -452,6 +454,7 @@ impl Default for Settings {
             countdown_enabled: true,
             countdown_secs: 3,
             language: Lang::default(),
+            check_updates: true,
         }
     }
 }
@@ -468,7 +471,7 @@ pub fn choose_path(exe_dir: Option<&Path>, portable_exists: bool, writable: bool
     }
 }
 
-fn dir_is_writable(dir: &Path) -> bool {
+pub(crate) fn dir_is_writable(dir: &Path) -> bool {
     let probe = dir.join(format!(".openclip-write-test-{}", std::process::id()));
     match std::fs::write(&probe, b"") {
         Ok(()) => {

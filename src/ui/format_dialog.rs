@@ -60,6 +60,10 @@ impl FormatDialog {
         self.open = true;
     }
 
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
     /// True once after the user asked for the encoder list to be refreshed.
     pub fn take_rescan(&mut self) -> bool {
         std::mem::take(&mut self.rescan)

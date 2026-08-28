@@ -169,15 +169,6 @@
       var(--bg);
     text-align: center;
   }
-  .pill {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 6px 12px 6px 8px; border-radius: 999px;
-    background: var(--bg); border: 1px solid var(--border);
-    font-size: 13px; font-weight: 500; color: var(--muted);
-    box-shadow: var(--shadow-sm);
-    margin-bottom: 26px;
-  }
-  .pill i { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex: none; box-shadow: 0 0 0 3px var(--red-soft); }
   .hero h1 {
     font-size: clamp(40px, 6.6vw, 68px);
     line-height: 1.05; font-weight: 800; letter-spacing: -0.035em;
@@ -436,7 +427,6 @@
   <!-- ===== Hero ===== -->
   <section class="hero">
     <div class="wrap">
-      <div class="pill"><i aria-hidden="true"></i> <span data-i18n="hero.pill">Open source · Apache-2.0 · Written in Rust</span></div>
       <h1 data-i18n-html="hero.h1">Screen recording <span>with nothing to install.</span></h1>
       <p class="lead" data-i18n="hero.lead">
         openclip records a monitor, a window or a dragged region — with system audio and your microphone —
@@ -745,7 +735,6 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
       "nav.tour": "Tur", "nav.features": "Funcții", "nav.how": "Cum funcționează",
       "nav.platforms": "Platforme", "nav.build": "Compilare",
 
-      "hero.pill": "Open source · Apache-2.0 · Scris în Rust",
       "hero.h1": "Înregistrare de ecran <span>fără nimic de instalat.</span>",
       "hero.lead": "openclip înregistrează un monitor, o fereastră sau o regiune trasă cu mouse-ul — cu sunetul de sistem și microfonul tău — direct într-un MP4 standard. Fără ffmpeg. Fără codecuri de sistem. Un singur executabil.",
       "hero.download": "Descarcă pentru Windows",
@@ -862,7 +851,6 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
       "nav.tour": "Обзор", "nav.features": "Возможности", "nav.how": "Как это работает",
       "nav.platforms": "Платформы", "nav.build": "Сборка",
 
-      "hero.pill": "Открытый исходный код · Apache-2.0 · Написано на Rust",
       "hero.h1": "Запись экрана <span>без единой установки.</span>",
       "hero.lead": "openclip записывает монитор, окно или выделенную мышью область — вместе с системным звуком и микрофоном — сразу в обычный MP4. Без ffmpeg. Без системных кодеков. Один исполняемый файл.",
       "hero.download": "Скачать для Windows",
@@ -1054,6 +1042,7 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
       b.textContent = l.name;
       b.addEventListener("click", function () {
         applyLang(l.code);
+        setUrlLang(current);
         close();
       });
       li.appendChild(b);
@@ -1069,7 +1058,32 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") { close(); } });
   }
 
+  var URL_PARAM = "lang";
+
+  /* Language from the address bar (?lang=ro), so a copied link keeps the localization. */
+  function urlLang() {
+    try {
+      var code = new URLSearchParams(location.search).get(URL_PARAM);
+      if (code) {
+        code = code.slice(0, 2).toLowerCase();
+        if (code === "en" || I18N[code]) { return code; }
+      }
+    } catch (_) { /* very old browser */ }
+    return null;
+  }
+
+  /* Write the chosen language into the URL without reloading or adding history entries. */
+  function setUrlLang(code) {
+    try {
+      var url = new URL(location.href);
+      url.searchParams.set(URL_PARAM, code);
+      history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+    } catch (_) { /* very old browser */ }
+  }
+
   function initialLang() {
+    var fromUrl = urlLang();
+    if (fromUrl) { return fromUrl; }
     var stored = null;
     try { stored = localStorage.getItem(STORE_KEY); } catch (_) { /* private mode */ }
     if (stored && (stored === "en" || I18N[stored])) { return stored; }
@@ -1084,6 +1098,10 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
   captureEnglish();
   initLangPicker();
   applyLang(initialLang());
+  window.addEventListener("popstate", function () {
+    var code = urlLang();
+    if (code && code !== current) { applyLang(code); }
+  });
 </script>
 
 <script>

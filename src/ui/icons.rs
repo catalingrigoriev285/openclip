@@ -38,6 +38,7 @@ pub const STOP: &str = "\u{f04d}";
 pub const CAMERA: &str = "\u{f030}";
 pub const MINIMIZE: &str = "\u{f066}"; // compress
 pub const REFRESH: &str = "\u{f021}"; // arrows-rotate
+pub const DOWNLOAD: &str = "\u{f019}"; // download
 pub const FOLDER: &str = "\u{f07c}"; // folder-open
 pub const TRASH: &str = "\u{f2ed}"; // trash-can
 pub const CHECK: &str = "\u{f00c}";

@@ -9,6 +9,7 @@ mod minibar;
 pub mod picker;
 pub mod region_frame;
 mod theme;
+mod updater;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -213,6 +214,10 @@ pub struct App {
     countdown_enabled: bool,
     countdown_secs: u32,
     language: Lang,
+    /// Look for a newer release on GitHub at start-up.
+    check_updates: bool,
+    update: updater::UpdateState,
+    update_modal: bool,
     tab: Tab,
     home_tab: HomeTab,
     video_tab: VideoTab,
@@ -258,7 +263,7 @@ impl App {
                 let _ = tx.send(available_encoders());
             })
             .ok();
-        Self {
+        let mut app = Self {
             monitors,
             windows,
             mics,
@@ -280,6 +285,9 @@ impl App {
             countdown_enabled: settings.countdown_enabled,
             countdown_secs: settings.countdown_secs.clamp(1, 10),
             language: settings.language,
+            check_updates: settings.check_updates,
+            update: updater::UpdateState::Idle,
+            update_modal: false,
             tab: Tab::Home,
             home_tab: HomeTab::Videos,
             video_tab: VideoTab::Record,
@@ -297,9 +305,12 @@ impl App {
             bar_anchor: None,
             bar_settle_until: None,
             frame_styled: false,
+        };
+        if app.check_updates {
+            app.start_update_check(&cc.egui_ctx);
         }
+        app
     }
-
 
     fn selected_source(&self) -> Option<Source> {
         match self.source_kind {
@@ -332,6 +343,7 @@ impl App {
             countdown_enabled: self.countdown_enabled,
             countdown_secs: self.countdown_secs,
             language: self.language,
+            check_updates: self.check_updates,
         };
         if let Err(e) = settings.save() {
             log::warn!("could not save settings: {e:#}");
@@ -759,6 +771,7 @@ impl App {
                         if ui.small_button(t!(STATUS_CHANGE)).on_hover_text(t!(STATUS_CHANGE_TIP)).clicked() {
                             self.show_preview_tab();
                         }
+                        self.update_chip(ui);
                     });
                 }
             }
@@ -1045,6 +1058,9 @@ impl App {
             self.save_settings();
         }
         ui.add_space(14.0);
+        section_title(ui, t!(SECTION_UPDATES));
+        self.general_update_rows(ui);
+        ui.add_space(14.0);
         section_title(ui, t!(SECTION_APPEARANCE));
         settings_row(ui, t!(LANGUAGE), |ui| {
             let mut lang = self.language;
@@ -1287,6 +1303,8 @@ impl App {
     fn page_about(&mut self, ui: &mut egui::Ui) {
         section_title(ui, "openclip");
         ui.label(t!(ABOUT_VERSION, env!("CARGO_PKG_VERSION")));
+        ui.add_space(4.0);
+        self.update_check_row(ui);
         ui.add_space(6.0);
         ui.label(t!(ABOUT_TAGLINE));
         ui.label(t!(ABOUT_VIDEO));
@@ -1352,6 +1370,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_encoders();
+        self.poll_update(&ctx);
         self.tick_countdown(&ctx);
         self.poll_preview(&ctx);
         self.track_message();
@@ -1406,9 +1425,11 @@ impl eframe::App for App {
         self.countdown_overlay(&ctx);
         self.delete_dialog(&ctx);
         self.show_format_dialog(&ctx);
+        self.update_dialog(&ctx);
     }
 
     fn on_exit(&mut self) {
+        self.cancel_update_download();
         self.save_settings();
         self.live.stop();
         if let State::Recording(rec) = std::mem::replace(&mut self.state, State::Idle) {
