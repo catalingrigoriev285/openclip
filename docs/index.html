@@ -566,7 +566,7 @@
         <div class="card">
           <div class="icon amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3 7h7l-5.5 4.5L18.5 21 12 16.5 5.5 21l2-7.5L2 9h7z"/></svg></div>
           <h3 data-i18n="feat.5.h">No external runtime</h3>
-          <p data-i18n="feat.5.p">OpenH264 and LAME are compiled from bundled sources at build time. The MP4 muxer is in-house. Nothing to install next to the binary.</p>
+          <p data-i18n="feat.5.p">OpenH264 and LAME are compiled from bundled sources at build time. The MP4 muxer is in-house. Nothing to install next to the binary — and it keeps itself current: when a new release is on GitHub, one click downloads it, verifies the checksum and swaps the executable in place.</p>
         </div>
         <div class="card">
           <div class="icon teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
@@ -791,7 +791,7 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
       "feat.4.h": "MP4 standard, care se redă oriunde",
       "feat.4.p": "Video H.264 și sunet MP3 într-un MP4 simplu, nefragmentat. Se deschide în VLC, Windows Media Player, Filme și TV, Chrome, Edge și în orice unealtă bazată pe ffmpeg. Fișierele peste 4 GiB folosesc <code>co64</code>.",
       "feat.5.h": "Fără dependențe la rulare",
-      "feat.5.p": "OpenH264 și LAME sunt compilate din surse incluse, la compilare. Muxerul MP4 este propriu. Nu ai nimic de instalat lângă executabil.",
+      "feat.5.p": "OpenH264 și LAME sunt compilate din surse incluse, la compilare. Muxerul MP4 este propriu. Nu ai nimic de instalat lângă executabil — și se ține singur la zi: când apare o versiune nouă pe GitHub, un clic o descarcă, verifică suma de control și înlocuiește executabilul pe loc.",
       "feat.6.h": "Sincronizare în care poți avea încredere",
       "feat.6.p": "Fiecare cadru poartă marcajul real de timp al capturii. Dacă codificatorul rămâne în urmă, cadrele sunt eliminate — niciodată desincronizate.",
 
@@ -907,7 +907,7 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
       "feat.4.h": "Обычный MP4, который играет везде",
       "feat.4.p": "Видео H.264 и звук MP3 в простом нефрагментированном MP4. Открывается в VLC, Windows Media Player, «Кино и ТВ», Chrome, Edge и любом инструменте на базе ffmpeg. Файлы больше 4 ГиБ используют <code>co64</code>.",
       "feat.5.h": "Никаких внешних зависимостей",
-      "feat.5.p": "OpenH264 и LAME собираются из встроенных исходников во время сборки. Мультиплексор MP4 — собственный. Рядом с исполняемым файлом ставить нечего.",
+      "feat.5.p": "OpenH264 и LAME собираются из встроенных исходников во время сборки. Мультиплексор MP4 — собственный. Рядом с исполняемым файлом ставить нечего — и программа сама следит за обновлениями: когда на GitHub выходит новая версия, один клик скачивает её, проверяет контрольную сумму и заменяет исполняемый файл на месте.",
       "feat.6.h": "Тайминг, которому можно доверять",
       "feat.6.p": "Каждый кадр несёт реальную метку времени захвата. Если кодировщик не успевает, кадры отбрасываются — но синхронизация не теряется.",
 

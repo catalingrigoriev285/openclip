@@ -41,6 +41,8 @@ git tag v0.2.0 && git push origin main v0.2.0
 
 Running the workflow manually (Actions → Release → Run workflow) only builds and uploads the archives as artifacts, which is handy for checking a build before tagging.
 
+The in-app updater relies on this layout: it looks for the asset named `openclip-<version>-<target>.<zip|tar.gz>` on the latest release and takes `openclip[.exe]` out of the folder inside. `cargo run --example check_update` prints what the updater sees; with `OPENCLIP_UPDATE_PRETEND_VERSION=0.1.0` and `-- --install` it runs the whole download → verify → replace path on the example's own executable.
+
 ## Usage
 
 The window is laid out like a classic recorder (about 800×640): a toolbar on top, a navigation on the left (Home / General / Video / Image / About) and pages on the right.
@@ -54,6 +56,10 @@ The window is laid out like a classic recorder (about 800×640): a toolbar on to
 The status strip shows elapsed (recorded) time, encoded fps, dropped frames and file size while recording, plus a note when an encoder had to be substituted. Video runs on a fixed frame clock: every slot of `1/fps` gets exactly one frame — the newest captured one, or a repeat of the previous frame when the screen did not change or the capture was late — so the file always has a perfectly regular frame rate and audio stays in sync. Only if encoding falls more than two frames behind are slots skipped (counted as "dropped").
 
 All settings are remembered between runs in **`settings.json` next to the executable** (portable). If that folder is not writable (e.g. `Program Files`), the per-user location is used instead: `%APPDATA%\openclip\` on Windows, `~/.config/openclip/` on Linux, `~/Library/Application Support/openclip/` on macOS. A settings file from that per-user location is picked up automatically the first time. General → Sources shows the file in use.
+
+### Updates
+
+At start-up openclip asks GitHub once whether a newer release exists (a single unauthenticated request; nothing is installed without asking — turn it off under **General → Updates**, or check by hand from **About**). When there is one, an **Update to vX** button appears in the status strip; the dialog shows the release notes and offers **Download and install**: the archive for your platform is downloaded next to the executable, verified against the SHA-256 that GitHub publishes for the asset, the binary is swapped in place (`settings.json` and your recordings are untouched) and **Restart now** launches the new version. If the program folder is not writable (e.g. `Program Files`) or there is no build for your platform, the dialog only opens the release page.
 
 ### Format settings
 
