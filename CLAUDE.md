@@ -95,6 +95,7 @@ The central orchestrator. `Recorder::start(RecordConfig, on_preview)` spawns:
 - Both muxers assume **presentation order == decode order** (no `ctts`, no DTS): every encoder must run without B-frames.
 - Media Foundation objects are thread-affine and `!Send`: create and use an encoder on one thread with a `ComGuard` (MTA) alive; the GUI thread is an STA, so enumeration runs on a helper thread.
 - Encoders emit Annex-B; only the MP4 writer converts to length-prefixed samples. AVI keeps parameter sets in-band.
+- Windows' AVI source (Media Foundation) reads the OpenDML `indx` super-indexes and interprets their `dwDuration` as PCM sample frames for audio streams (even MP3); a chunk count there makes the audio stream appear empty. `cargo run --example probe_media -- file` decodes a file through Media Foundation to catch this class of problem.
 - If a captured window is resized mid-recording, frames of the new size are dropped rather than re-negotiating the encoder.
 - Output files are `<prefix>-YYYYMMDD-HHMMSS.<mp4|avi>` in the output folder (default `~/Videos`); snapshots are PNG alongside.
 - `docs/` is the GitHub Pages site (`index.html` + screenshots), not developer documentation.

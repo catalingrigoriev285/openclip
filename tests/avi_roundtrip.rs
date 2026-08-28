@@ -58,6 +58,8 @@ struct Built {
     keyframes: Vec<bool>,
     audio_chunks: usize,
     audio_samples: u64,
+    audio_bytes: u64,
+    audio_bitrate_bps: u32,
 }
 
 fn build(audio: Audio, small_riff: bool) -> Built {
@@ -99,6 +101,8 @@ fn build(audio: Audio, small_riff: bool) -> Built {
     let mut pushed = 0;
     let mut audio_chunks = 0;
     let mut audio_samples = 0u64;
+    let mut audio_bytes = 0u64;
+    let audio_bitrate_bps = enc.as_ref().map(|e| e.bitrate_bps()).unwrap_or(0);
     let mut pcm = Vec::new();
     for i in 0..FRAMES {
         for (n, px) in frame.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -130,6 +134,7 @@ fn build(audio: Audio, small_riff: bool) -> Built {
                 mux.push_audio(&f.data, f.samples).unwrap();
                 audio_chunks += 1;
                 audio_samples += f.samples as u64;
+                audio_bytes += f.data.len() as u64;
             }
         }
     }
@@ -140,10 +145,11 @@ fn build(audio: Audio, small_riff: bool) -> Built {
             mux.push_audio(&f.data, f.samples).unwrap();
             audio_chunks += 1;
             audio_samples += f.samples as u64;
+            audio_bytes += f.data.len() as u64;
         }
     }
     mux.finalize().unwrap();
-    Built { bytes: shared.bytes(), pushed, keyframes, audio_chunks, audio_samples }
+    Built { bytes: shared.bytes(), pushed, keyframes, audio_chunks, audio_samples, audio_bytes, audio_bitrate_bps }
 }
 
 // ----- minimal RIFF reader -------------------------------------------------------
@@ -243,13 +249,19 @@ fn h264_mp3_avi_structure() {
     let aus = chunks(bytes, strls[1].start, strls[1].start + strls[1].size);
     let astrh = find(&aus, b"strh", None).unwrap();
     assert_eq!(&bytes[astrh.start..astrh.start + 4], b"auds");
-    assert_eq!((u32(bytes, astrh.start + 20), u32(bytes, astrh.start + 24)), (1152, RATE));
-    assert_eq!(u32(bytes, astrh.start + 32) as usize, b.audio_chunks, "audio dwLength = MP3 frames");
+    // Byte-based CBR stream: one tick per byte.
+    assert_eq!((u32(bytes, astrh.start + 20), u32(bytes, astrh.start + 24)), (1, b.audio_bitrate_bps / 8));
+    assert_eq!(u32(bytes, astrh.start + 32) as u64, b.audio_bytes, "audio dwLength = MP3 bytes");
+    assert_eq!(u32(bytes, astrh.start + 44), 1, "dwSampleSize = 1");
     let astrf = find(&aus, b"strf", None).unwrap();
     assert_eq!(u16(bytes, astrf.start), 0x0055, "MP3 format tag");
     assert_eq!(u16(bytes, astrf.start + 2), 2);
     assert_eq!(u32(bytes, astrf.start + 4), RATE);
+    assert_eq!(u32(bytes, astrf.start + 8), b.audio_bitrate_bps / 8, "nAvgBytesPerSec");
+    assert_eq!(u16(bytes, astrf.start + 12), 1, "nBlockAlign");
     assert_eq!(u16(bytes, astrf.start + 16), 12, "MPEGLAYER3WAVEFORMAT extension");
+    let aindx = find(&aus, b"indx", None).unwrap();
+    assert_eq!(u32(bytes, aindx.start + 24 + 12) as u64, b.audio_bytes, "super-index duration in bytes");
 
     let odml = find(&hdrl, b"LIST", Some(b"odml")).unwrap();
     let odml_children = chunks(bytes, odml.start, odml.start + odml.size);
@@ -363,6 +375,11 @@ fn pcm_audio_and_avix_continuation() {
     }
     let total_slots = (FRAMES - (GAP.end - GAP.start)) as usize + GAP.len();
     assert_eq!(slots, total_slots);
+    // The audio super index counts PCM sample frames (what Windows expects), not chunks.
+    let aindx = find(&aus, b"indx", None).unwrap();
+    let an = u32(bytes, aindx.start + 4) as usize;
+    let audio_ticks: u64 = (0..an).map(|i| u32(bytes, aindx.start + 24 + i * 16 + 12) as u64).sum();
+    assert_eq!(audio_ticks, b.audio_samples);
     // The legacy idx1 only covers the first RIFF and lives inside it.
     let top = chunks(bytes, p.riffs[0].start, p.riffs[0].start + p.riffs[0].size);
     let idx1 = find(&top, b"idx1", None).expect("idx1 in the first RIFF");

@@ -11,6 +11,12 @@
 //! AVI has a fixed frame rate: every frame occupies a slot; gaps (dropped
 //! frames) are written as empty `00dc` chunks so timing stays correct, and a
 //! frame whose slot is already taken is refused.
+//!
+//! Audio streams are sample based in the AVI sense: PCM ticks are sample
+//! frames (`dwSampleSize` = block align); MP3 / AAC use the byte-based CBR
+//! convention (`dwSampleSize` = 1, `dwRate` = bytes per second, lengths and
+//! super-index durations in bytes), which is what Windows' AVI source, ffmpeg
+//! and VLC all agree on.
 
 use std::io::{Seek, SeekFrom, Write};
 use std::time::Duration;
@@ -117,6 +123,10 @@ struct SuperEntry {
 struct StreamIndex {
     /// Chunks in the current RIFF.
     current: Vec<IndexEntry>,
+    /// Stream ticks covered by the current RIFF: frames for video, PCM sample
+    /// frames for audio (Windows' AVI source treats the super-index duration
+    /// that way even for frame-based codecs like MP3).
+    current_duration: u64,
     /// One entry per closed RIFF.
     supers: Vec<SuperEntry>,
     /// Chunks in the first RIFF (for `idx1`).
@@ -145,6 +155,7 @@ pub struct AviWriter<W: Write + Seek> {
     riff0_size: u32,
     total_frames: u64,
     audio_samples: u64,
+    audio_bytes: u64,
     audio_chunks: u64,
     finalized: bool,
 }
@@ -173,6 +184,7 @@ impl<W: Write + Seek> AviWriter<W> {
             riff0_size: 0,
             total_frames: 0,
             audio_samples: 0,
+            audio_bytes: 0,
             audio_chunks: 0,
             finalized: false,
         };
@@ -255,7 +267,8 @@ impl<W: Write + Seek> AviWriter<W> {
                             let align = a.channels as u32 * 2;
                             (align, a.sample_rate * align, align, self.audio_samples)
                         }
-                        _ => (a.samples_per_frame, a.sample_rate, 0, self.audio_chunks),
+                        // Byte-based CBR: one tick per byte.
+                        _ => (1, (a.bitrate_bps / 8).max(1), 1, self.audio_bytes),
                     };
                     b.chunk(b"strh", |b| {
                         b.fourcc(b"auds").u32(0);
@@ -319,8 +332,9 @@ impl<W: Write + Seek> AviWriter<W> {
         Ok(())
     }
 
-    /// Writes one data chunk, rolling over to a new RIFF first if it would not fit.
-    fn write_chunk(&mut self, stream: usize, id: &[u8; 4], data: &[u8], keyframe: bool) -> Result<()> {
+    /// Writes one data chunk covering `ticks` of stream time, rolling over to
+    /// a new RIFF first if it would not fit.
+    fn write_chunk(&mut self, stream: usize, id: &[u8; 4], data: &[u8], keyframe: bool, ticks: u64) -> Result<()> {
         let needed = 8 + data.len() as u64 + (data.len() % 2) as u64;
         // Keep room for the two standard indexes (+ idx1 in the first RIFF).
         let index_reserve: u64 = self.streams.iter().map(|s| 32 + 8 * s.current.len() as u64).sum::<u64>()
@@ -341,6 +355,7 @@ impl<W: Write + Seek> AviWriter<W> {
         let entry = IndexEntry { header_pos, size: data.len() as u32, keyframe };
         let s = &mut self.streams[stream];
         s.current.push(entry);
+        s.current_duration += ticks;
         if self.riff_index == 0 {
             s.legacy.push(entry);
         }
@@ -357,10 +372,10 @@ impl<W: Write + Seek> AviWriter<W> {
             return Ok(false);
         }
         while self.next_slot < slot {
-            self.write_chunk(0, &VIDEO_CHUNK, &[], false)?;
+            self.write_chunk(0, &VIDEO_CHUNK, &[], false, 1)?;
             self.count_frame();
         }
-        self.write_chunk(0, &VIDEO_CHUNK, annexb, keyframe)?;
+        self.write_chunk(0, &VIDEO_CHUNK, annexb, keyframe, 1)?;
         self.count_frame();
         Ok(true)
     }
@@ -375,11 +390,14 @@ impl<W: Write + Seek> AviWriter<W> {
 
     /// Appends one audio frame (`samples` PCM frames per channel).
     pub fn push_audio(&mut self, data: &[u8], samples: u32) -> Result<()> {
-        if self.audio.is_none() {
-            bail!("no audio track");
-        }
-        self.write_chunk(1, &AUDIO_CHUNK, data, true)?;
+        let Some(a) = &self.audio else { bail!("no audio track") };
+        let ticks = match a.codec {
+            AudioCodecConfig::Pcm { .. } => samples as u64,
+            _ => data.len() as u64,
+        };
+        self.write_chunk(1, &AUDIO_CHUNK, data, true, ticks)?;
         self.audio_samples += samples as u64;
+        self.audio_bytes += data.len() as u64;
         self.audio_chunks += 1;
         Ok(())
     }
@@ -391,6 +409,7 @@ impl<W: Write + Seek> AviWriter<W> {
         for stream in 0..stream_count {
             let id = if stream == 0 { VIDEO_CHUNK } else { AUDIO_CHUNK };
             let entries = std::mem::take(&mut self.streams[stream].current);
+            let duration = std::mem::take(&mut self.streams[stream].current_duration);
             if entries.is_empty() && stream == 1 {
                 continue;
             }
@@ -412,7 +431,7 @@ impl<W: Write + Seek> AviWriter<W> {
             self.streams[stream].supers.push(SuperEntry {
                 offset: ix_pos,
                 size: b.0.len() as u32,
-                duration: entries.len() as u32,
+                duration: duration.min(u32::MAX as u64) as u32,
             });
         }
         // Patch the movi LIST size (the size counts the `movi` type + payload).

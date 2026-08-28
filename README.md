@@ -73,6 +73,7 @@ cargo run --release --example capture_to_mp4 -- 10 out.mp4      # record the pri
     #        --codec openh264|h264-hw|h264-sw|hevc|nvenc|quick|… --audio mp3|aac|pcm --avi --fps N --quality Q
 cargo run --release --example bench_encode -- 1920 1080 5 out.mp4 --codec nvenc   # encoder throughput on synthetic content
 cargo run --example list_encoders                                 # what Media Foundation offers on this machine
+cargo run --example probe_media -- out.mp4 out.avi                # decode files with Windows' own demuxers/decoders
 ```
 
 ## How it works
