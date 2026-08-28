@@ -57,6 +57,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Bumping the version in Cargo.toml (e.g. via the GitHub editor) also
+      # changes the crate's own entry in Cargo.lock; `--locked` refuses to
+      # build until that is committed.
+      - name: Check that Cargo.lock is up to date
+        shell: bash
+        run: |
+          if ! cargo metadata --locked --format-version 1 > /dev/null; then
+            echo "::error::Cargo.lock is out of date. Run 'cargo update --workspace' locally and commit Cargo.lock."
+            exit 1
+          fi
+
       # OpenH264 assembly kernels (~2x encoder throughput). Without nasm the
       # build silently falls back to C.
       - uses: ilammy/setup-nasm@v1

@@ -33,8 +33,10 @@ Installing [nasm](https://www.nasm.us/) before building enables OpenH264's assem
 Pushing a `v*` tag that matches the version in `Cargo.toml` runs the [release workflow](.github/workflows/release.yml), which builds the executable for Windows, Linux and macOS (with nasm) and publishes a GitHub Release with a `.zip` / `.tar.gz` per platform:
 
 ```sh
-# bump version in Cargo.toml, commit, then
-git tag v0.2.0 && git push origin v0.2.0
+# bump version in Cargo.toml, then refresh Cargo.lock and commit both
+cargo update --workspace
+git commit -am "Release v0.2.0"
+git tag v0.2.0 && git push origin main v0.2.0
 ```
 
 Running the workflow manually (Actions → Release → Run workflow) only builds and uploads the archives as artifacts, which is handy for checking a build before tagging.
