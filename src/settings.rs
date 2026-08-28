@@ -2,7 +2,7 @@
 //! plus the other preferences that survive a restart. Persisted as JSON in the
 //! platform config directory (`%APPDATA%\openclip\settings.json` on Windows).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,8 +37,11 @@ impl Container {
 /// transform CLSID (32 hex digits) so a specific GPU's encoder can be chosen.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum VideoCodec {
-    /// Bundled OpenH264 (CPU, every platform).
+    /// The best available H.264 encoder: a hardware encoder when present,
+    /// otherwise OpenH264.
     #[default]
+    Auto,
+    /// Bundled OpenH264 (CPU, every platform).
     OpenH264,
     /// A Windows Media Foundation transform (hardware NVENC / AMF / Quick Sync /
     /// DX12, or a software encoder).
@@ -59,9 +62,16 @@ impl VideoCodec {
         if self.is_hevc() { "H265/HEVC" } else { "H264" }
     }
 
+    /// What `Auto` stands for on this machine: the first hardware H.264
+    /// encoder, else OpenH264.
+    pub fn resolve_auto(available: &[EncoderInfo]) -> VideoCodec {
+        available.iter().find(|e| e.hardware && !e.hevc).map(EncoderInfo::codec).unwrap_or(VideoCodec::OpenH264)
+    }
+
     /// The enumerated encoder behind this choice, if present on this machine.
     pub fn info<'a>(&self, available: &'a [EncoderInfo]) -> Option<&'a EncoderInfo> {
         match self {
+            VideoCodec::Auto => Self::resolve_auto(available).info(available),
             VideoCodec::OpenH264 => None,
             VideoCodec::Mf { clsid, .. } => available.iter().find(|e| &e.clsid == clsid),
         }
@@ -70,6 +80,7 @@ impl VideoCodec {
     /// Label used when no enumerated encoder describes this codec better.
     pub fn generic_label(&self) -> String {
         match self {
+            VideoCodec::Auto => "Auto (hardware H.264 if available)".into(),
             VideoCodec::OpenH264 => "H264 (OpenH264, CPU)".into(),
             VideoCodec::Mf { .. } => format!("{} (Media Foundation encoder)", self.family()),
         }
@@ -77,7 +88,10 @@ impl VideoCodec {
 
     /// Display label, preferring the enumerated encoder's vendor-specific name.
     pub fn label(&self, available: &[EncoderInfo]) -> String {
-        self.info(available).map(|e| e.label.clone()).unwrap_or_else(|| self.generic_label())
+        match self {
+            VideoCodec::Auto => format!("Auto → {}", Self::resolve_auto(available).label(available)),
+            _ => self.info(available).map(|e| e.label.clone()).unwrap_or_else(|| self.generic_label()),
+        }
     }
 }
 
@@ -88,6 +102,7 @@ pub fn pick_encoder(query: &str, available: &[EncoderInfo]) -> Option<VideoCodec
     let q = query.trim().to_ascii_lowercase();
     let find = |f: &dyn Fn(&EncoderInfo) -> bool| available.iter().find(|e| f(e)).map(EncoderInfo::codec);
     match q.as_str() {
+        "auto" => Some(VideoCodec::Auto),
         "openh264" | "cpu" => Some(VideoCodec::OpenH264),
         "h264-hw" | "h264" => find(&|e| !e.hevc && e.hardware),
         "h264-sw" => find(&|e| !e.hevc && !e.hardware),
@@ -262,7 +277,7 @@ impl Default for FormatSettings {
             container: Container::Mp4,
             size: SizeMode::Full,
             fps: 30,
-            video_codec: VideoCodec::OpenH264,
+            video_codec: VideoCodec::Auto,
             rate_control: RateControl::default(),
             keyframe_interval_s: 2.0,
             profiles: Profiles::default(),
@@ -415,6 +430,9 @@ pub struct Settings {
     /// Microphone by name (re-resolved to a device index at load).
     pub mic_name: Option<String>,
     pub mouse_fx: MouseFx,
+    /// Count down before recording starts.
+    pub countdown_enabled: bool,
+    pub countdown_secs: u32,
 }
 
 impl Default for Settings {
@@ -427,35 +445,88 @@ impl Default for Settings {
             mic_enabled: false,
             mic_name: None,
             mouse_fx: MouseFx::default(),
+            countdown_enabled: true,
+            countdown_secs: 3,
         }
     }
 }
 
+pub const SETTINGS_FILE: &str = "settings.json";
+
+/// Picks where settings live: next to the executable (portable) when that
+/// folder is writable or already holds a settings file, else the per-user
+/// config directory.
+pub fn choose_path(exe_dir: Option<&Path>, portable_exists: bool, writable: bool, roaming: Option<PathBuf>) -> Option<PathBuf> {
+    match exe_dir {
+        Some(dir) if portable_exists || writable => Some(dir.join(SETTINGS_FILE)),
+        _ => roaming,
+    }
+}
+
+fn dir_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".openclip-write-test-{}", std::process::id()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 impl Settings {
-    /// `<config dir>/openclip/settings.json`, if a config directory exists.
-    pub fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("openclip").join("settings.json"))
+    /// The per-user location used before settings became portable.
+    pub fn legacy_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("openclip").join(SETTINGS_FILE))
     }
 
-    /// Loads the settings; missing or corrupt files yield the defaults.
+    /// `settings.json` next to the executable when possible (portable install),
+    /// otherwise the per-user config directory.
+    pub fn path() -> Option<PathBuf> {
+        static CHOSEN: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        CHOSEN
+            .get_or_init(|| {
+                let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+                let portable_exists = exe_dir.as_ref().map(|d| d.join(SETTINGS_FILE).is_file()).unwrap_or(false);
+                let writable = exe_dir.as_ref().map(|d| dir_is_writable(d)).unwrap_or(false);
+                choose_path(exe_dir.as_deref(), portable_exists, writable, Self::legacy_path())
+            })
+            .clone()
+    }
+
+    /// Loads the settings; missing or corrupt files yield the defaults. A
+    /// settings file from the old per-user location is picked up when the
+    /// portable one does not exist yet (it moves on the next save).
     pub fn load() -> Settings {
         let Some(path) = Self::path() else { return Settings::default() };
-        match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
-                // Not normalized here: the codec list is only known once the
-                // encoders have been enumerated; the app normalizes then.
-                Ok(s) => s,
+        let mut candidates = vec![path];
+        if let Some(legacy) = Self::legacy_path()
+            && !candidates.contains(&legacy)
+        {
+            candidates.push(legacy);
+        }
+        for path in candidates {
+            match std::fs::read(&path) {
+                Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
+                    // Not normalized here: the codec list is only known once the
+                    // encoders have been enumerated; the app normalizes then.
+                    Ok(s) => {
+                        log::info!("settings loaded from {}", path.display());
+                        return s;
+                    }
+                    Err(e) => {
+                        log::warn!("settings: {} is not valid, using defaults: {e}", path.display());
+                        return Settings::default();
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    log::warn!("settings: {} is not valid, using defaults: {e}", path.display());
-                    Settings::default()
+                    log::warn!("settings: cannot read {}: {e}", path.display());
+                    return Settings::default();
                 }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
-            Err(e) => {
-                log::warn!("settings: cannot read {}: {e}", path.display());
-                Settings::default()
             }
         }
+        Settings::default()
     }
 
     /// Writes the settings atomically (temp file + rename).
@@ -524,6 +595,32 @@ mod tests {
         } else {
             assert_eq!(f.audio_codec, AudioCodec::Mp3);
         }
+    }
+
+    #[test]
+    fn auto_codec_resolves_and_parses_legacy() {
+        assert_eq!(FormatSettings::default().video_codec, VideoCodec::Auto);
+        assert_eq!(VideoCodec::resolve_auto(&[]), VideoCodec::OpenH264);
+        assert_eq!(VideoCodec::resolve_auto(&[nvenc()]), nvenc().codec());
+        assert!(VideoCodec::Auto.label(&[nvenc()]).contains("NVENC"));
+        assert!(!VideoCodec::Auto.needs_mf());
+        let mut f = FormatSettings::default();
+        assert!(f.normalize(&[]).is_empty(), "Auto never needs coercion");
+        let legacy: FormatSettings = serde_json::from_str(r#"{"video_codec":"OpenH264"}"#).unwrap();
+        assert_eq!(legacy.video_codec, VideoCodec::OpenH264);
+        assert_eq!(pick_encoder("auto", &[]), Some(VideoCodec::Auto));
+    }
+
+    #[test]
+    fn settings_path_prefers_portable() {
+        let exe = Path::new("C:/apps/openclip");
+        let roaming = Some(PathBuf::from("C:/Users/x/AppData/Roaming/openclip/settings.json"));
+        assert_eq!(choose_path(Some(exe), false, true, roaming.clone()), Some(exe.join("settings.json")));
+        assert_eq!(choose_path(Some(exe), true, false, roaming.clone()), Some(exe.join("settings.json")));
+        assert_eq!(choose_path(Some(exe), false, false, roaming.clone()), roaming.clone());
+        assert_eq!(choose_path(None, false, true, roaming.clone()), roaming);
+        assert!(Settings::default().countdown_enabled);
+        assert_eq!(Settings::default().countdown_secs, 3);
     }
 
     #[test]

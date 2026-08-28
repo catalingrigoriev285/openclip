@@ -22,7 +22,7 @@ pub const VIDEO_TIMESCALE: u32 = 90_000;
 /// Timescale of the movie header.
 const MOVIE_TIMESCALE: u32 = 1_000;
 /// Samples are grouped into chunks covering about this much time.
-const CHUNK_DURATION: Duration = Duration::from_millis(500);
+const CHUNK_DURATION: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodecConfig {

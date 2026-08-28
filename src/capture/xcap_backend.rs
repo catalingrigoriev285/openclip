@@ -3,9 +3,15 @@
 //! Monitors and regions use `Monitor::video_recorder()`; single windows fall
 //! back to polling `Window::capture_image()` at the requested frame rate since
 //! xcap does not record windows yet.
+//!
+//! xcap's `Monitor`, `Window` and `VideoRecorder` are not `Send` on macOS
+//! (they wrap Objective-C objects), so every xcap object is created and used
+//! on the capture thread itself; only plain ids cross the thread boundary.
+//! Setup errors are reported back through a channel so `start` still fails
+//! synchronously.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -55,10 +61,24 @@ fn spawn_monitor(
     stop: Arc<AtomicBool>,
     mut sink: FrameSink,
 ) -> Result<JoinHandle<Result<()>>> {
-    let monitor = find_monitor(id)?;
-    let (recorder, rx) = monitor.video_recorder().context("creating xcap video recorder")?;
-    recorder.start().context("starting xcap video recorder")?;
-    Ok(std::thread::Builder::new().name("openclip-capture".into()).spawn(move || {
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
+    let thread = std::thread::Builder::new().name("openclip-capture".into()).spawn(move || {
+        let setup: Result<_> = (|| {
+            let monitor = find_monitor(id)?;
+            let (recorder, rx) = monitor.video_recorder().context("creating xcap video recorder")?;
+            recorder.start().context("starting xcap video recorder")?;
+            Ok((recorder, rx))
+        })();
+        let (recorder, rx) = match setup {
+            Ok(v) => {
+                let _ = ready_tx.send(Ok(()));
+                v
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+                return Ok(());
+            }
+        };
         let mut limiter = FpsLimiter::new(fps);
         let result = loop {
             if stop.load(Ordering::Relaxed) {
@@ -96,7 +116,27 @@ fn spawn_monitor(
         };
         let _ = recorder.stop();
         result
-    })?)
+    })?;
+    wait_ready(ready_rx, thread)
+}
+
+/// Waits for the capture thread to report the outcome of its setup, joining
+/// it (and returning its error) if setup failed.
+fn wait_ready(
+    ready_rx: mpsc::Receiver<Result<()>>,
+    thread: JoinHandle<Result<()>>,
+) -> Result<JoinHandle<Result<()>>> {
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(thread),
+        Ok(Err(e)) => {
+            let _ = thread.join();
+            Err(e)
+        }
+        Err(_) => {
+            let _ = thread.join();
+            Err(anyhow!("capture thread exited during setup"))
+        }
+    }
 }
 
 fn spawn_window(
@@ -106,12 +146,25 @@ fn spawn_window(
     stop: Arc<AtomicBool>,
     mut sink: FrameSink,
 ) -> Result<JoinHandle<Result<()>>> {
-    let window = Window::all()?
-        .into_iter()
-        .find(|w| w.id().map(|i| i == id).unwrap_or(false))
-        .ok_or_else(|| anyhow!("window {id} not found"))?;
     let interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
-    Ok(std::thread::Builder::new().name("openclip-capture".into()).spawn(move || {
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
+    let thread = std::thread::Builder::new().name("openclip-capture".into()).spawn(move || {
+        let setup: Result<_> = (|| {
+            Window::all()?
+                .into_iter()
+                .find(|w| w.id().map(|i| i == id).unwrap_or(false))
+                .ok_or_else(|| anyhow!("window {id} not found"))
+        })();
+        let window = match setup {
+            Ok(w) => {
+                let _ = ready_tx.send(Ok(()));
+                w
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+                return Ok(());
+            }
+        };
         let mut next = Instant::now();
         while !stop.load(Ordering::Relaxed) {
             let now = Instant::now();
@@ -144,5 +197,6 @@ fn spawn_window(
             }
         }
         Ok(())
-    })?)
+    })?;
+    wait_ready(ready_rx, thread)
 }

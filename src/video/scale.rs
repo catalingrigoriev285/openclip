@@ -27,10 +27,17 @@ impl Scaler {
     }
 
     pub fn scale(&mut self, frame: &RawFrame) -> RawFrame {
+        let mut out = RawFrame::empty(frame.format);
+        self.scale_into(frame, &mut out);
+        out
+    }
+
+    /// Scales `frame` into `dst`, reusing `dst`'s buffer.
+    pub fn scale_into(&mut self, frame: &RawFrame, dst: &mut RawFrame) {
         let (w, h) = (frame.width, frame.height);
-        if (w, h) == self.dst {
-            return frame.clone();
-        }
+        dst.format = frame.format;
+        dst.pts = frame.pts;
+        dst.mouse = frame.mouse.clone();
         let row = (w * 4) as usize;
         let src_bytes: &[u8] = if frame.stride as usize == row && frame.data.len() >= row * h as usize {
             &frame.data[..row * h as usize]
@@ -43,30 +50,38 @@ impl Scaler {
             }
             &self.tight
         };
-        let mut out = RawFrame {
-            data: Vec::new(),
-            width: self.dst.0,
-            height: self.dst.1,
-            stride: self.dst.0 * 4,
-            format: frame.format,
-            pts: frame.pts,
-            mouse: frame.mouse.clone(),
+        let copy_source = |dst: &mut RawFrame| {
+            dst.data.clear();
+            dst.data.extend_from_slice(src_bytes);
+            dst.width = w;
+            dst.height = h;
+            dst.stride = w * 4;
         };
-        match ImageRef::new(w, h, src_bytes, PixelType::U8x4) {
-            Ok(src) => {
-                let mut dst = Image::new(self.dst.0, self.dst.1, PixelType::U8x4);
-                if let Err(e) = self.resizer.resize(&src, &mut dst, &self.options) {
-                    log::warn!("resize failed: {e}");
-                    return frame.clone();
-                }
-                out.data = dst.into_vec();
-                out
-            }
+        if (w, h) == self.dst {
+            copy_source(dst);
+            return;
+        }
+        let (dw, dh) = self.dst;
+        let needed = (dw * dh * 4) as usize;
+        dst.data.clear();
+        dst.data.resize(needed, 0);
+        let src = match ImageRef::new(w, h, src_bytes, PixelType::U8x4) {
+            Ok(s) => s,
             Err(e) => {
                 log::warn!("resize: bad source buffer: {e}");
-                frame.clone()
+                copy_source(dst);
+                return;
             }
+        };
+        let mut target = Image::from_slice_u8(dw, dh, &mut dst.data, PixelType::U8x4).expect("sized above");
+        if let Err(e) = self.resizer.resize(&src, &mut target, &self.options) {
+            log::warn!("resize failed: {e}");
+            copy_source(dst);
+            return;
         }
+        dst.width = dw;
+        dst.height = dh;
+        dst.stride = dw * 4;
     }
 }
 

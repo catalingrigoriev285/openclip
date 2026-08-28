@@ -90,6 +90,8 @@ enum VideoTab {
 enum State {
     Idle,
     Picking(Picker),
+    /// REC was pressed; recording starts when the countdown ends.
+    Countdown { started: Instant },
     Recording(Recorder),
 }
 
@@ -162,7 +164,7 @@ impl LivePreview {
             ctx.request_repaint();
             true
         });
-        let cfg = CaptureConfig { source, fps: Self::FPS, show_cursor: native_cursor };
+        let cfg = CaptureConfig { source, fps: Self::FPS, show_cursor: native_cursor, pool: None };
         match cap::start(cfg, Instant::now(), sink) {
             Ok(h) => self.handle = Some(h),
             Err(e) => self.error = Some(format!("{e:#}")),
@@ -206,6 +208,8 @@ pub struct App {
     mic_idx: usize,
     output_dir: PathBuf,
     file_prefix: String,
+    countdown_enabled: bool,
+    countdown_secs: u32,
     tab: Tab,
     home_tab: HomeTab,
     video_tab: VideoTab,
@@ -270,6 +274,8 @@ impl App {
             mic_idx,
             output_dir,
             file_prefix: settings.file_prefix,
+            countdown_enabled: settings.countdown_enabled,
+            countdown_secs: settings.countdown_secs.clamp(1, 10),
             tab: Tab::Home,
             home_tab: HomeTab::Videos,
             video_tab: VideoTab::Record,
@@ -319,6 +325,8 @@ impl App {
             mic_enabled: self.mic_enabled,
             mic_name: self.mics.get(self.mic_idx).cloned(),
             mouse_fx: self.mouse_fx.read().unwrap().clone(),
+            countdown_enabled: self.countdown_enabled,
+            countdown_secs: self.countdown_secs,
         };
         if let Err(e) = settings.save() {
             log::warn!("could not save settings: {e:#}");
@@ -431,11 +439,61 @@ impl App {
         self.last_file = Some(path);
     }
 
+    /// REC pressed: count down first (if enabled), then start.
     fn start_recording(&mut self, ctx: &egui::Context) {
+        if self.selected_source().is_none() {
+            self.message = Some(("Select something to record first.".into(), true));
+            return;
+        }
+        if self.countdown_enabled && self.countdown_secs > 0 && !self.is_recording() {
+            self.state = State::Countdown { started: Instant::now() };
+            self.message = None;
+            ctx.request_repaint();
+            return;
+        }
+        self.start_recording_now(ctx);
+    }
+
+    fn cancel_countdown(&mut self) {
+        if matches!(self.state, State::Countdown { .. }) {
+            self.state = State::Idle;
+        }
+    }
+
+    /// Seconds still to count down (rounded up), if counting.
+    fn countdown_remaining(&self) -> Option<u32> {
+        match &self.state {
+            State::Countdown { started } => {
+                let left = self.countdown_secs as f32 - started.elapsed().as_secs_f32();
+                Some(left.ceil().max(0.0) as u32)
+            }
+            _ => None,
+        }
+    }
+
+    /// Advances the countdown; starts recording when it reaches zero.
+    fn tick_countdown(&mut self, ctx: &egui::Context) {
+        let State::Countdown { started } = &self.state else { return };
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.cancel_countdown();
+            self.message = Some(("Recording cancelled.".into(), false));
+            return;
+        }
+        if started.elapsed().as_secs_f32() >= self.countdown_secs as f32 {
+            // Start before this frame is drawn so the overlay never reaches the file.
+            self.start_recording_now(ctx);
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+
+    fn start_recording_now(&mut self, ctx: &egui::Context) {
         let Some(source) = self.selected_source() else {
+            self.state = State::Idle;
             self.message = Some(("Select something to record first.".into(), true));
             return;
         };
+        self.state = State::Idle;
         // Release the preview capture before opening the recording session.
         self.live.stop();
         self.wait_for_encoders(Duration::from_secs(2));
@@ -511,14 +569,15 @@ impl App {
     }
 
     fn poll_preview(&mut self, ctx: &egui::Context) {
-        let preview_visible = self.tab == Tab::Home && self.home_tab == HomeTab::Preview;
+        let preview_visible = self.tab == Tab::Home && self.home_tab == HomeTab::Preview && !self.compact;
         match &self.state {
             State::Recording(rec) => {
+                rec.set_preview_visible(preview_visible);
                 if let Some(img) = rec.preview().take() {
                     self.upload_preview(ctx, &img);
                 }
             }
-            State::Idle => {
+            State::Idle | State::Countdown { .. } => {
                 if preview_visible {
                     self.live.ensure(self.selected_source(), &self.mouse_fx, ctx);
                     if let Some(img) = self.live.take() {
@@ -570,9 +629,10 @@ impl App {
                     self.enter_compact(ctx);
                 }
                 let can_record = self.selected_source().is_some();
-                match rec_button(ui, recording, can_record) {
+                match rec_button(ui, self.rec_mode(), can_record) {
                     RecClick::Start => self.start_recording(ctx),
                     RecClick::Stop => self.stop_recording(),
+                    RecClick::Cancel => self.cancel_countdown(),
                     RecClick::None => {}
                 }
                 if pause_button(ui, recording, paused) {
@@ -580,6 +640,38 @@ impl App {
                 }
             });
         });
+    }
+
+    pub(super) fn rec_mode(&self) -> RecMode {
+        match &self.state {
+            State::Recording(_) => RecMode::Recording,
+            State::Countdown { .. } => RecMode::Countdown(self.countdown_remaining().unwrap_or(0)),
+            _ => RecMode::Idle,
+        }
+    }
+
+    /// Big centred "3 … 2 … 1" while the countdown runs (full-window layout).
+    fn countdown_overlay(&mut self, ctx: &egui::Context) {
+        let Some(left) = self.countdown_remaining() else { return };
+        let mut cancel = false;
+        egui::Area::new(egui::Id::new("countdown-overlay"))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::window(ui.style()).fill(TOOLBAR_BG).inner_margin(Margin::symmetric(40, 24)).show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("Recording starts in").color(TEXT_DIM).size(16.0));
+                        ui.label(RichText::new(left.max(1).to_string()).color(REC_RED).size(96.0).strong());
+                        ui.add_space(6.0);
+                        if ui.button("Cancel (Esc)").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            });
+        if cancel {
+            self.cancel_countdown();
+        }
     }
 
     /// Switches recording mode and opens the Preview tab when a choice is needed.
@@ -641,6 +733,13 @@ impl App {
                 State::Picking(_) => {
                     ui.label(RichText::new(icons::REGION).color(ACCENT));
                     ui.label("Drag a rectangle on the screen to select the recording region (Esc to cancel)");
+                }
+                State::Countdown { .. } => {
+                    let left = self.countdown_remaining().unwrap_or(0).max(1);
+                    ui.label(RichText::new("●").color(WARN_YELLOW).size(16.0));
+                    ui.label(RichText::new(format!("Recording starts in {left}…")).strong().color(WARN_YELLOW));
+                    ui.label(RichText::new("(Esc cancels)").color(TEXT_DIM));
+                    ctx.request_repaint_after(Duration::from_millis(100));
                 }
                 State::Idle => {
                     ui.label(RichText::new(icons::PLAY).color(ACCENT));
@@ -920,11 +1019,30 @@ impl App {
             );
         });
         ui.add_space(14.0);
+        section_title(ui, "Recording");
+        let before = (self.countdown_enabled, self.countdown_secs);
+        settings_row(ui, "Countdown", |ui| {
+            ui.checkbox(&mut self.countdown_enabled, "Count down before recording starts");
+        });
+        settings_row(ui, "", |ui| {
+            ui.add_enabled_ui(self.countdown_enabled, |ui| {
+                ui.add(egui::DragValue::new(&mut self.countdown_secs).range(1..=10).suffix(" s"));
+                ui.label(RichText::new("shown in the window and the mini bar, never in the video").color(TEXT_DIM).small());
+            });
+        });
+        if before != (self.countdown_enabled, self.countdown_secs) {
+            self.save_settings();
+        }
+        ui.add_space(14.0);
         section_title(ui, "Sources");
         settings_row(ui, "Devices", |ui| {
             if ui.button("Refresh monitors, windows and devices").clicked() {
                 self.refresh_sources();
             }
+        });
+        settings_row(ui, "Settings file", |ui| {
+            let path = Settings::path().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".into());
+            ui.label(RichText::new(path).color(TEXT_DIM).small());
         });
     }
 
@@ -1204,6 +1322,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_encoders();
+        self.tick_countdown(&ctx);
         self.poll_preview(&ctx);
         self.track_message();
 
@@ -1254,6 +1373,7 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(PAGE_BG).inner_margin(Margin::same(14)))
             .show(ui, |ui| self.page(ui));
 
+        self.countdown_overlay(&ctx);
         self.delete_dialog(&ctx);
         self.show_format_dialog(&ctx);
     }
@@ -1372,34 +1492,57 @@ pub(super) enum RecClick {
     None,
     Start,
     Stop,
+    Cancel,
 }
 
-/// The big round REC button; shows a stop square while recording.
-pub(super) fn rec_button(ui: &mut egui::Ui, recording: bool, enabled: bool) -> RecClick {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RecMode {
+    Idle,
+    /// Seconds left before recording starts.
+    Countdown(u32),
+    Recording,
+}
+
+/// The big round REC button; shows a stop square while recording and the
+/// remaining seconds during the countdown (click cancels).
+pub(super) fn rec_button(ui: &mut egui::Ui, mode: RecMode, enabled: bool) -> RecClick {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(60.0, 60.0), Sense::click());
     let center = rect.center();
     let p = ui.painter();
-    let color = if !enabled && !recording { TEXT_DIM } else { REC_RED };
-    let hovered = resp.hovered() && (enabled || recording);
-    if recording {
-        p.circle_filled(center, 27.0, if hovered { REC_RED_HOVER } else { REC_RED });
-        p.rect_filled(egui::Rect::from_center_size(center, Vec2::splat(18.0)), CornerRadius::same(2), TEXT_BRIGHT);
-    } else {
-        p.circle_stroke(center, 27.0, Stroke::new(3.0, color));
-        if hovered {
-            p.circle_filled(center, 24.0, Color32::from_rgba_unmultiplied(230, 40, 40, 40));
+    let active = mode != RecMode::Idle;
+    let color = if !enabled && !active { TEXT_DIM } else { REC_RED };
+    let hovered = resp.hovered() && (enabled || active);
+    match mode {
+        RecMode::Recording => {
+            p.circle_filled(center, 27.0, if hovered { REC_RED_HOVER } else { REC_RED });
+            p.rect_filled(egui::Rect::from_center_size(center, Vec2::splat(18.0)), CornerRadius::same(2), TEXT_BRIGHT);
         }
-        p.text(center, Align2::CENTER_CENTER, "REC", FontId::proportional(17.0), color);
+        RecMode::Countdown(left) => {
+            p.circle_stroke(center, 27.0, Stroke::new(3.0, WARN_YELLOW));
+            p.text(center, Align2::CENTER_CENTER, left.max(1).to_string(), FontId::proportional(26.0), WARN_YELLOW);
+        }
+        RecMode::Idle => {
+            p.circle_stroke(center, 27.0, Stroke::new(3.0, color));
+            if hovered {
+                p.circle_filled(center, 24.0, Color32::from_rgba_unmultiplied(230, 40, 40, 40));
+            }
+            p.text(center, Align2::CENTER_CENTER, "REC", FontId::proportional(17.0), color);
+        }
     }
-    let resp = resp.on_hover_text(if recording { "Stop recording" } else { "Start recording" });
+    let resp = resp.on_hover_text(match mode {
+        RecMode::Recording => "Stop recording",
+        RecMode::Countdown(_) => "Cancel the countdown",
+        RecMode::Idle => "Start recording",
+    });
     if !resp.clicked() {
         RecClick::None
-    } else if recording {
-        RecClick::Stop
-    } else if enabled {
-        RecClick::Start
     } else {
-        RecClick::None
+        match mode {
+            RecMode::Recording => RecClick::Stop,
+            RecMode::Countdown(_) => RecClick::Cancel,
+            RecMode::Idle if enabled => RecClick::Start,
+            RecMode::Idle => RecClick::None,
+        }
     }
 }
 

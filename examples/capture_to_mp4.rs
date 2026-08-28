@@ -124,14 +124,17 @@ fn main() -> anyhow::Result<()> {
         }
         let s = recorder.stats();
         println!(
-            "  {:>4.1}s captured {} encoded {} dropped {} skipped {} repeated {} enc {:.1}ms audio {} bytes {}",
+            "  {:>4.1}s captured {} encoded {} dropped {} skipped {} repeated {} superseded {} | enc {:.1}ms slot {:.1}ms mux {:.2}ms | audio {} bytes {}",
             start.elapsed().as_secs_f64(),
             s.frames_captured.load(Ordering::Relaxed),
             s.frames_encoded.load(Ordering::Relaxed),
             s.frames_dropped.load(Ordering::Relaxed),
             s.frames_skipped.load(Ordering::Relaxed),
             s.frames_repeated.load(Ordering::Relaxed),
+            s.frames_superseded.load(Ordering::Relaxed),
             s.encode_us.load(Ordering::Relaxed) as f64 / 1000.0,
+            s.slot_us.load(Ordering::Relaxed) as f64 / 1000.0,
+            s.mux_us.load(Ordering::Relaxed) as f64 / 1000.0,
             s.audio_frames.load(Ordering::Relaxed),
             s.bytes_written.load(Ordering::Relaxed),
         );

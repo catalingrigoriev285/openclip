@@ -1,13 +1,26 @@
 //! Windows backend: Windows.Graphics.Capture through the `windows-capture` crate.
+//!
+//! Frames stay on the GPU until this module copies them: each callback issues
+//! a `CopySubresourceRegion` of the wanted rectangle into one of two
+//! persistent staging textures and then maps the *other* one (filled by the
+//! previous callback), so the CPU never waits for the copy it just queued.
+//! The mapped rows are copied straight into a pooled buffer — one CPU copy
+//! per frame, no per-frame texture or heap allocations.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context as _, Result};
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
+use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL};
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
-use windows_capture::graphics_capture_api::InternalCaptureControl;
+use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
 use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
@@ -15,7 +28,7 @@ use windows_capture::settings::{
 };
 use windows_capture::window::Window;
 
-use super::{CaptureConfig, CaptureHandle, FpsLimiter, FrameSink, Rect, Source};
+use super::{CaptureConfig, CaptureHandle, FramePool, FrameSink, PhaseLimiter, Rect, Source};
 use crate::video::{PixelFormat, RawFrame};
 
 /// Everything the capture callback needs, passed through `Settings::flags`.
@@ -25,13 +38,17 @@ struct Flags {
     stop: Arc<AtomicBool>,
     crop: Option<Rect>,
     fps: u32,
+    /// Only when WGC cannot throttle itself (Windows 10).
+    limit_ourselves: bool,
+    pool: Arc<FramePool>,
 }
 
 struct Handler {
     flags: Flags,
-    limiter: FpsLimiter,
-    scratch: Vec<u8>,
+    limiter: Option<PhaseLimiter>,
+    readback: Readback,
     frames: u64,
+    priority_set: bool,
 }
 
 type HandlerError = Box<dyn std::error::Error + Send + Sync>;
@@ -41,42 +58,52 @@ impl GraphicsCaptureApiHandler for Handler {
     type Error = HandlerError;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let fps = ctx.flags.fps;
-        Ok(Self { flags: ctx.flags, limiter: FpsLimiter::new(fps), scratch: Vec::new(), frames: 0 })
+        let limiter = ctx.flags.limit_ourselves.then(|| PhaseLimiter::new(ctx.flags.fps));
+        Ok(Self {
+            readback: Readback::new(ctx.device.clone(), ctx.device_context.clone()),
+            flags: ctx.flags,
+            limiter,
+            frames: 0,
+            priority_set: false,
+        })
     }
 
-    fn on_frame_arrived(
-        &mut self,
-        frame: &mut Frame,
-        control: InternalCaptureControl,
-    ) -> Result<(), Self::Error> {
+    fn on_frame_arrived(&mut self, frame: &mut Frame, control: InternalCaptureControl) -> Result<(), Self::Error> {
         if self.flags.stop.load(Ordering::Relaxed) {
             control.stop();
             return Ok(());
         }
+        if !self.priority_set {
+            // The delivery thread must not be starved by the encoder's worker threads.
+            unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) }.ok();
+            self.priority_set = true;
+        }
         let now = Instant::now();
-        if !self.limiter.accept(now) {
+        if let Some(l) = &mut self.limiter
+            && !l.accept(now)
+        {
             return Ok(());
         }
         let pts = now.duration_since(self.flags.epoch);
         let (fw, fh) = (frame.width(), frame.height());
-        let buffer = match self.flags.crop {
+        let (x0, y0, x1, y1) = match self.flags.crop {
             Some(r) => {
                 let x0 = r.x.min(fw.saturating_sub(1));
                 let y0 = r.y.min(fh.saturating_sub(1));
-                let x1 = (r.x + r.width).min(fw).max(x0 + 1);
-                let y1 = (r.y + r.height).min(fh).max(y0 + 1);
-                frame.buffer_crop(x0, y0, x1, y1)
+                ((x0), (y0), (r.x + r.width).min(fw).max(x0 + 1), (r.y + r.height).min(fh).max(y0 + 1))
             }
-            None => frame.buffer(),
-        }
-        .map_err(|e| -> HandlerError { format!("frame buffer: {e:?}").into() })?;
-        let (w, h) = (buffer.width(), buffer.height());
-        let data = buffer.as_nopadding_buffer(&mut self.scratch).to_vec();
-        self.frames += 1;
-        let raw = RawFrame { data, width: w, height: h, stride: w * 4, format: PixelFormat::Bgra, pts, mouse: None };
-        if !(self.flags.sink)(raw) {
-            control.stop();
+            None => (0, 0, fw, fh),
+        };
+        let bx = D3D11_BOX { left: x0, top: y0, front: 0, right: x1, bottom: y1, back: 1 };
+        let delivered = self
+            .readback
+            .submit(frame.as_raw_texture(), frame.desc().Format, bx, pts, &self.flags.pool)
+            .map_err(|e| -> HandlerError { format!("frame readback: {e:#}").into() })?;
+        if let Some(raw) = delivered {
+            self.frames += 1;
+            if !(self.flags.sink)(raw) {
+                control.stop();
+            }
         }
         Ok(())
     }
@@ -84,6 +111,90 @@ impl GraphicsCaptureApiHandler for Handler {
     fn on_closed(&mut self) -> Result<(), Self::Error> {
         log::info!("capture item closed after {} frames", self.frames);
         Ok(())
+    }
+}
+
+/// Double-buffered GPU → CPU readback.
+struct Readback {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    staging: [Option<ID3D11Texture2D>; 2],
+    size: (u32, u32),
+    format: DXGI_FORMAT,
+    /// Staging slot holding a copy that has not been read yet, with its timestamp.
+    pending: Option<(usize, Duration)>,
+}
+
+impl Readback {
+    fn new(device: ID3D11Device, context: ID3D11DeviceContext) -> Self {
+        Self { device, context, staging: [None, None], size: (0, 0), format: DXGI_FORMAT(0), pending: None }
+    }
+
+    fn ensure(&mut self, w: u32, h: u32, format: DXGI_FORMAT) -> Result<()> {
+        if self.size == (w, h) && self.format == format && self.staging.iter().all(Option::is_some) {
+            return Ok(());
+        }
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        for slot in &mut self.staging {
+            let mut tex = None;
+            unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut tex)) }.context("CreateTexture2D")?;
+            *slot = tex;
+        }
+        self.size = (w, h);
+        self.format = format;
+        self.pending = None;
+        log::debug!("readback staging textures {w}×{h}");
+        Ok(())
+    }
+
+    /// Queues the copy of `bx` from `src` and returns the frame queued by the
+    /// previous call (if any), copied into a pooled buffer.
+    fn submit(
+        &mut self,
+        src: &ID3D11Texture2D,
+        format: DXGI_FORMAT,
+        bx: D3D11_BOX,
+        pts: Duration,
+        pool: &FramePool,
+    ) -> Result<Option<RawFrame>> {
+        let (w, h) = (bx.right - bx.left, bx.bottom - bx.top);
+        self.ensure(w, h, format)?;
+        let slot = self.pending.map(|(s, _)| s ^ 1).unwrap_or(0);
+        let dst = self.staging[slot].as_ref().unwrap();
+        unsafe {
+            self.context.CopySubresourceRegion(dst, 0, 0, 0, 0, src, 0, Some(&bx));
+            // The capture surface is recycled once this callback returns;
+            // make sure the copy is submitted before that.
+            self.context.Flush();
+        }
+        let previous = self.pending.replace((slot, pts));
+        let Some((read_slot, read_pts)) = previous else { return Ok(None) };
+        let tex = self.staging[read_slot].as_ref().unwrap();
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { self.context.Map(tex, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.context("Map staging texture")?;
+        let row = (w * 4) as usize;
+        let pitch = mapped.RowPitch as usize;
+        let mut data = pool.take();
+        data.reserve(row * h as usize);
+        unsafe {
+            let base = mapped.pData as *const u8;
+            for y in 0..h as usize {
+                data.extend_from_slice(std::slice::from_raw_parts(base.add(y * pitch), row));
+            }
+            self.context.Unmap(tex, 0);
+        }
+        Ok(Some(RawFrame { data, width: w, height: h, stride: w * 4, format: PixelFormat::Bgra, pts: read_pts, mouse: None }))
     }
 }
 
@@ -115,13 +226,22 @@ fn launch<T>(
 where
     T: TryInto<GraphicsCaptureItemType> + Send + 'static,
 {
-    let flags = Flags { sink, epoch, stop: stop.clone(), crop, fps: config.fps };
+    let fps = config.fps.max(1);
+    // Windows 11 throttles delivery itself; Windows 10 delivers every vsync
+    // and rejects the setting, so pick frames ourselves there.
+    let native_interval = GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false);
+    let interval = if native_interval {
+        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / fps as f64))
+    } else {
+        MinimumUpdateIntervalSettings::Default
+    };
+    let pool = config.pool.clone().unwrap_or_else(|| FramePool::new(6));
+    let flags = Flags { sink, epoch, stop: stop.clone(), crop, fps, limit_ourselves: !native_interval, pool };
     let cursor = if config.show_cursor {
         CursorCaptureSettings::WithCursor
     } else {
         CursorCaptureSettings::WithoutCursor
     };
-    let interval = MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / config.fps.max(1) as f64));
     let settings = Settings::new(
         item,
         cursor,

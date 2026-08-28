@@ -72,24 +72,85 @@ impl MouseFx {
     /// are (frame position, age 0..1, is_right). `scale` scales effect sizes
     /// (0.5 for half-resolution frames).
     pub fn apply(&self, frame: &mut RawFrame, cursor: (i32, i32), clicks: &[FrameClick], scale: f32) {
+        let mut patches = Vec::new();
+        self.paint(frame, cursor, clicks, scale, &mut patches);
+    }
+
+    /// Like [`apply`](Self::apply) but records the pixels under every effect in
+    /// `patches` so [`restore`](Self::restore) can undo the painting without
+    /// keeping a copy of the whole frame.
+    pub fn paint(&self, frame: &mut RawFrame, cursor: (i32, i32), clicks: &[FrameClick], scale: f32, patches: &mut Vec<Patch>) {
         if self.highlight && self.highlight_opacity > 0 {
             let r = HIGHLIGHT_RADIUS * self.highlight_size as f32 / 100.0 * scale;
             let alpha = self.highlight_opacity.min(100) as f32 / 100.0;
-            fill_disc(frame, cursor.0 as f32, cursor.1 as f32, r, self.highlight_color, alpha);
+            let (cx, cy) = (cursor.0 as f32, cursor.1 as f32);
+            save_patch(frame, cx - r - 1.0, cy - r - 1.0, cx + r + 1.0, cy + r + 1.0, patches);
+            fill_disc(frame, cx, cy, r, self.highlight_color, alpha);
         }
         if self.click_effect {
             for &(x, y, age, right) in clicks {
                 let t = age.clamp(0.0, 1.0);
                 let k = self.click_size as f32 / 100.0 * scale;
                 let r = (RIPPLE_START + (RIPPLE_END - RIPPLE_START) * t) * k;
+                let thickness = RIPPLE_THICKNESS * k.max(0.5);
+                let ext = r + thickness + 1.0;
                 let color = if right { self.right_color } else { self.left_color };
-                ring(frame, x as f32, y as f32, r, RIPPLE_THICKNESS * k.max(0.5), color, 0.9 * (1.0 - t));
+                save_patch(frame, x as f32 - ext, y as f32 - ext, x as f32 + ext, y as f32 + ext, patches);
+                ring(frame, x as f32, y as f32, r, thickness, color, 0.9 * (1.0 - t));
             }
         }
         if self.draws_cursor() {
-            draw_arrow(frame, cursor.0, cursor.1, self.cursor_size as f32 / 100.0 * scale);
+            let s = (self.cursor_size as f32 / 100.0 * scale).max(0.25);
+            let (w, h) = ((12.0 * s).round(), (19.0 * s).round());
+            save_patch(frame, cursor.0 as f32, cursor.1 as f32, cursor.0 as f32 + w, cursor.1 as f32 + h, patches);
+            draw_arrow(frame, cursor.0, cursor.1, s);
         }
     }
+
+    /// Restores the pixels saved by [`paint`](Self::paint), leaving the frame
+    /// byte-identical to before. Keeps the patch allocations for reuse.
+    pub fn restore(frame: &mut RawFrame, patches: &mut Vec<Patch>) {
+        // Later patches may overlap earlier ones; undo in reverse order.
+        for p in patches.iter().rev() {
+            let stride = frame.stride as usize;
+            let row = (p.w * 4) as usize;
+            for dy in 0..p.h as usize {
+                let dst = (p.y as usize + dy) * stride + p.x as usize * 4;
+                frame.data[dst..dst + row].copy_from_slice(&p.data[dy * row..(dy + 1) * row]);
+            }
+        }
+        patches.clear();
+    }
+}
+
+/// Pixels saved from a rectangle of a frame before an effect was painted over it.
+#[derive(Debug, Clone, Default)]
+pub struct Patch {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub data: Vec<u8>,
+}
+
+/// Saves the frame pixels of the (clamped) rectangle into `patches`.
+fn save_patch(frame: &RawFrame, x0: f32, y0: f32, x1: f32, y1: f32, patches: &mut Vec<Patch>) {
+    let x0 = (x0.floor() as i64).clamp(0, frame.width as i64);
+    let y0 = (y0.floor() as i64).clamp(0, frame.height as i64);
+    let x1 = (x1.ceil() as i64 + 1).clamp(0, frame.width as i64);
+    let y1 = (y1.ceil() as i64 + 1).clamp(0, frame.height as i64);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    let stride = frame.stride as usize;
+    let row = (w * 4) as usize;
+    for dy in 0..h as usize {
+        let src = (y0 as usize + dy) * stride + x0 as usize * 4;
+        data.extend_from_slice(&frame.data[src..src + row]);
+    }
+    patches.push(Patch { x: x0 as u32, y: y0 as u32, w, h, data });
 }
 
 /// A click mapped into frame space: (x, y, age 0..1, is_right).
@@ -324,6 +385,30 @@ mod tests {
         assert!((60..=66).contains(&f.data[i + 2]), "r={}", f.data[i + 2]);
         // Far corner untouched.
         assert_eq!(&f.data[..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn paint_and_restore_round_trips() {
+        let fx = MouseFx { cursor_size: 150, ..Default::default() };
+        let mut f = frame(120, 90);
+        for (i, b) in f.data.iter_mut().enumerate() {
+            *b = (i % 253) as u8;
+        }
+        let clean = f.data.clone();
+        let mut patches = Vec::new();
+        // Halo, two overlapping ripples and the arrow, partly outside the frame.
+        fx.paint(&mut f, (110, 80), &[(105, 75, 0.2, false), (112, 82, 0.6, true)], 1.0, &mut patches);
+        assert!(f.data != clean, "effects were painted");
+        assert!(patches.len() >= 3);
+        MouseFx::restore(&mut f, &mut patches);
+        assert_eq!(f.data, clean, "restore must be byte-identical");
+        assert!(patches.is_empty());
+        // Painting is the same through `apply`.
+        let mut a = frame(120, 90);
+        let mut b = frame(120, 90);
+        fx.apply(&mut a, (30, 30), &[(20, 20, 0.5, false)], 1.0);
+        fx.paint(&mut b, (30, 30), &[(20, 20, 0.5, false)], 1.0, &mut patches);
+        assert_eq!(a.data, b.data);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use openh264::encoder::{
-    BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, Profile, RateControlMode,
+    BitRate, Complexity, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, Profile, RateControlMode,
     SpsPpsStrategy, UsageType,
 };
 use openh264::formats::YUVSlices;
@@ -23,7 +23,14 @@ pub struct H264Encoder {
 impl H264Encoder {
     /// Creates an encoder tuned for real-time screen content.
     pub fn new(req: &EncoderRequest) -> Result<Self> {
-        let threads = std::thread::available_parallelism().map(|n| n.get().min(16) as u16).unwrap_or(1);
+        // More threads make OpenH264 *slower* on hybrid (P/E core) CPUs and
+        // starve the GUI and capture threads; four is the sweet spot measured
+        // on a 16-thread laptop. `OPENCLIP_OPENH264_THREADS` overrides for testing.
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+        let threads = std::env::var("OPENCLIP_OPENH264_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or((cores / 4).clamp(2, 4) as u16);
         let fps = req.fps.max(1) as f32;
         let rc = match req.rate_control {
             RateControl::Quality(_) => RateControlMode::Quality,
@@ -41,6 +48,7 @@ impl H264Encoder {
             .skip_frames(true)
             .adaptive_quantization(false)
             .background_detection(false)
+            .complexity(Complexity::Low)
             .num_threads(threads);
         let profile = match req.profiles.h264 {
             H264Profile::Auto => None,
@@ -54,7 +62,7 @@ impl H264Encoder {
         let inner = Encoder::with_api_config(OpenH264API::from_source(), config)
             .context("failed to create OpenH264 encoder")?;
         let description = format!(
-            "H264 (OpenH264, CPU) {}×{} @ {} fps, {} kbps {}, {} profile",
+            "H264 (OpenH264, CPU, {threads} threads) {}×{} @ {} fps, {} kbps {}, {} profile",
             req.width,
             req.height,
             req.fps,

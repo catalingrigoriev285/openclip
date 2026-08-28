@@ -183,6 +183,8 @@ impl FormatDialog {
         row(ui, "Codec", |ui| {
             let current = d.video_codec.label(encoders);
             egui::ComboBox::from_id_salt("fmt-vcodec").width(230.0).selected_text(current).show_ui(ui, |ui| {
+                ui.selectable_value(&mut d.video_codec, VideoCodec::Auto, VideoCodec::Auto.label(encoders))
+                    .on_hover_text("Uses a GPU encoder when one is available, otherwise OpenH264");
                 ui.selectable_value(&mut d.video_codec, VideoCodec::OpenH264, VideoCodec::OpenH264.label(encoders));
                 for e in encoders {
                     let codec = e.codec();

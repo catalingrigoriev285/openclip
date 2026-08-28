@@ -190,6 +190,12 @@ pub fn refresh_encoders() -> Vec<EncoderInfo> {
 /// or refuses the configuration, other encoders of the same family are tried
 /// (hardware first), then OpenH264. The note explains any substitution.
 pub fn create_video_encoder(req: &EncoderRequest) -> Result<(Box<dyn VideoEncoder>, Option<String>)> {
+    if req.codec == VideoCodec::Auto {
+        let resolved = VideoCodec::resolve_auto(&available_encoders());
+        log::info!("Auto codec → {}", resolved.generic_label());
+        let req = EncoderRequest { codec: resolved, ..req.clone() };
+        return create_video_encoder(&req);
+    }
     let VideoCodec::Mf { hevc, clsid } = &req.codec else {
         return Ok((Box::new(super::openh264::H264Encoder::new(req)?), None));
     };

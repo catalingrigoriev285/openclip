@@ -230,9 +230,10 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(4.0);
                 let can_record = self.selected_source().is_some();
-                match rec_button(ui, recording, can_record) {
+                match rec_button(ui, self.rec_mode(), can_record) {
                     RecClick::Start => self.start_recording(ctx),
                     RecClick::Stop => self.stop_recording(),
+                    RecClick::Cancel => self.cancel_countdown(),
                     RecClick::None => {}
                 }
                 if pause_button(ui, recording, paused) {
@@ -261,6 +262,12 @@ impl App {
                         }
                         State::Picking(_) => {
                             ui.label(RichText::new("Select region…").color(ACCENT).small());
+                        }
+                        State::Countdown { started } => {
+                            let left = (self.countdown_secs as f32 - started.elapsed().as_secs_f32()).ceil().max(1.0);
+                            ui.label(RichText::new(format!("Starting in {left}")).strong().color(WARN_YELLOW).size(15.0));
+                            ui.label(RichText::new("Esc cancels").color(TEXT_DIM).small());
+                            ctx.request_repaint_after(Duration::from_millis(100));
                         }
                         State::Idle => {
                             let ready = self.selected_source().is_some();

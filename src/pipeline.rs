@@ -1,5 +1,13 @@
 //! Recording pipeline: capture thread → encode thread (video encoder + muxer),
 //! plus an audio thread (cpal → mixer → audio encoder) feeding the muxer.
+//!
+//! Video runs on a **fixed-cadence frame clock**: slot `k` has presentation
+//! time `pts0 + k / fps`. Captured frames are collected until a slot's
+//! deadline, the newest one is encoded with the slot's timestamp (or the last
+//! frame is repeated when nothing new arrived), so the file always has a
+//! perfectly regular frame rate whatever the capture timing does. Frame
+//! buffers are pooled, mouse effects are painted in place and restored, and
+//! previews are only produced while the GUI shows them.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,18 +22,22 @@ use crate::audio::capture::{open_microphone, open_system_loopback, AudioSource};
 use crate::audio::mixer::Mixer;
 use crate::audio::{create_audio_encoder, AudioFrame};
 use crate::capture::monitors::source_origin;
-use crate::capture::{self, CaptureConfig, CaptureHandle, Source};
+use crate::capture::{self, CaptureConfig, CaptureHandle, FramePool, Source};
 use crate::mux::{AudioTrackConfig, Muxer, VideoCodecConfig, VideoTrackConfig};
 use crate::settings::{FormatSettings, SizeMode};
 use crate::video::convert::even_dims;
-use crate::video::mouse_fx::{MouseFx, MouseSampler};
-use crate::video::preview::{make_preview, PreviewImage};
-use crate::video::{create_video_encoder, Converter, EncoderRequest, RawFrame, Scaler, VideoEncoder};
+use crate::video::mouse_fx::{FrameClick, MouseFx, MouseSampler, Patch};
+use crate::video::preview::{PreviewImage, Previewer};
+use crate::video::{create_video_encoder, Converter, EncodedFrame, EncoderRequest, PixelFormat, RawFrame, Scaler, VideoEncoder};
 
 /// Longest side of preview images handed to the GUI.
 const PREVIEW_MAX_SIDE: u32 = 640;
+/// Minimum time between two preview images.
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(200);
 /// Audio is mixed this far behind wall-clock so device latency never causes gaps.
 const AUDIO_LAG: Duration = Duration::from_millis(150);
+/// Frame buffers kept in circulation (channel + in flight + last frame).
+const POOL_SIZE: usize = 6;
 
 #[derive(Debug, Clone)]
 pub struct RecordConfig {
@@ -53,13 +65,20 @@ impl RecordConfig {
 pub struct Stats {
     pub frames_captured: AtomicU64,
     pub frames_encoded: AtomicU64,
+    /// Frames lost: capture channel full, or slots skipped because encoding fell behind.
     pub frames_dropped: AtomicU64,
     /// Frames the encoder chose not to output (rate control) or the container could not place.
     pub frames_skipped: AtomicU64,
-    /// Heartbeat frames (re-encoded last frame while the screen was static).
+    /// Slots filled by repeating the previous frame (static screen or late capture).
     pub frames_repeated: AtomicU64,
+    /// Captured frames replaced by a newer one before their slot came (source faster than fps).
+    pub frames_superseded: AtomicU64,
     /// Rolling average encode time per frame, in microseconds.
     pub encode_us: AtomicU64,
+    /// Rolling average of the whole per-slot work (scale + effects + convert + encode + mux).
+    pub slot_us: AtomicU64,
+    /// Rolling average time spent writing to the container per frame.
+    pub mux_us: AtomicU64,
     pub audio_frames: AtomicU64,
     pub bytes_written: AtomicU64,
     pub width: AtomicU64,
@@ -100,6 +119,12 @@ impl Stats {
     pub fn note(&self) -> Option<String> {
         self.note.lock().unwrap().clone()
     }
+
+    fn rolling(cell: &AtomicU64, sample_us: u64) {
+        let prev = cell.load(Ordering::Relaxed);
+        let next = if prev == 0 { sample_us } else { (prev * 9 + sample_us) / 10 };
+        cell.store(next, Ordering::Relaxed);
+    }
 }
 
 /// Shared slot for the latest preview image.
@@ -117,6 +142,46 @@ impl PreviewSlot {
 /// Called whenever a new preview image is available (e.g. to request a repaint).
 pub type PreviewCallback = Arc<dyn Fn() + Send + Sync>;
 
+/// Raises the system timer resolution to 1 ms while recording so the frame
+/// clock and the encoder polling wake up on time (Windows defaults to 15.6 ms).
+struct TimerResolution;
+
+impl TimerResolution {
+    fn acquire() -> Self {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::Media::timeBeginPeriod;
+            use windows::Win32::System::Threading::{
+                GetCurrentProcess, SetProcessInformation, ProcessPowerThrottling, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
+            };
+            // Windows 11 ignores the request for occluded / minimized windows unless told otherwise.
+            let state = PROCESS_POWER_THROTTLING_STATE {
+                Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                ControlMask: PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+                StateMask: 0,
+            };
+            let _ = SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                &state as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+            );
+            timeBeginPeriod(1);
+        }
+        Self
+    }
+}
+
+impl Drop for TimerResolution {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            windows::Win32::Media::timeEndPeriod(1);
+        }
+    }
+}
+
 pub struct Recorder {
     stop: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
@@ -128,20 +193,25 @@ pub struct Recorder {
     audio_thread: Option<JoinHandle<Result<()>>>,
     stats: Arc<Stats>,
     preview: Arc<PreviewSlot>,
+    preview_visible: Arc<AtomicBool>,
     started: Instant,
     output: PathBuf,
+    _timer: TimerResolution,
 }
 
 impl Recorder {
     pub fn start(config: RecordConfig, on_preview: Option<PreviewCallback>) -> Result<Recorder> {
+        let timer = TimerResolution::acquire();
         let epoch = Instant::now();
         let stop = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let paused_total_us = Arc::new(AtomicU64::new(0));
         let stats = Arc::new(Stats::default());
         let preview = Arc::new(PreviewSlot::default());
+        let preview_visible = Arc::new(AtomicBool::new(false));
         // Timeline origin (first video pts) shared with the audio thread, in µs; u64::MAX = unknown.
         let audio_origin = Arc::new(AtomicU64::new(u64::MAX));
+        let pool = FramePool::new(POOL_SIZE);
 
         let (video_tx, video_rx) = mpsc::sync_channel::<RawFrame>(4);
         let (audio_tx, audio_rx) = mpsc::sync_channel::<AudioFrame>(256);
@@ -176,11 +246,13 @@ impl Recorder {
             paused_total: paused_total_us.clone(),
             stats: stats.clone(),
             preview: preview.clone(),
+            preview_visible: preview_visible.clone(),
             on_preview,
             sampler: sampler.clone(),
+            pool: pool.clone(),
         })?;
 
-        let capture = start_capture(&config, epoch, video_tx, stats.clone(), sampler)?;
+        let capture = start_capture(&config, epoch, video_tx, stats.clone(), sampler, pool)?;
 
         Ok(Recorder {
             stop,
@@ -192,8 +264,10 @@ impl Recorder {
             audio_thread,
             stats,
             preview,
+            preview_visible,
             started: epoch,
             output: config.output,
+            _timer: timer,
         })
     }
 
@@ -203,6 +277,11 @@ impl Recorder {
 
     pub fn preview(&self) -> &Arc<PreviewSlot> {
         &self.preview
+    }
+
+    /// Tells the encode thread whether anyone is looking at previews.
+    pub fn set_preview_visible(&self, visible: bool) {
+        self.preview_visible.store(visible, Ordering::Relaxed);
     }
 
     /// Recorded time: wall time minus everything spent paused.
@@ -292,7 +371,9 @@ fn start_capture(
     tx: SyncSender<RawFrame>,
     stats: Arc<Stats>,
     sampler: Option<Arc<Mutex<MouseSampler>>>,
+    pool: Arc<FramePool>,
 ) -> Result<CaptureHandle> {
+    let sink_pool = pool.clone();
     let sink: capture::FrameSink = Box::new(move |mut frame| {
         stats.frames_captured.fetch_add(1, Ordering::Relaxed);
         // Sample the pointer right when the frame arrives so effects line up
@@ -302,19 +383,96 @@ fn start_capture(
         }
         match tx.try_send(frame) {
             Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
+            Err(TrySendError::Full(f)) => {
                 stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                sink_pool.recycle(f.data);
                 true
             }
             Err(TrySendError::Disconnected(_)) => false,
         }
     });
     capture::start(
-        CaptureConfig { source: config.source.clone(), fps: config.fps(), show_cursor: config.mouse_fx.native_cursor() },
+        CaptureConfig {
+            source: config.source.clone(),
+            fps: config.fps(),
+            show_cursor: config.mouse_fx.native_cursor(),
+            pool: Some(pool),
+        },
         epoch,
         sink,
     )
     .context("starting screen capture")
+}
+
+/// Fixed-cadence timeline: slot `k` is presented at `pts0 + k / fps`
+/// (exact rational arithmetic, so long recordings never drift).
+#[derive(Debug, Clone)]
+pub struct FrameClock {
+    fps: u64,
+    pts0_ns: u64,
+    /// Next slot to encode.
+    pub next: u64,
+}
+
+const NS: u64 = 1_000_000_000;
+
+impl FrameClock {
+    /// Encoding may lag this many slots before slots are skipped.
+    pub const MAX_BEHIND: u64 = 2;
+
+    pub fn new(fps: u32, pts0: Duration) -> Self {
+        Self { fps: fps.max(1) as u64, pts0_ns: pts0.as_nanos() as u64, next: 0 }
+    }
+
+    pub fn interval(&self) -> Duration {
+        Duration::from_nanos(NS / self.fps)
+    }
+
+    pub fn slot_pts(&self, k: u64) -> Duration {
+        Duration::from_nanos(self.pts0_ns + k * NS / self.fps)
+    }
+
+    /// When slot `k` must be encoded: half an interval after its pts, so a
+    /// frame captured anywhere around the slot time can still be used.
+    pub fn deadline(&self, k: u64) -> Duration {
+        Duration::from_nanos(self.pts0_ns + (2 * k + 1) * NS / (2 * self.fps))
+    }
+
+    /// Slots (from `next`) whose deadline has passed at `now`.
+    pub fn due(&self, now: Duration) -> u64 {
+        let now = now.as_nanos() as u64;
+        if now < self.pts0_ns {
+            return 0;
+        }
+        // Largest k with deadline(k) <= now: (2k+1)/(2 fps) <= t  ⇔  k <= (2 t fps − 1)/2.
+        let twice = (now - self.pts0_ns) * 2 * self.fps / NS;
+        if twice == 0 {
+            return 0;
+        }
+        let k_max = (twice - 1) / 2;
+        (k_max + 1).saturating_sub(self.next)
+    }
+
+    /// Skips slots so that at most one is due; returns how many were skipped.
+    pub fn catch_up(&mut self, now: Duration) -> u64 {
+        let due = self.due(now);
+        if due > Self::MAX_BEHIND {
+            let skipped = due - 1;
+            self.next += skipped;
+            skipped
+        } else {
+            0
+        }
+    }
+
+    /// After a pause: continue with the slot nearest to `now` (never backwards).
+    pub fn resync(&mut self, now: Duration) {
+        let now = now.as_nanos() as u64;
+        if now > self.pts0_ns {
+            let k = ((now - self.pts0_ns) * self.fps + NS / 2) / NS;
+            self.next = self.next.max(k);
+        }
+    }
 }
 
 struct EncodeArgs {
@@ -329,9 +487,11 @@ struct EncodeArgs {
     paused_total: Arc<AtomicU64>,
     stats: Arc<Stats>,
     preview: Arc<PreviewSlot>,
+    preview_visible: Arc<AtomicBool>,
     on_preview: Option<PreviewCallback>,
-    /// Shared with the capture sink; used here only for heartbeat frames.
+    /// Shared with the capture sink; used here only for repeated frames.
     sampler: Option<Arc<Mutex<MouseSampler>>>,
+    pool: Arc<FramePool>,
 }
 
 fn spawn_encode_thread(args: EncodeArgs) -> Result<JoinHandle<Result<()>>> {
@@ -358,29 +518,26 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         paused_total,
         stats,
         preview,
+        preview_visible,
         on_preview,
         sampler,
+        pool,
     } = args;
     // Recording-time clock: wall time since epoch minus paused time.
     let paused_dur = || Duration::from_micros(paused_total.load(Ordering::Relaxed));
     let rec_now = || epoch.elapsed().saturating_sub(paused_dur());
     let fps = config.fps();
-    let frame_interval = Duration::from_secs_f64(1.0 / fps as f64);
-    let min_delta = Duration::from_secs_f64(0.75 / fps as f64);
-    // Capture APIs only deliver frames when the screen changes; when nothing
-    // arrives for this long we re-encode the last frame so the video keeps a
-    // steady cadence and stays as long as the audio.
-    let heartbeat = frame_interval.max(Duration::from_millis(20));
-    let preview_every = (fps / 10).max(1) as u64;
-    let mut avg_encode_us = 0f64;
 
     let mut state: Option<EncodeState> = None;
-    let mut last_pts: Option<Duration> = None;
-    let mut last_size = (0u32, 0u32);
-    let mut last_frame: Option<RawFrame> = None;
+    let mut clock: Option<FrameClock> = None;
+    // Newest captured frame waiting for its slot.
+    let mut newest: Option<RawFrame> = None;
     let mut origin = source_origin(&config.source).unwrap_or((0, 0));
     let mut frames_since_origin = 0u32;
-    let mut frames_in = 0u64;
+    let mut was_paused = false;
+    let mut last_preview = Instant::now() - PREVIEW_INTERVAL;
+    let mut last_report = Instant::now();
+    let mut disconnected = false;
 
     let push_audio = |mux: &mut Muxer, stats: &Stats| -> Result<()> {
         if mux.has_audio() {
@@ -391,82 +548,127 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         }
         Ok(())
     };
+    let take_newest = |newest: &mut Option<RawFrame>, f: RawFrame, pool: &FramePool, stats: &Stats| {
+        if let Some(old) = newest.replace(f) {
+            pool.recycle(old.data);
+            stats.frames_superseded.fetch_add(1, Ordering::Relaxed);
+        }
+    };
 
     loop {
-        let (frame, is_heartbeat) = match video_rx.recv_timeout(heartbeat) {
-            Ok(mut f) => {
-                if paused.load(Ordering::Relaxed) {
-                    continue;
-                }
-                f.pts = f.pts.saturating_sub(paused_dur());
-                (f, false)
+        let stopping = stop.load(Ordering::Relaxed);
+        // ----- pause: discard what arrives, keep the timeline frozen -----
+        if paused.load(Ordering::Relaxed) && !stopping {
+            was_paused = true;
+            match video_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(f) => pool.recycle(f.data),
+                Err(mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if stop.load(Ordering::Relaxed) {
+            if let Some(st) = state.as_mut() {
+                push_audio(&mut st.mux, &stats)?;
+            }
+            if disconnected {
+                break;
+            }
+            continue;
+        }
+        if was_paused {
+            was_paused = false;
+            // Frames queued before the pause ended belong to paused time.
+            while let Ok(f) = video_rx.try_recv() {
+                pool.recycle(f.data);
+            }
+            if let Some(f) = newest.take() {
+                pool.recycle(f.data);
+            }
+            if let Some(c) = clock.as_mut() {
+                c.resync(rec_now());
+            }
+        }
+
+        // ----- collect frames until the next slot deadline -----
+        let Some(c) = clock.as_ref() else {
+            // Waiting for the very first frame, which defines the timeline origin.
+            match video_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(mut f) => {
+                    f.pts = f.pts.saturating_sub(paused_dur());
+                    let st = EncodeState::new(&config, &f, audio_cfg.take(), &stats)?;
+                    stats.width.store(st.dims.0 as u64, Ordering::Relaxed);
+                    stats.height.store(st.dims.1 as u64, Ordering::Relaxed);
+                    state = Some(st);
+                    clock = Some(FrameClock::new(fps, f.pts));
+                    audio_origin.store(f.pts.as_micros() as u64, Ordering::SeqCst);
+                    newest = Some(f);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if stopping {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            continue;
+        };
+        let deadline = c.deadline(c.next);
+        loop {
+            let now = rec_now();
+            if now >= deadline || stopping {
+                break;
+            }
+            match video_rx.recv_timeout(deadline - now) {
+                Ok(mut f) => {
+                    f.pts = f.pts.saturating_sub(paused_dur());
+                    take_newest(&mut newest, f, &pool, &stats);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    disconnected = true;
                     break;
                 }
-                if let Some(st) = state.as_mut() {
-                    push_audio(&mut st.mux, &stats)?;
-                }
-                if paused.load(Ordering::Relaxed) {
-                    continue;
-                }
-                match &last_frame {
-                    Some(f)
-                        if rec_now().saturating_sub(last_pts.unwrap_or_default())
-                            >= frame_interval.mul_f64(0.9) =>
-                    {
-                        let mut f = f.clone();
-                        f.pts = rec_now();
-                        // The screen is static but the pointer may move: sample now.
-                        if let Some(s) = &sampler {
-                            f.mouse = Some(s.lock().unwrap().snapshot());
-                        }
-                        (f, true)
-                    }
-                    _ => continue,
-                }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        };
-        if let Some(last) = last_pts {
-            // Pacing: frames arriving faster than the target rate are skipped
-            // (not counted as drops; they are by design).
-            if frame.pts.saturating_sub(last) < min_delta {
-                continue;
+        }
+        if stopping || disconnected {
+            // Take whatever is still queued so the last captured frame is not lost.
+            while let Ok(mut f) = video_rx.try_recv() {
+                f.pts = f.pts.saturating_sub(paused_dur());
+                take_newest(&mut newest, f, &pool, &stats);
             }
         }
 
-        if !is_heartbeat {
-            let size = (frame.width, frame.height);
-            if state.is_none() {
-                let st = EncodeState::new(&config, &frame, audio_cfg.take(), &stats)?;
-                stats.width.store(st.dims.0 as u64, Ordering::Relaxed);
-                stats.height.store(st.dims.1 as u64, Ordering::Relaxed);
-                state = Some(st);
-                audio_origin.store(frame.pts.as_micros() as u64, Ordering::SeqCst);
-                last_size = size;
-            } else if size != last_size {
-                // Source resized (window capture). Keep encoding at the original
-                // size by cropping/padding is complex; simplest robust option is to
-                // skip frames of a different size and note it once.
-                if stats.audio_note.lock().unwrap().is_none() {
-                    *stats.audio_note.lock().unwrap() =
-                        Some(format!("source resized to {}×{}; frames skipped", size.0, size.1));
-                }
-                stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-        }
+        // ----- encode one slot -----
         let st = state.as_mut().unwrap();
-        // Heartbeats re-use the already scaled last frame.
-        let frame = if is_heartbeat { frame } else { st.prepare(frame) };
-        last_pts = Some(frame.pts);
-
+        let c = clock.as_mut().unwrap();
+        let now = rec_now();
+        let skipped = c.catch_up(now);
+        if skipped > 0 {
+            stats.frames_dropped.fetch_add(skipped, Ordering::Relaxed);
+        }
+        let have_new = newest.is_some();
+        if stopping && !have_new {
+            break;
+        }
+        if !have_new && c.due(now) == 0 {
+            // Woken early (stop during pause etc.): nothing to do yet.
+            continue;
+        }
         let t0 = Instant::now();
-        // Mouse effects are painted on a copy so the clean frame can be reused for heartbeats.
-        let mut painted: Option<RawFrame> = None;
-        if let Some(snap) = frame.mouse.as_ref().filter(|_| sampler.is_some()) {
+        let slot = c.next;
+        let pts = c.slot_pts(slot);
+        if let Some(f) = newest.take() {
+            st.accept(f, &pool);
+        } else {
+            stats.frames_repeated.fetch_add(1, Ordering::Relaxed);
+            // The screen is static but the pointer may move: sample now.
+            if let (Some(s), Some(fx)) = (&sampler, st.frame.as_mut()) {
+                fx.mouse = Some(s.lock().unwrap().snapshot());
+            }
+        }
+        let snap = st.frame.as_mut().expect("frame present after accept").mouse.take();
+
+        // Mouse effects: paint in place, convert, restore — no frame copy.
+        let mut painted = false;
+        if let Some(snap) = snap.filter(|_| sampler.is_some()) {
             if matches!(config.source, Source::Window { .. }) {
                 frames_since_origin += 1;
                 if frames_since_origin >= 30 {
@@ -477,55 +679,69 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
                 }
             }
             let (cursor, clicks) = snap.mapped(origin, st.fx_scale);
-            let mut f = frame.clone();
-            config.mouse_fx.apply(&mut f, cursor, &clicks, st.fx_scale.0.min(st.fx_scale.1));
-            painted = Some(f);
+            let changed = st.fx_changed(cursor, &clicks);
+            if changed || st.converted_is_new {
+                let scale = st.fx_scale.0.min(st.fx_scale.1);
+                let frame = st.frame.as_mut().unwrap();
+                config.mouse_fx.paint(frame, cursor, &clicks, scale, &mut st.patches);
+                painted = true;
+            }
+            st.last_fx = Some((cursor, clicks));
         }
-        let shown: &RawFrame = painted.as_ref().unwrap_or(&frame);
-        // Heartbeats reuse the previous conversion unless effects moved.
-        if !is_heartbeat || painted.is_some() {
-            st.converter.convert(shown)?;
+        if st.converted_is_new || painted {
+            st.converter.convert(st.frame.as_ref().unwrap())?;
+            st.converted_is_new = false;
+        }
+        if painted {
+            MouseFx::restore(st.frame.as_mut().unwrap(), &mut st.patches);
         }
         let t1 = Instant::now();
-        let encoded = st.encoder.encode(st.converter.frame(), frame.pts)?;
+        let encoded = st.encoder.encode(st.converter.frame(), pts)?;
         let t2 = Instant::now();
-        frames_in += 1;
-        if is_heartbeat {
-            stats.frames_repeated.fetch_add(1, Ordering::Relaxed);
-        }
         if encoded.is_empty() {
             stats.frames_skipped.fetch_add(1, Ordering::Relaxed);
         }
         for enc in encoded {
             st.push(&enc, &stats)?;
         }
-        if frames_in.is_multiple_of(preview_every) && !is_heartbeat {
-            *preview.image.lock().unwrap() = Some(make_preview(shown, PREVIEW_MAX_SIDE));
+        let t3 = Instant::now();
+        c.next += 1;
+
+        if preview_visible.load(Ordering::Relaxed) && t0.duration_since(last_preview) >= PREVIEW_INTERVAL {
+            last_preview = t0;
+            let img = st.previewer.make(st.frame.as_ref().unwrap());
+            *preview.image.lock().unwrap() = Some(img);
             if let Some(cb) = &on_preview {
                 cb();
             }
         }
-        let t3 = Instant::now();
-        let enc_us = (t2 - t1).as_micros() as f64;
-        avg_encode_us = if avg_encode_us == 0.0 { enc_us } else { avg_encode_us * 0.9 + enc_us * 0.1 };
-        stats.encode_us.store(avg_encode_us as u64, Ordering::Relaxed);
-        let total = t3 - t0;
-        if total > frame_interval * 2 {
+
+        Stats::rolling(&stats.encode_us, (t2 - t1).as_micros() as u64);
+        Stats::rolling(&stats.mux_us, (t3 - t2).as_micros() as u64);
+        Stats::rolling(&stats.slot_us, (t3 - t0).as_micros() as u64);
+        if t3 - t0 > c.interval() * 2 {
             log::warn!(
-                "slow frame: convert {:.1} ms, encode {:.1} ms, mux {:.1} ms{}",
+                "slow slot {slot}: prepare {:.1} ms, encode {:.1} ms, mux {:.1} ms",
                 (t1 - t0).as_secs_f64() * 1e3,
                 (t2 - t1).as_secs_f64() * 1e3,
-                (t3 - t2).as_secs_f64() * 1e3,
-                if is_heartbeat { " (heartbeat)" } else { "" }
+                (t3 - t2).as_secs_f64() * 1e3
             );
-        } else {
-            log::trace!("frame: convert {:?} encode {:?} mux {:?}", t1 - t0, t2 - t1, t3 - t2);
         }
-        if !is_heartbeat {
-            last_frame = Some(frame);
+        if last_report.elapsed() >= Duration::from_secs(5) {
+            last_report = Instant::now();
+            log::info!(
+                "slot {slot}: captured {} encoded {} dropped {} repeated {} superseded {} | encode {:.1} ms, slot {:.1} ms",
+                stats.frames_captured.load(Ordering::Relaxed),
+                stats.frames_encoded.load(Ordering::Relaxed),
+                stats.frames_dropped.load(Ordering::Relaxed),
+                stats.frames_repeated.load(Ordering::Relaxed),
+                stats.frames_superseded.load(Ordering::Relaxed),
+                stats.encode_us.load(Ordering::Relaxed) as f64 / 1e3,
+                stats.slot_us.load(Ordering::Relaxed) as f64 / 1e3
+            );
         }
         push_audio(&mut st.mux, &stats)?;
-        if stop.load(Ordering::Relaxed) && video_rx.try_recv().is_err() {
+        if disconnected && newest.is_none() {
             break;
         }
     }
@@ -533,6 +749,9 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
     let Some(mut st) = state else {
         return Err(anyhow!("no frames were captured"));
     };
+    if let Some(f) = newest.take() {
+        pool.recycle(f.data);
+    }
     for enc in st.encoder.flush()? {
         st.push(&enc, &stats)?;
     }
@@ -553,13 +772,20 @@ struct EncodeState {
     /// Half size uses the exact 2×2 box filter; everything else the scaler.
     half: bool,
     scaler: Option<Scaler>,
+    /// The frame being encoded (already scaled). Kept for repeats.
+    frame: Option<RawFrame>,
+    /// True when `frame` changed since the converter last saw it.
+    converted_is_new: bool,
     converter: Converter,
     encoder: Box<dyn VideoEncoder>,
     mux: Muxer,
+    previewer: Previewer,
     dims: (u32, u32),
     /// Encoded-frame / source ratio per axis, for mouse-effect placement.
     fx_scale: (f32, f32),
     params_sent: bool,
+    patches: Vec<Patch>,
+    last_fx: Option<((i32, i32), Vec<FrameClick>)>,
 }
 
 impl EncodeState {
@@ -606,29 +832,62 @@ impl EncodeState {
         let mux = Muxer::create(fmt.container, &config.output, video, audio)?;
         let fx_scale = (dims.0 as f32 / src.0.max(1) as f32, dims.1 as f32 / src.1.max(1) as f32);
         log::info!(
-            "encoding {}×{} → {}×{} into {} with {}",
+            "encoding {}×{} → {}×{} @ {} fps into {} with {}",
             src.0,
             src.1,
             dims.0,
             dims.1,
+            config.fps(),
             fmt.container.label(),
             encoder.describe()
         );
-        Ok(Self { half, scaler, converter, encoder, mux, dims, fx_scale, params_sent: false })
+        Ok(Self {
+            half,
+            scaler,
+            frame: None,
+            converted_is_new: false,
+            converter,
+            encoder,
+            mux,
+            previewer: Previewer::new(scaled.0, scaled.1, PREVIEW_MAX_SIDE),
+            dims,
+            fx_scale,
+            params_sent: false,
+            patches: Vec::new(),
+            last_fx: None,
+        })
     }
 
-    /// Scales a freshly captured frame to the output size.
-    fn prepare(&mut self, frame: RawFrame) -> RawFrame {
-        if self.half {
-            frame.downscale_half()
-        } else if let Some(s) = &mut self.scaler {
-            s.scale(&frame)
+    /// Makes `captured` the current frame (scaling into the reusable buffer),
+    /// returning consumed buffers to the pool.
+    fn accept(&mut self, captured: RawFrame, pool: &FramePool) {
+        if self.half || self.scaler.is_some() {
+            let mut dst = self.frame.take().unwrap_or_else(|| RawFrame::empty(PixelFormat::Bgra));
+            if self.half {
+                captured.downscale_half_into(&mut dst);
+            } else if let Some(s) = &mut self.scaler {
+                s.scale_into(&captured, &mut dst);
+            }
+            pool.recycle(captured.data);
+            self.frame = Some(dst);
         } else {
-            frame
+            if let Some(old) = self.frame.replace(captured) {
+                pool.recycle(old.data);
+            }
+        }
+        self.converted_is_new = true;
+    }
+
+    /// Whether the effects would look different from the last painted frame.
+    fn fx_changed(&self, cursor: (i32, i32), clicks: &[FrameClick]) -> bool {
+        match &self.last_fx {
+            // Ripples animate: any live click means repaint.
+            Some((c, prev)) => *c != cursor || !clicks.is_empty() || !prev.is_empty(),
+            None => true,
         }
     }
 
-    fn push(&mut self, enc: &crate::video::EncodedFrame, stats: &Stats) -> Result<()> {
+    fn push(&mut self, enc: &EncodedFrame, stats: &Stats) -> Result<()> {
         if !self.params_sent
             && let Some(p) = self.encoder.codec_params()
         {
@@ -776,5 +1035,50 @@ fn spawn_audio_thread(args: AudioArgs) -> Result<(JoinHandle<Result<()>>, AudioT
             Err(e)
         }
         Err(_) => Err(anyhow!("audio thread did not start")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(v: u64) -> Duration {
+        Duration::from_millis(v)
+    }
+
+    #[test]
+    fn clock_slots_are_regular() {
+        let c = FrameClock::new(30, ms(1000));
+        assert_eq!(c.slot_pts(0), ms(1000));
+        assert_eq!(c.slot_pts(30), ms(2000));
+        assert_eq!(c.deadline(0).as_micros(), 1_016_666);
+        assert_eq!(c.due(ms(1010)), 0);
+        assert_eq!(c.due(ms(1017)), 1);
+        assert_eq!(c.due(ms(1050)), 2);
+    }
+
+    #[test]
+    fn clock_catches_up_after_a_stall() {
+        let mut c = FrameClock::new(30, ms(0));
+        // Two slots late: encode them one by one, no skip.
+        assert_eq!(c.catch_up(ms(60)), 0);
+        assert_eq!(c.due(ms(60)), 2);
+        // A 5-slot stall: keep only the latest due slot.
+        let skipped = c.catch_up(ms(170));
+        assert_eq!(skipped, 4);
+        assert_eq!(c.next, 4);
+        assert_eq!(c.due(ms(170)), 1);
+    }
+
+    #[test]
+    fn clock_resyncs_after_pause() {
+        let mut c = FrameClock::new(30, ms(0));
+        c.next = 10;
+        c.resync(ms(1000));
+        assert_eq!(c.next, 30);
+        assert_eq!(c.due(ms(1000)), 0);
+        // Never moves backwards.
+        c.resync(ms(100));
+        assert_eq!(c.next, 30);
     }
 }

@@ -24,7 +24,7 @@ You need a Rust toolchain (edition 2024 → Rust 1.85+) and a C/C++ compiler for
 |---|---|
 | Windows | Visual Studio Build Tools (MSVC). Nothing else. |
 | macOS | Xcode command-line tools, plus `autoconf automake libtool` (LAME builds via autotools). macOS 13+ for capture; system-audio loopback needs macOS 14.6+. |
-| Linux | `build-essential autoconf automake libtool` and the dev headers used by eframe / xcap / cpal: `libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev libasound2-dev`. X11 only for now (see limitations). |
+| Linux | `build-essential autoconf automake libtool` and the dev headers used by eframe / xcap / cpal: `libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev libasound2-dev libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-x11-dev libx11-dev`. X11 only for now (see limitations). |
 
 Installing [nasm](https://www.nasm.us/) before building enables OpenH264's assembly kernels and roughly doubles encoder throughput; without it the build silently falls back to C.
 

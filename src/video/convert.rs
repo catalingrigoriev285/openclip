@@ -36,30 +36,54 @@ pub struct RawFrame {
 }
 
 impl RawFrame {
+    /// An empty frame whose buffer is reused by the `*_into` scalers.
+    pub fn empty(format: PixelFormat) -> RawFrame {
+        RawFrame { data: Vec::new(), width: 0, height: 0, stride: 0, format, pts: Duration::ZERO, mouse: None }
+    }
+
     /// Returns a copy at half resolution using a 2×2 box filter.
     pub fn downscale_half(&self) -> RawFrame {
+        let mut out = RawFrame::empty(self.format);
+        self.downscale_half_into(&mut out);
+        out
+    }
+
+    /// Half-resolution 2×2 box filter into `dst`, reusing its buffer.
+    pub fn downscale_half_into(&self, dst: &mut RawFrame) {
         let w = (self.width / 2).max(1);
         let h = (self.height / 2).max(1);
-        let mut data = vec![0u8; (w * h * 4) as usize];
-        let src = &self.data;
         let s = self.stride as usize;
+        let sw = self.width as usize;
+        let sh = self.height as usize;
+        dst.data.clear();
+        dst.data.reserve((w * h * 4) as usize);
         for y in 0..h as usize {
-            let r0 = y * 2 * s;
-            let r1 = (y * 2 + 1).min(self.height as usize - 1) * s;
-            let dst_row = &mut data[y * w as usize * 4..(y + 1) * w as usize * 4];
-            for x in 0..w as usize {
-                let c0 = x * 8;
-                let c1 = (x * 2 + 1).min(self.width as usize - 1) * 4;
+            let r0 = &self.data[y * 2 * s..y * 2 * s + sw * 4];
+            let r1 = &self.data[(y * 2 + 1).min(sh - 1) * s..(y * 2 + 1).min(sh - 1) * s + sw * 4];
+            let (p0, rest0) = r0.as_chunks::<8>();
+            let (p1, _) = r1.as_chunks::<8>();
+            // Pairs of source pixels (8 bytes) → one destination pixel.
+            for (a, b) in p0.iter().zip(p1) {
                 for ch in 0..4 {
-                    let sum = src[r0 + c0 + ch] as u32
-                        + src[r0 + c1 + ch] as u32
-                        + src[r1 + c0 + ch] as u32
-                        + src[r1 + c1 + ch] as u32;
-                    dst_row[x * 4 + ch] = ((sum + 2) / 4) as u8;
+                    let sum = a[ch] as u32 + a[ch + 4] as u32 + b[ch] as u32 + b[ch + 4] as u32;
+                    dst.data.push(((sum + 2) / 4) as u8);
+                }
+            }
+            if p0.len() < w as usize {
+                // Odd source width: the last destination pixel repeats the last column.
+                let a = &rest0[..4];
+                let b = &r1[r1.len() - 4..];
+                for ch in 0..4 {
+                    dst.data.push(((a[ch] as u32 + b[ch] as u32 + 1) / 2) as u8);
                 }
             }
         }
-        RawFrame { data, width: w, height: h, stride: w * 4, format: self.format, pts: self.pts, mouse: self.mouse.clone() }
+        dst.width = w;
+        dst.height = h;
+        dst.stride = w * 4;
+        dst.format = self.format;
+        dst.pts = self.pts;
+        dst.mouse = self.mouse.clone();
     }
 
     /// Returns a copy cropped to the given rectangle (clamped to the frame bounds).
@@ -236,6 +260,15 @@ mod tests {
         let half = frame.downscale_half();
         assert_eq!((half.width, half.height), (4, 3));
         assert_eq!(&half.data[..4], &[10, 20, 30, 255]);
+        assert_eq!(half.data.len(), 4 * 3 * 4);
+        // Odd sizes: 7×5 → 3×2, averaging 2×2 blocks.
+        let mut odd = solid(7, 5, [0, 0, 0, 255]);
+        odd.data[0] = 100; // B of pixel (0,0)
+        odd.data[4] = 100; // B of pixel (1,0)
+        let half = odd.downscale_half();
+        assert_eq!((half.width, half.height), (3, 2));
+        assert_eq!(half.data[0], 50);
+        assert_eq!(half.data.len(), 3 * 2 * 4);
         let cropped = frame.crop(2, 2, 4, 2);
         assert_eq!((cropped.width, cropped.height), (4, 2));
         assert_eq!(cropped.data.len(), 32);

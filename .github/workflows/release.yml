@@ -68,7 +68,8 @@ jobs:
           sudo apt-get install -y build-essential autoconf automake libtool \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
             libssl-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev \
-            libasound2-dev libx11-dev
+            libasound2-dev libx11-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-x11-dev
 
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
