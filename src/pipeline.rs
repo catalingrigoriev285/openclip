@@ -940,13 +940,13 @@ fn spawn_audio_thread(args: AudioArgs) -> Result<(JoinHandle<Result<()>>, AudioT
         if config.system_audio {
             match open_system_loopback() {
                 Ok(s) => sources.push((s, 1.0)),
-                Err(e) => notes.push(format!("system audio unavailable: {e:#}")),
+                Err(e) => notes.push(crate::t!(NOTE_SYSTEM_AUDIO_UNAVAILABLE, format!("{e:#}"))),
             }
         }
         if let Some(mic) = &config.microphone {
             match open_microphone(mic.as_deref()) {
                 Ok(s) => sources.push((s, 1.0)),
-                Err(e) => notes.push(format!("microphone unavailable: {e:#}")),
+                Err(e) => notes.push(crate::t!(NOTE_MIC_UNAVAILABLE, format!("{e:#}"))),
             }
         }
         if !notes.is_empty() {

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Lang;
+use crate::t;
 use crate::video::encoder::EncoderInfo;
 use crate::video::mouse_fx::MouseFx;
 
@@ -80,16 +82,16 @@ impl VideoCodec {
     /// Label used when no enumerated encoder describes this codec better.
     pub fn generic_label(&self) -> String {
         match self {
-            VideoCodec::Auto => "Auto (hardware H.264 if available)".into(),
-            VideoCodec::OpenH264 => "H264 (OpenH264, CPU)".into(),
-            VideoCodec::Mf { .. } => format!("{} (Media Foundation encoder)", self.family()),
+            VideoCodec::Auto => t!(CODEC_AUTO_GENERIC).into(),
+            VideoCodec::OpenH264 => t!(CODEC_OPENH264).into(),
+            VideoCodec::Mf { .. } => t!(CODEC_MF_GENERIC, self.family()),
         }
     }
 
     /// Display label, preferring the enumerated encoder's vendor-specific name.
     pub fn label(&self, available: &[EncoderInfo]) -> String {
         match self {
-            VideoCodec::Auto => format!("Auto → {}", Self::resolve_auto(available).label(available)),
+            VideoCodec::Auto => t!(CODEC_AUTO_RESOLVED, Self::resolve_auto(available).label(available)),
             _ => self.info(available).map(|e| e.label.clone()).unwrap_or_else(|| self.generic_label()),
         }
     }
@@ -126,7 +128,7 @@ impl H264Profile {
 
     pub fn label(self) -> &'static str {
         match self {
-            H264Profile::Auto => "Auto",
+            H264Profile::Auto => t!(AUTO),
             H264Profile::Baseline => "Baseline",
             H264Profile::Main => "Main",
             H264Profile::High => "High",
@@ -146,7 +148,7 @@ impl HevcProfile {
 
     pub fn label(self) -> &'static str {
         match self {
-            HevcProfile::Auto => "Auto",
+            HevcProfile::Auto => t!(AUTO),
             HevcProfile::Main => "Main",
         }
     }
@@ -194,10 +196,10 @@ impl SizeMode {
 
     pub fn label(self) -> String {
         match self {
-            SizeMode::Full => "Full Size".into(),
-            SizeMode::Half => "Half Size".into(),
+            SizeMode::Full => t!(FMT_FULL_SIZE).into(),
+            SizeMode::Half => t!(FMT_HALF_SIZE).into(),
             SizeMode::Preset { width, height } => format!("{width}×{height}"),
-            SizeMode::Percent { x, y } => format!("Custom {x}% × {y}%"),
+            SizeMode::Percent { x, y } => t!(FMT_CUSTOM_SIZE_LABEL, x, y),
         }
     }
 }
@@ -301,11 +303,11 @@ impl FormatSettings {
 
         if self.audio_codec == AudioCodec::Pcm && self.container == Container::Mp4 {
             self.audio_codec = if Self::platform_has_mf() { AudioCodec::Aac } else { AudioCodec::Mp3 };
-            notes.push(format!("PCM audio is only available in AVI; using {}.", self.audio_codec.label()));
+            notes.push(t!(NOTE_PCM_AVI_ONLY, self.audio_codec.label()));
         }
         if self.audio_codec == AudioCodec::Aac && !Self::platform_has_mf() {
             self.audio_codec = AudioCodec::Mp3;
-            notes.push("AAC needs Windows Media Foundation; using MP3.".into());
+            notes.push(t!(NOTE_AAC_NEEDS_MF).into());
         }
         if self.video_codec.is_hevc() && self.container == Container::Avi {
             // Prefer a hardware H.264 encoder, then any H.264 encoder, then OpenH264.
@@ -316,12 +318,12 @@ impl FormatSettings {
                 .map(EncoderInfo::codec)
                 .unwrap_or(VideoCodec::OpenH264);
             self.video_codec = h264;
-            notes.push(format!("HEVC is only written to MP4; using {}.", self.video_codec.label(available)));
+            notes.push(t!(NOTE_HEVC_MP4_ONLY, self.video_codec.label(available)));
         }
         if self.video_codec.needs_mf() && self.video_codec.info(available).is_none() {
             let wanted = self.video_codec.family();
             self.video_codec = VideoCodec::OpenH264;
-            notes.push(format!("The selected {wanted} encoder is not available on this system; using OpenH264."));
+            notes.push(t!(NOTE_ENCODER_MISSING, wanted));
         }
 
         let allowed = self.audio_codec.allowed_bitrates();
@@ -374,8 +376,8 @@ impl FormatSettings {
 
     pub fn quality_label(&self) -> String {
         match self.rate_control {
-            RateControl::Quality(q) => format!("quality {q}"),
-            RateControl::ConstantBitrate { kbps } => format!("{kbps} kbps CBR"),
+            RateControl::Quality(q) => t!(QUALITY_LABEL, q),
+            RateControl::ConstantBitrate { kbps } => t!(CBR_LABEL, kbps),
         }
     }
 
@@ -395,23 +397,23 @@ impl FormatSettings {
         let bitrate = match (self.rate_control, source) {
             (RateControl::Quality(_), Some((w, h))) if w > 0 => {
                 let (ow, oh) = self.size.resolve(w, h);
-                format!(" (≈ {} kbps)", self.target_bitrate_kbps(ow, oh))
+                t!(VIDEO_SUMMARY_BITRATE, self.target_bitrate_kbps(ow, oh))
             }
             _ => String::new(),
         };
         (
             self.video_codec.label(available),
-            format!("{size}, {} fps, {}{bitrate}, {} profile", self.fps, self.quality_label(), self.profile_label()),
+            t!(VIDEO_SUMMARY, size, self.fps, self.quality_label(), bitrate, self.profile_label()),
         )
     }
 
     /// (title, detail) for the audio summary card; `sources` describes what is recorded.
     pub fn audio_summary(&self, sources: &str) -> (String, String) {
-        let ch = if self.audio_channels == 1 { "mono" } else { "stereo" };
+        let ch = if self.audio_channels == 1 { t!(MONO_LOWER) } else { t!(STEREO_LOWER) };
         let rate = format!("{:.1}KHz", self.audio_sample_rate as f64 / 1000.0);
         let detail = match self.audio_codec {
-            AudioCodec::Pcm => format!("{rate}, {ch}, 16-bit – {sources}"),
-            _ => format!("{rate}, {ch}, {}kbps – {sources}", self.audio_bitrate_kbps),
+            AudioCodec::Pcm => t!(AUDIO_SUMMARY_PCM, rate, ch, sources),
+            _ => t!(AUDIO_SUMMARY, rate, ch, self.audio_bitrate_kbps, sources),
         };
         (self.audio_codec.label().to_string(), detail)
     }
@@ -433,6 +435,8 @@ pub struct Settings {
     /// Count down before recording starts.
     pub countdown_enabled: bool,
     pub countdown_secs: u32,
+    /// Interface language; applied to [`crate::i18n`] by [`Settings::load`].
+    pub language: Lang,
 }
 
 impl Default for Settings {
@@ -447,6 +451,7 @@ impl Default for Settings {
             mouse_fx: MouseFx::default(),
             countdown_enabled: true,
             countdown_secs: 3,
+            language: Lang::default(),
         }
     }
 }
@@ -494,10 +499,17 @@ impl Settings {
             .clone()
     }
 
-    /// Loads the settings; missing or corrupt files yield the defaults. A
-    /// settings file from the old per-user location is picked up when the
-    /// portable one does not exist yet (it moves on the next save).
+    /// Loads the settings and activates the saved interface language; missing
+    /// or corrupt files yield the defaults. A settings file from the old
+    /// per-user location is picked up when the portable one does not exist yet
+    /// (it moves on the next save).
     pub fn load() -> Settings {
+        let settings = Self::load_raw();
+        crate::i18n::set_lang(settings.language);
+        settings
+    }
+
+    fn load_raw() -> Settings {
         let Some(path) = Self::path() else { return Settings::default() };
         let mut candidates = vec![path];
         if let Some(legacy) = Self::legacy_path()

@@ -210,19 +210,19 @@ pub fn create_video_encoder(req: &EncoderRequest) -> Result<(Box<dyn VideoEncode
         others.sort_by_key(|e| !e.hardware);
         candidates.extend(others);
         if requested.is_none() {
-            failures.push(format!("the selected {wanted} encoder was not found"));
+            failures.push(crate::t!(NOTE_ENCODER_NOT_FOUND, wanted));
         }
         for info in candidates {
             match super::mf::video::MfVideoEncoder::new(info, req) {
                 Ok(enc) => {
                     let note = (Some(&info.clsid) != Some(clsid)).then(|| {
-                        format!("{}; using {}", failures.join("; "), info.label)
+                        crate::t!(NOTE_USING_ENCODER, failures.join("; "), info.label)
                     });
                     return Ok((Box::new(enc), note));
                 }
                 Err(e) => {
                     log::warn!("{} failed: {e:#}", info.label);
-                    failures.push(format!("{} failed ({e})", info.label));
+                    failures.push(crate::t!(NOTE_ENCODER_FAILED, info.label, e));
                 }
             }
         }
@@ -230,9 +230,9 @@ pub fn create_video_encoder(req: &EncoderRequest) -> Result<(Box<dyn VideoEncode
     #[cfg(not(windows))]
     {
         let _ = (hevc, clsid);
-        failures.push(format!("{wanted} hardware encoding needs Windows"));
+        failures.push(crate::t!(NOTE_HW_NEEDS_WINDOWS, wanted));
     }
     let enc = super::openh264::H264Encoder::new(req)?;
-    let note = format!("{}; recorded H.264 with OpenH264", failures.join("; "));
+    let note = crate::t!(NOTE_FELL_BACK_OPENH264, failures.join("; "));
     Ok((Box::new(enc), Some(note)))
 }

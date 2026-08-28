@@ -25,8 +25,10 @@ use crate::capture::monitors::{
     list_monitors, list_windows, screenshot_source, source_origin, MonitorInfo, WindowInfo,
 };
 use crate::capture::{self as cap, CaptureConfig, CaptureHandle, Rect, Source};
+use crate::i18n::{self, Lang};
 use crate::pipeline::{RecordConfig, Recorder};
 use crate::settings::{FormatSettings, Settings};
+use crate::t;
 use crate::video::encoder::{available_encoders, refresh_encoders, EncoderInfo};
 use crate::video::mouse_fx::{MouseFx, MouseSampler, ARROW, CLICK_DURATION};
 use crate::video::preview::{make_preview, PreviewImage};
@@ -210,6 +212,7 @@ pub struct App {
     file_prefix: String,
     countdown_enabled: bool,
     countdown_secs: u32,
+    language: Lang,
     tab: Tab,
     home_tab: HomeTab,
     video_tab: VideoTab,
@@ -276,6 +279,7 @@ impl App {
             file_prefix: settings.file_prefix,
             countdown_enabled: settings.countdown_enabled,
             countdown_secs: settings.countdown_secs.clamp(1, 10),
+            language: settings.language,
             tab: Tab::Home,
             home_tab: HomeTab::Videos,
             video_tab: VideoTab::Record,
@@ -327,6 +331,7 @@ impl App {
             mouse_fx: self.mouse_fx.read().unwrap().clone(),
             countdown_enabled: self.countdown_enabled,
             countdown_secs: self.countdown_secs,
+            language: self.language,
         };
         if let Err(e) = settings.save() {
             log::warn!("could not save settings: {e:#}");
@@ -390,18 +395,18 @@ impl App {
     fn source_label(&self) -> String {
         match self.source_kind {
             SourceKind::Monitor => {
-                self.monitors.get(self.monitor_idx).map(|m| m.label()).unwrap_or("No monitor".into())
+                self.monitors.get(self.monitor_idx).map(|m| m.label()).unwrap_or_else(|| t!(NO_MONITOR_SELECTED).into())
             }
             SourceKind::Window => {
-                self.windows.get(self.window_idx).map(|w| w.label()).unwrap_or("No window selected".into())
+                self.windows.get(self.window_idx).map(|w| w.label()).unwrap_or_else(|| t!(NO_WINDOW_SELECTED).into())
             }
             SourceKind::Region => match self.region {
                 Some((mid, r)) => {
                     let mon =
                         self.monitors.iter().find(|m| m.id == mid).map(|m| m.name.clone()).unwrap_or_default();
-                    format!("Region {}×{} at ({}, {}) on {}", r.width, r.height, r.x, r.y, mon)
+                    t!(REGION_LABEL, r.width, r.height, r.x, r.y, mon)
                 }
-                None => "No region selected".into(),
+                None => t!(NO_REGION_SELECTED).into(),
             },
         }
     }
@@ -431,7 +436,7 @@ impl App {
 
     fn saved(&mut self, path: PathBuf, what: &str) {
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        self.message = Some((format!("{what} saved: {} ({})", path.display(), human_bytes(size)), false));
+        self.message = Some((t!(MSG_SAVED, what, path.display(), human_bytes(size)), false));
         self.library.select_path(&path, &self.output_dir);
         if self.tab == Tab::Home && self.home_tab != HomeTab::Preview {
             self.home_tab = HomeTab::from_library(self.library.tab);
@@ -442,7 +447,7 @@ impl App {
     /// REC pressed: count down first (if enabled), then start.
     fn start_recording(&mut self, ctx: &egui::Context) {
         if self.selected_source().is_none() {
-            self.message = Some(("Select something to record first.".into(), true));
+            self.message = Some((t!(MSG_SELECT_SOURCE_FIRST).into(), true));
             return;
         }
         if self.countdown_enabled && self.countdown_secs > 0 && !self.is_recording() {
@@ -476,7 +481,7 @@ impl App {
         let State::Countdown { started } = &self.state else { return };
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.cancel_countdown();
-            self.message = Some(("Recording cancelled.".into(), false));
+            self.message = Some((t!(MSG_CANCELLED).into(), false));
             return;
         }
         if started.elapsed().as_secs_f32() >= self.countdown_secs as f32 {
@@ -490,7 +495,7 @@ impl App {
     fn start_recording_now(&mut self, ctx: &egui::Context) {
         let Some(source) = self.selected_source() else {
             self.state = State::Idle;
-            self.message = Some(("Select something to record first.".into(), true));
+            self.message = Some((t!(MSG_SELECT_SOURCE_FIRST).into(), true));
             return;
         };
         self.state = State::Idle;
@@ -518,15 +523,15 @@ impl App {
                 self.message = None;
                 self.state = State::Recording(rec);
             }
-            Err(e) => self.message = Some((format!("Could not start recording: {e:#}"), true)),
+            Err(e) => self.message = Some((t!(MSG_START_FAILED, format!("{e:#}")), true)),
         }
     }
 
     fn stop_recording(&mut self) {
         if let State::Recording(rec) = std::mem::replace(&mut self.state, State::Idle) {
             match rec.stop() {
-                Ok(path) => self.saved(path, "Recording"),
-                Err(e) => self.message = Some((format!("Recording failed: {e:#}"), true)),
+                Ok(path) => self.saved(path, t!(WHAT_RECORDING)),
+                Err(e) => self.message = Some((t!(MSG_RECORDING_FAILED, format!("{e:#}")), true)),
             }
         }
     }
@@ -543,7 +548,7 @@ impl App {
 
     fn take_snapshot(&mut self) {
         let Some(source) = self.selected_source() else {
-            self.message = Some(("Select something to capture first.".into(), true));
+            self.message = Some((t!(MSG_SELECT_CAPTURE_FIRST).into(), true));
             return;
         };
         let path = self.timestamped("png");
@@ -554,8 +559,8 @@ impl App {
             img.save(&path).map_err(|e| anyhow::anyhow!("{e}"))
         });
         match result {
-            Ok(()) => self.saved(path, "Snapshot"),
-            Err(e) => self.message = Some((format!("Snapshot failed: {e:#}"), true)),
+            Ok(()) => self.saved(path, t!(WHAT_SNAPSHOT)),
+            Err(e) => self.message = Some((t!(MSG_SNAPSHOT_FAILED, format!("{e:#}")), true)),
         }
     }
 
@@ -601,20 +606,20 @@ impl App {
 
             ui.add_enabled_ui(!recording, |ui| {
                 for (kind, icon, label) in [
-                    (SourceKind::Region, icons::REGION, "Region"),
-                    (SourceKind::Monitor, icons::MONITOR, "Monitor"),
-                    (SourceKind::Window, icons::WINDOW, "Window"),
+                    (SourceKind::Region, icons::REGION, t!(MODE_REGION)),
+                    (SourceKind::Monitor, icons::MONITOR, t!(MODE_MONITOR)),
+                    (SourceKind::Window, icons::WINDOW, t!(MODE_WINDOW)),
                 ] {
                     if mode_button(ui, icon, label, self.source_kind == kind).clicked() {
                         self.select_mode(kind);
                     }
                 }
                 ui.add_space(6.0);
-                toggle_button(ui, icons::SPEAKER, "System audio", &mut self.system_audio);
-                toggle_button(ui, icons::MIC, "Microphone", &mut self.mic_enabled);
+                toggle_button(ui, icons::SPEAKER, t!(SYSTEM_AUDIO), &mut self.system_audio);
+                toggle_button(ui, icons::MIC, t!(MICROPHONE), &mut self.mic_enabled);
                 let mut show_cursor = self.mouse_fx.read().unwrap().show_cursor;
                 let before = show_cursor;
-                toggle_button(ui, icons::CURSOR, "Show cursor", &mut show_cursor);
+                toggle_button(ui, icons::CURSOR, t!(SHOW_CURSOR), &mut show_cursor);
                 if show_cursor != before {
                     self.mouse_fx.write().unwrap().show_cursor = show_cursor;
                 }
@@ -622,10 +627,10 @@ impl App {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(4.0);
-                if icon_button(ui, icons::CAMERA, "Take a snapshot (PNG)").clicked() {
+                if icon_button(ui, icons::CAMERA, t!(TIP_SNAPSHOT)).clicked() {
                     self.take_snapshot();
                 }
-                if icon_button(ui, icons::MINIMIZE, "Mini bar: collapse to a small floating recorder bar (close the bar to come back)").clicked() {
+                if icon_button(ui, icons::MINIMIZE, t!(TIP_MINIBAR)).clicked() {
                     self.enter_compact(ctx);
                 }
                 let can_record = self.selected_source().is_some();
@@ -660,10 +665,10 @@ impl App {
             .show(ctx, |ui| {
                 egui::Frame::window(ui.style()).fill(TOOLBAR_BG).inner_margin(Margin::symmetric(40, 24)).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("Recording starts in").color(TEXT_DIM).size(16.0));
+                        ui.label(RichText::new(t!(COUNTDOWN_TITLE)).color(TEXT_DIM).size(16.0));
                         ui.label(RichText::new(left.max(1).to_string()).color(REC_RED).size(96.0).strong());
                         ui.add_space(6.0);
-                        if ui.button("Cancel (Esc)").clicked() {
+                        if ui.button(t!(COUNTDOWN_CANCEL)).clicked() {
                             cancel = true;
                         }
                     });
@@ -693,7 +698,7 @@ impl App {
         self.live.stop();
         match Picker::new(&self.monitors) {
             Ok(p) => self.state = State::Picking(p),
-            Err(e) => self.message = Some((format!("Region picker: {e:#}"), true)),
+            Err(e) => self.message = Some((t!(MSG_PICKER_FAILED, format!("{e:#}")), true)),
         }
     }
 
@@ -712,14 +717,14 @@ impl App {
                     if rec.is_paused() {
                         ui.label(RichText::new("‖").color(WARN_YELLOW).size(16.0));
                         ui.label(
-                            RichText::new(format!("PAUSED  {}", format_duration(elapsed))).strong().color(WARN_YELLOW),
+                            RichText::new(t!(STATUS_PAUSED, format_duration(elapsed))).strong().color(WARN_YELLOW),
                         );
                     } else {
                         ui.label(RichText::new("●").color(REC_RED).size(16.0));
-                        ui.label(RichText::new(format!("REC  {}", format_duration(elapsed))).strong().color(TEXT_BRIGHT));
+                        ui.label(RichText::new(t!(STATUS_REC, format_duration(elapsed))).strong().color(TEXT_BRIGHT));
                     }
                     ui.separator();
-                    ui.label(format!("{w}×{h}   {fps:.1} fps   {dropped} dropped   {}", human_bytes(bytes)));
+                    ui.label(t!(STATUS_COUNTERS, w, h, format!("{fps:.1}"), dropped, human_bytes(bytes)));
                     for note in [s.note(), s.audio_note.lock().unwrap().clone()].into_iter().flatten() {
                         ui.separator();
                         ui.label(RichText::new(note).color(WARN_YELLOW));
@@ -732,26 +737,26 @@ impl App {
                 }
                 State::Picking(_) => {
                     ui.label(RichText::new(icons::REGION).color(ACCENT));
-                    ui.label("Drag a rectangle on the screen to select the recording region (Esc to cancel)");
+                    ui.label(t!(STATUS_PICKING));
                 }
                 State::Countdown { .. } => {
                     let left = self.countdown_remaining().unwrap_or(0).max(1);
                     ui.label(RichText::new("●").color(WARN_YELLOW).size(16.0));
-                    ui.label(RichText::new(format!("Recording starts in {left}…")).strong().color(WARN_YELLOW));
-                    ui.label(RichText::new("(Esc cancels)").color(TEXT_DIM));
+                    ui.label(RichText::new(t!(COUNTDOWN_STATUS, left)).strong().color(WARN_YELLOW));
+                    ui.label(RichText::new(t!(COUNTDOWN_ESC)).color(TEXT_DIM));
                     ctx.request_repaint_after(Duration::from_millis(100));
                 }
                 State::Idle => {
                     ui.label(RichText::new(icons::PLAY).color(ACCENT));
                     let text = if self.selected_source().is_some() {
-                        format!("Ready to record: {}", self.source_label())
+                        t!(STATUS_READY, self.source_label())
                     } else {
-                        "Please select a recording source".to_string()
+                        t!(STATUS_NO_SOURCE).to_string()
                     };
                     ui.label(text);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(6.0);
-                        if ui.small_button("Change…").on_hover_text("Choose the monitor, window or region").clicked() {
+                        if ui.small_button(t!(STATUS_CHANGE)).on_hover_text(t!(STATUS_CHANGE_TIP)).clicked() {
                             self.show_preview_tab();
                         }
                     });
@@ -765,11 +770,11 @@ impl App {
     fn nav(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         for (tab, icon, label) in [
-            (Tab::Home, icons::HOME, "Home"),
-            (Tab::General, icons::GEAR, "General"),
-            (Tab::Video, icons::FILM, "Video"),
-            (Tab::Image, icons::IMAGE, "Image"),
-            (Tab::About, icons::INFO, "About"),
+            (Tab::Home, icons::HOME, t!(NAV_HOME)),
+            (Tab::General, icons::GEAR, t!(NAV_GENERAL)),
+            (Tab::Video, icons::FILM, t!(NAV_VIDEO)),
+            (Tab::Image, icons::IMAGE, t!(NAV_IMAGE)),
+            (Tab::About, icons::INFO, t!(NAV_ABOUT)),
         ] {
             if nav_entry(ui, icon, label, self.tab == tab).clicked() {
                 self.tab = tab;
@@ -794,10 +799,10 @@ impl App {
         tab_strip(
             ui,
             &[
-                (HomeTab::Videos, "Videos"),
-                (HomeTab::Images, "Images"),
-                (HomeTab::Audios, "Audios"),
-                (HomeTab::Preview, "Preview"),
+                (HomeTab::Videos, t!(TAB_VIDEOS)),
+                (HomeTab::Images, t!(TAB_IMAGES)),
+                (HomeTab::Audios, t!(TAB_AUDIOS)),
+                (HomeTab::Preview, t!(TAB_PREVIEW)),
             ],
             &mut home_tab,
         );
@@ -825,12 +830,12 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             ui.label(RichText::new(self.output_dir.display().to_string()).color(TEXT_DIM).small())
-                .on_hover_text("Output folder (change it under General)");
+                .on_hover_text(t!(OUTPUT_FOLDER_TIP));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button(icons::REFRESH).on_hover_text("Refresh list").clicked() {
+                if ui.small_button(icons::REFRESH).on_hover_text(t!(REFRESH_LIST)).clicked() {
                     self.library.refresh(&self.output_dir, true);
                 }
-                if ui.small_button(icons::FOLDER).on_hover_text("Open folder").clicked() {
+                if ui.small_button(icons::FOLDER).on_hover_text(t!(OPEN_FOLDER)).clicked() {
                     open_folder(&self.output_dir);
                 }
             });
@@ -852,7 +857,7 @@ impl App {
                 if self.library.entries.is_empty() {
                     ui.add_space(12.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(format!("No {} yet", self.library.tab.label().to_lowercase())).color(TEXT_DIM));
+                        ui.label(RichText::new(self.library.tab.empty_label()).color(TEXT_DIM));
                     });
                 }
                 for (i, e) in self.library.entries.iter().enumerate() {
@@ -905,17 +910,17 @@ impl App {
         ui.horizontal(|ui| {
             let w = (ui.available_width() - 16.0) / 3.0;
             let has = selected.is_some();
-            if ui.add_enabled(has, egui::Button::new(format!("{}  Play", icons::PLAY)).min_size(Vec2::new(w, 30.0))).clicked()
+            if ui.add_enabled(has, egui::Button::new(format!("{}  {}", icons::PLAY, t!(PLAY))).min_size(Vec2::new(w, 30.0))).clicked()
                 && let Some(p) = &selected
             {
                 open_with_default(p);
             }
-            if ui.add_enabled(has, egui::Button::new(format!("{}  Folder", icons::FOLDER)).min_size(Vec2::new(w, 30.0))).clicked()
+            if ui.add_enabled(has, egui::Button::new(format!("{}  {}", icons::FOLDER, t!(FOLDER))).min_size(Vec2::new(w, 30.0))).clicked()
                 && let Some(p) = &selected
             {
                 reveal_in_folder(p);
             }
-            if ui.add_enabled(has, egui::Button::new(format!("{}  Delete", icons::TRASH)).min_size(Vec2::new(w, 30.0))).clicked() {
+            if ui.add_enabled(has, egui::Button::new(format!("{}  {}", icons::TRASH, t!(DELETE))).min_size(Vec2::new(w, 30.0))).clicked() {
                 self.library.confirm_delete = selected.clone();
             }
         });
@@ -927,9 +932,12 @@ impl App {
                 let combo_w = (ui.available_width() - 120.0).max(160.0);
                 match self.source_kind {
                     SourceKind::Monitor => {
-                        ui.label("Monitor");
-                        let label =
-                            self.monitors.get(self.monitor_idx).map(|m| m.label()).unwrap_or("No monitors".into());
+                        ui.label(t!(MODE_MONITOR));
+                        let label = self
+                            .monitors
+                            .get(self.monitor_idx)
+                            .map(|m| m.label())
+                            .unwrap_or_else(|| t!(NO_MONITORS).into());
                         egui::ComboBox::from_id_salt("monitor").width(combo_w).selected_text(label).show_ui(ui, |ui| {
                             for (i, m) in self.monitors.iter().enumerate() {
                                 ui.selectable_value(&mut self.monitor_idx, i, m.label());
@@ -937,9 +945,12 @@ impl App {
                         });
                     }
                     SourceKind::Window => {
-                        ui.label("Window");
-                        let label =
-                            self.windows.get(self.window_idx).map(|w| w.label()).unwrap_or("No windows".into());
+                        ui.label(t!(MODE_WINDOW));
+                        let label = self
+                            .windows
+                            .get(self.window_idx)
+                            .map(|w| w.label())
+                            .unwrap_or_else(|| t!(NO_WINDOWS).into());
                         egui::ComboBox::from_id_salt("window").width(combo_w).selected_text(label).show_ui(ui, |ui| {
                             for (i, w) in self.windows.iter().enumerate() {
                                 ui.selectable_value(&mut self.window_idx, i, w.label());
@@ -948,12 +959,12 @@ impl App {
                     }
                     SourceKind::Region => {
                         ui.label(self.source_label());
-                        if ui.button("Select region…").clicked() {
+                        if ui.button(t!(SELECT_REGION)).clicked() {
                             self.open_picker();
                         }
                     }
                 }
-                if ui.button(icons::REFRESH).on_hover_text("Refresh monitors, windows and audio devices").clicked() {
+                if ui.button(icons::REFRESH).on_hover_text(t!(REFRESH_SOURCES_TIP)).clicked() {
                     self.refresh_sources();
                 }
             });
@@ -976,9 +987,9 @@ impl App {
                 _ => {
                     ui.centered_and_justified(|ui| {
                         let text = match (&self.live.error, self.selected_source()) {
-                            (Some(e), _) => format!("Preview unavailable: {e}"),
-                            (None, None) => "Select a monitor, window or region to preview".into(),
-                            (None, Some(_)) => "Starting preview…".into(),
+                            (Some(e), _) => t!(PREVIEW_UNAVAILABLE, e),
+                            (None, None) => t!(PREVIEW_PICK_SOURCE).into(),
+                            (None, Some(_)) => t!(PREVIEW_STARTING).into(),
                         };
                         ui.label(RichText::new(text).color(TEXT_DIM).size(16.0));
                     });
@@ -990,23 +1001,23 @@ impl App {
     // ----- settings pages ---------------------------------------------------------
 
     fn page_general(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, "Output");
-        settings_row(ui, "Save to", |ui| {
+        section_title(ui, t!(SECTION_OUTPUT));
+        settings_row(ui, t!(ROW_SAVE_TO), |ui| {
             ui.label(RichText::new(self.output_dir.display().to_string()).color(TEXT_BRIGHT));
         });
         settings_row(ui, "", |ui| {
-            if ui.button("Choose folder…").clicked()
+            if ui.button(t!(CHOOSE_FOLDER)).clicked()
                 && let Some(dir) = rfd::FileDialog::new().set_directory(&self.output_dir).pick_folder()
             {
                 self.output_dir = dir;
                 self.library.refresh(&self.output_dir, true);
                 self.save_settings();
             }
-            if ui.button("Open").clicked() {
+            if ui.button(t!(OPEN)).clicked() {
                 open_folder(&self.output_dir);
             }
         });
-        settings_row(ui, "File name prefix", |ui| {
+        settings_row(ui, t!(ROW_FILE_PREFIX), |ui| {
             ui.add(egui::TextEdit::singleline(&mut self.file_prefix).desired_width(160.0));
             ui.label(
                 RichText::new(format!(
@@ -1019,36 +1030,60 @@ impl App {
             );
         });
         ui.add_space(14.0);
-        section_title(ui, "Recording");
+        section_title(ui, t!(SECTION_RECORDING));
         let before = (self.countdown_enabled, self.countdown_secs);
-        settings_row(ui, "Countdown", |ui| {
-            ui.checkbox(&mut self.countdown_enabled, "Count down before recording starts");
+        settings_row(ui, t!(ROW_COUNTDOWN), |ui| {
+            ui.checkbox(&mut self.countdown_enabled, t!(COUNTDOWN_CHECKBOX));
         });
         settings_row(ui, "", |ui| {
             ui.add_enabled_ui(self.countdown_enabled, |ui| {
                 ui.add(egui::DragValue::new(&mut self.countdown_secs).range(1..=10).suffix(" s"));
-                ui.label(RichText::new("shown in the window and the mini bar, never in the video").color(TEXT_DIM).small());
+                ui.label(RichText::new(t!(COUNTDOWN_NOTE)).color(TEXT_DIM).small());
             });
         });
         if before != (self.countdown_enabled, self.countdown_secs) {
             self.save_settings();
         }
         ui.add_space(14.0);
-        section_title(ui, "Sources");
-        settings_row(ui, "Devices", |ui| {
-            if ui.button("Refresh monitors, windows and devices").clicked() {
+        section_title(ui, t!(SECTION_APPEARANCE));
+        settings_row(ui, t!(LANGUAGE), |ui| {
+            let mut lang = self.language;
+            egui::ComboBox::from_id_salt("language")
+                .width(180.0)
+                .selected_text(lang.native_name())
+                .show_ui(ui, |ui| {
+                    for l in Lang::ALL {
+                        ui.selectable_value(&mut lang, l, l.native_name());
+                    }
+                });
+            ui.label(RichText::new(t!(LANGUAGE_HINT)).color(TEXT_DIM).small());
+            if lang != self.language {
+                self.set_language(lang);
+            }
+        });
+        ui.add_space(14.0);
+        section_title(ui, t!(SECTION_SOURCES));
+        settings_row(ui, t!(ROW_DEVICES), |ui| {
+            if ui.button(t!(REFRESH_DEVICES)).clicked() {
                 self.refresh_sources();
             }
         });
-        settings_row(ui, "Settings file", |ui| {
-            let path = Settings::path().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".into());
+        settings_row(ui, t!(ROW_SETTINGS_FILE), |ui| {
+            let path = Settings::path().map(|p| p.display().to_string()).unwrap_or_else(|| t!(NONE_PAREN).into());
             ui.label(RichText::new(path).color(TEXT_DIM).small());
         });
     }
 
+    /// Switches the interface language and persists the choice.
+    fn set_language(&mut self, lang: Lang) {
+        self.language = lang;
+        i18n::set_lang(lang);
+        self.save_settings();
+    }
+
     fn page_video(&mut self, ui: &mut egui::Ui) {
         let mut vt = self.video_tab;
-        tab_strip(ui, &[(VideoTab::Record, "Record"), (VideoTab::Mouse, "Mouse")], &mut vt);
+        tab_strip(ui, &[(VideoTab::Record, t!(TAB_RECORD)), (VideoTab::Mouse, t!(TAB_MOUSE))], &mut vt);
         self.video_tab = vt;
         ui.add_space(6.0);
         match self.video_tab {
@@ -1058,17 +1093,17 @@ impl App {
     }
 
     fn video_record_tab(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, "Record");
+        section_title(ui, t!(TAB_RECORD));
         let current = self.mouse_fx.read().unwrap().clone();
         let mut fx = current.clone();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.checkbox(&mut fx.show_cursor, "Show mouse cursor");
-                ui.checkbox(&mut fx.click_effect, "Add mouse click effects");
-                ui.checkbox(&mut fx.highlight, "Add mouse highlight effect");
+                ui.checkbox(&mut fx.show_cursor, t!(CHK_SHOW_CURSOR));
+                ui.checkbox(&mut fx.click_effect, t!(CHK_CLICK_EFFECTS));
+                ui.checkbox(&mut fx.highlight, t!(CHK_HIGHLIGHT));
             });
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                if ui.add(egui::Button::new("Settings").min_size(Vec2::new(150.0, 26.0))).clicked() {
+                if ui.add(egui::Button::new(t!(SETTINGS)).min_size(Vec2::new(150.0, 26.0))).clicked() {
                     self.video_tab = VideoTab::Mouse;
                 }
             });
@@ -1079,15 +1114,15 @@ impl App {
         ui.add_space(6.0);
         let recording = self.is_recording();
         ui.add_enabled_ui(!recording, |ui| {
-            settings_row(ui, "System audio", |ui| {
-                ui.checkbox(&mut self.system_audio, "Record what you hear (speakers / headphones)");
+            settings_row(ui, t!(SYSTEM_AUDIO), |ui| {
+                ui.checkbox(&mut self.system_audio, t!(CHK_SYSTEM_AUDIO));
             });
-            settings_row(ui, "Microphone", |ui| {
-                ui.checkbox(&mut self.mic_enabled, "Record microphone");
+            settings_row(ui, t!(MICROPHONE), |ui| {
+                ui.checkbox(&mut self.mic_enabled, t!(CHK_MICROPHONE));
             });
-            settings_row(ui, "Device", |ui| {
+            settings_row(ui, t!(ROW_DEVICE), |ui| {
                 ui.add_enabled_ui(self.mic_enabled && !self.mics.is_empty(), |ui| {
-                    let label = self.mics.get(self.mic_idx).cloned().unwrap_or("No input devices".into());
+                    let label = self.mics.get(self.mic_idx).cloned().unwrap_or_else(|| t!(NO_INPUT_DEVICES).into());
                     let w = ui.available_width().min(360.0);
                     egui::ComboBox::from_id_salt("mic").width(w).selected_text(label).show_ui(ui, |ui| {
                         for (i, m) in self.mics.iter().enumerate() {
@@ -1098,61 +1133,61 @@ impl App {
             });
         });
         ui.add_space(14.0);
-        section_title(ui, &format!("Format – {}", self.format.container.label()));
+        section_title(ui, &t!(SECTION_FORMAT, self.format.container.label()));
         let (video_title, video_detail) = self.format.video_summary(&self.encoders, self.source_size());
-        format_box(ui, "Video", &video_title, &video_detail);
+        format_box(ui, t!(BOX_VIDEO), &video_title, &video_detail);
         let (audio_title, audio_detail) = self.format.audio_summary(self.audio_sources_label());
-        format_box(ui, "Audio", &audio_title, &audio_detail);
+        format_box(ui, t!(BOX_AUDIO), &audio_title, &audio_detail);
         ui.horizontal(|ui| {
             ui.add_space(134.0);
-            let button = egui::Button::new("Settings").min_size(Vec2::new(150.0, 26.0));
-            if ui.add_enabled(!recording, button).on_hover_text("Container, codecs, size and quality").clicked() {
+            let button = egui::Button::new(t!(SETTINGS)).min_size(Vec2::new(150.0, 26.0));
+            if ui.add_enabled(!recording, button).on_hover_text(t!(FORMAT_SETTINGS_TIP)).clicked() {
                 self.open_format_dialog();
             }
             if self.encoder_rx.is_some() {
-                ui.label(RichText::new("scanning encoders…").color(TEXT_DIM).small());
+                ui.label(RichText::new(t!(SCANNING_ENCODERS)).color(TEXT_DIM).small());
             }
         });
     }
 
-    fn audio_sources_label(&self) -> &'static str {
+    pub(super) fn audio_sources_label(&self) -> &'static str {
         match (self.system_audio, self.mic_enabled) {
-            (true, true) => "system audio + microphone",
-            (true, false) => "system audio",
-            (false, true) => "microphone",
-            (false, false) => "no audio",
+            (true, true) => t!(SRC_SYSTEM_AND_MIC),
+            (true, false) => t!(SRC_SYSTEM),
+            (false, true) => t!(SRC_MIC),
+            (false, false) => t!(SRC_NO_AUDIO),
         }
     }
 
     fn video_mouse_tab(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, "Mouse effects");
+        section_title(ui, t!(SECTION_MOUSE_FX));
         let current = self.mouse_fx.read().unwrap().clone();
         let mut fx = current.clone();
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(350.0);
-                ui.checkbox(&mut fx.show_cursor, "Show mouse cursor");
+                ui.checkbox(&mut fx.show_cursor, t!(CHK_SHOW_CURSOR));
                 ui.add_enabled_ui(fx.show_cursor, |ui| {
-                    settings_row(ui, "      Size", |ui| {
+                    settings_row(ui, t!(ROW_SIZE_INDENT), |ui| {
                         size_combo(ui, "cursor_size", &mut fx.cursor_size);
                         if fx.cursor_size != 100 {
-                            ui.label(RichText::new("(app-drawn)").color(TEXT_DIM).small());
+                            ui.label(RichText::new(t!(APP_DRAWN)).color(TEXT_DIM).small());
                         }
                     });
                 });
                 ui.add_space(6.0);
-                ui.checkbox(&mut fx.click_effect, "Add mouse click effect");
+                ui.checkbox(&mut fx.click_effect, t!(CHK_CLICK_EFFECT));
                 ui.add_enabled_ui(fx.click_effect, |ui| {
-                    settings_row(ui, "      Size", |ui| size_combo(ui, "click_size", &mut fx.click_size));
-                    settings_row(ui, "      Left click color", |ui| color_swatch(ui, &mut fx.left_color));
-                    settings_row(ui, "      Right click color", |ui| color_swatch(ui, &mut fx.right_color));
+                    settings_row(ui, t!(ROW_SIZE_INDENT), |ui| size_combo(ui, "click_size", &mut fx.click_size));
+                    settings_row(ui, t!(ROW_LEFT_CLICK_COLOR), |ui| color_swatch(ui, &mut fx.left_color));
+                    settings_row(ui, t!(ROW_RIGHT_CLICK_COLOR), |ui| color_swatch(ui, &mut fx.right_color));
                 });
                 ui.add_space(6.0);
-                ui.checkbox(&mut fx.highlight, "Add mouse highlight effect");
+                ui.checkbox(&mut fx.highlight, t!(CHK_HIGHLIGHT));
                 ui.add_enabled_ui(fx.highlight, |ui| {
-                    settings_row(ui, "      Size", |ui| size_combo(ui, "highlight_size", &mut fx.highlight_size));
-                    settings_row(ui, "      Highlight color", |ui| color_swatch(ui, &mut fx.highlight_color));
-                    settings_row(ui, "      Opacity", |ui| {
+                    settings_row(ui, t!(ROW_SIZE_INDENT), |ui| size_combo(ui, "highlight_size", &mut fx.highlight_size));
+                    settings_row(ui, t!(ROW_HIGHLIGHT_COLOR), |ui| color_swatch(ui, &mut fx.highlight_color));
+                    settings_row(ui, t!(ROW_OPACITY), |ui| {
                         ui.add(egui::DragValue::new(&mut fx.highlight_opacity).range(0..=100).suffix(" %"));
                         ui.add(egui::Slider::new(&mut fx.highlight_opacity, 0..=100).show_value(false));
                     });
@@ -1160,11 +1195,11 @@ impl App {
             });
             ui.add_space(12.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new("Preview").color(TEXT_NORMAL));
+                ui.label(RichText::new(t!(TAB_PREVIEW)).color(TEXT_NORMAL));
                 ui.add_space(4.0);
                 self.fx_preview(ui, &fx);
                 ui.add_space(6.0);
-                ui.label(RichText::new("Click inside to test the click effect.").color(TEXT_DIM).small());
+                ui.label(RichText::new(t!(FX_PREVIEW_HINT)).color(TEXT_DIM).small());
             });
         });
         if fx != current {
@@ -1236,33 +1271,28 @@ impl App {
     }
 
     fn page_image(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, "Snapshot");
-        format_box(ui, "Image", "PNG", "Full size, saved next to your recordings");
+        section_title(ui, t!(SECTION_SNAPSHOT));
+        format_box(ui, t!(BOX_IMAGE), "PNG", t!(SNAPSHOT_DETAIL));
         ui.add_space(10.0);
-        settings_row(ui, "Capture", |ui| {
-            if ui.button(format!("{}  Take snapshot now", icons::CAMERA)).clicked() {
+        settings_row(ui, t!(ROW_CAPTURE), |ui| {
+            if ui.button(format!("{}  {}", icons::CAMERA, t!(TAKE_SNAPSHOT_NOW))).clicked() {
                 self.take_snapshot();
             }
         });
-        settings_row(ui, "Source", |ui| {
+        settings_row(ui, t!(ROW_SOURCE), |ui| {
             ui.label(RichText::new(self.source_label()).color(TEXT_DIM));
         });
     }
 
     fn page_about(&mut self, ui: &mut egui::Ui) {
         section_title(ui, "openclip");
-        ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+        ui.label(t!(ABOUT_VERSION, env!("CARGO_PKG_VERSION")));
         ui.add_space(6.0);
-        ui.label("A self-contained screen recorder: no ffmpeg, no codec packs.");
-        ui.label("Video: H.264 via bundled OpenH264, plus hardware H.264 / HEVC (NVENC, AMF, Quick Sync) through Windows Media Foundation");
-        ui.label("Audio: MP3 via bundled LAME, AAC (Windows Media Foundation) or PCM · Containers: in-house MP4 and AVI muxers");
+        ui.label(t!(ABOUT_TAGLINE));
+        ui.label(t!(ABOUT_VIDEO));
+        ui.label(t!(ABOUT_AUDIO));
         ui.add_space(6.0);
-        ui.label(
-            RichText::new(
-                "Licensed under Apache-2.0. OpenH264 is BSD-2-Clause (source build, no Cisco patent coverage); LAME is LGPL.",
-            )
-            .color(TEXT_DIM),
-        );
+        ui.label(RichText::new(t!(ABOUT_LICENSE)).color(TEXT_DIM));
         ui.add_space(6.0);
         ui.hyperlink_to("github.com/catalingrigoriev285/openclip", "https://github.com/catalingrigoriev285/openclip");
     }
@@ -1276,13 +1306,13 @@ impl App {
                     ui.label(RichText::new(msg).color(color).small());
                     if !*is_err
                         && let Some(path) = self.last_file.clone()
-                        && ui.small_button("Open folder").clicked()
+                        && ui.small_button(t!(OPEN_FOLDER)).clicked()
                     {
                         reveal_in_folder(&path);
                     }
                 }
                 None => {
-                    ui.label(RichText::new("openclip – screen recorder").color(TEXT_DIM));
+                    ui.label(RichText::new(t!(FOOTER_IDLE)).color(TEXT_DIM));
                 }
             }
         });
@@ -1293,21 +1323,21 @@ impl App {
         let mut close = false;
         let modal = egui::Modal::new(egui::Id::new("confirm-delete")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.heading("Delete file?");
+            ui.heading(t!(DELETE_TITLE));
             ui.add_space(6.0);
             ui.label(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-            ui.label(RichText::new("This permanently deletes the file from disk.").color(TEXT_DIM));
+            ui.label(RichText::new(t!(DELETE_BODY)).color(TEXT_DIM));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                let del = egui::Button::new(RichText::new("Delete").color(TEXT_BRIGHT)).fill(REC_RED);
+                let del = egui::Button::new(RichText::new(t!(DELETE)).color(TEXT_BRIGHT)).fill(REC_RED);
                 if ui.add(del).clicked() {
                     match self.library.delete(&path, &self.output_dir) {
-                        Ok(()) => self.message = Some((format!("Deleted {}", path.display()), false)),
-                        Err(e) => self.message = Some((format!("Could not delete: {e}"), true)),
+                        Ok(()) => self.message = Some((t!(MSG_DELETED, path.display()), false)),
+                        Err(e) => self.message = Some((t!(MSG_DELETE_FAILED, e), true)),
                     }
                     close = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!(CANCEL)).clicked() {
                     close = true;
                 }
             });
@@ -1427,7 +1457,7 @@ fn mode_button(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> eg
     let text_color = if ui.is_enabled() { TEXT_BRIGHT } else { TEXT_DIM };
     p.text(rect.center() - Vec2::new(0.0, 8.0), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), text_color);
     p.text(rect.center() + Vec2::new(0.0, 14.0), Align2::CENTER_CENTER, label, FontId::proportional(12.0), text_color);
-    resp.on_hover_text(format!("{label} recording mode"))
+    resp.on_hover_text(t!(MODE_TIP, label))
 }
 
 /// Square toggle with an icon; a small ✕ marks the "off" state.
@@ -1443,11 +1473,11 @@ pub(super) fn toggle_button(ui: &mut egui::Ui, icon: &str, tip: &str, value: &mu
     let color = if *value { TEXT_BRIGHT } else { TEXT_DIM };
     p.text(rect.center() - Vec2::new(0.0, 6.0), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), color);
     if *value {
-        p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, "on", FontId::proportional(11.0), OK_GREEN);
+        p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, t!(ON), FontId::proportional(11.0), OK_GREEN);
     } else {
         p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, icons::XMARK, FontId::proportional(11.0), ERR_RED);
     }
-    resp.on_hover_text(format!("{tip}: {}", if *value { "on" } else { "off" }));
+    resp.on_hover_text(format!("{tip}: {}", if *value { t!(ON) } else { t!(OFF) }));
 }
 
 pub(super) fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
@@ -1484,7 +1514,7 @@ pub(super) fn pause_button(ui: &mut egui::Ui, recording: bool, paused: bool) -> 
         p.rect_filled(egui::Rect::from_center_size(c + Vec2::new(-5.0, 0.0), Vec2::new(5.0, 20.0)), CornerRadius::same(1), color);
         p.rect_filled(egui::Rect::from_center_size(c + Vec2::new(5.0, 0.0), Vec2::new(5.0, 20.0)), CornerRadius::same(1), color);
     }
-    let resp = resp.on_hover_text(if paused { "Resume recording" } else { "Pause recording" });
+    let resp = resp.on_hover_text(if paused { t!(TIP_RESUME) } else { t!(TIP_PAUSE) });
     recording && resp.clicked()
 }
 
@@ -1530,9 +1560,9 @@ pub(super) fn rec_button(ui: &mut egui::Ui, mode: RecMode, enabled: bool) -> Rec
         }
     }
     let resp = resp.on_hover_text(match mode {
-        RecMode::Recording => "Stop recording",
-        RecMode::Countdown(_) => "Cancel the countdown",
-        RecMode::Idle => "Start recording",
+        RecMode::Recording => t!(TIP_REC_STOP),
+        RecMode::Countdown(_) => t!(TIP_REC_CANCEL),
+        RecMode::Idle => t!(TIP_REC_START),
     });
     if !resp.clicked() {
         RecClick::None

@@ -56,7 +56,7 @@ impl Picker {
             let scale = info.scale_factor.max(0.1);
             let id = ViewportId::from_hash_of(("openclip-picker", info.id));
             let builder = ViewportBuilder::default()
-                .with_title("Select region — drag to select, Esc to cancel")
+                .with_title(crate::t!(PICKER_TITLE))
                 .with_decorations(false)
                 .with_resizable(false)
                 .with_taskbar(false)
@@ -151,7 +151,7 @@ impl Picker {
                 }
             }
         } else {
-            let hint = "Drag to select a region · Esc to cancel";
+            let hint = crate::t!(PICKER_HINT);
             painter.text(
                 full.center(),
                 egui::Align2::CENTER_CENTER,

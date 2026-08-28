@@ -118,6 +118,32 @@
   .gh-link .gh-stars svg { color: #f59e0b; }
   .gh-link svg { width: 16px; height: 16px; flex: none; }
 
+  /* ---------- Language picker ---------- */
+  .lang { position: relative; }
+  .lang-btn {
+    display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 10px;
+    background: var(--bg); border: 1px solid var(--border-strong); border-radius: 8px;
+    color: var(--text); font: inherit; font-size: 14px; font-weight: 600;
+    cursor: pointer; box-shadow: var(--shadow-sm);
+  }
+  .lang-btn:hover { background: var(--bg-soft); }
+  .lang-btn svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
+  .lang-btn .caret { width: 10px; height: 10px; }
+  .lang-menu {
+    position: absolute; right: 0; top: calc(100% + 8px); min-width: 168px; z-index: 60;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: var(--shadow-md); padding: 6px; margin: 0; list-style: none;
+  }
+  .lang-menu[hidden] { display: none; }
+  .lang-menu button {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    width: 100%; padding: 8px 10px; border: 0; border-radius: 7px; background: none;
+    font: inherit; font-size: 14.5px; color: var(--text); text-align: left; cursor: pointer;
+  }
+  .lang-menu button:hover { background: var(--bg-soft); }
+  .lang-menu button[aria-current="true"] { color: var(--accent); font-weight: 600; }
+  .lang-menu button[aria-current="true"]::after { content: "\2713"; }
+
   /* ---------- Buttons ---------- */
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -376,19 +402,27 @@
       openclip
     </a>
     <nav class="nav" aria-label="Primary">
-      <a href="#tour">Tour</a>
-      <a href="#features">Features</a>
-      <a href="#how">How it works</a>
-      <a href="#platforms">Platforms</a>
-      <a href="#build">Build</a>
+      <a href="#tour" data-i18n="nav.tour">Tour</a>
+      <a href="#features" data-i18n="nav.features">Features</a>
+      <a href="#how" data-i18n="nav.how">How it works</a>
+      <a href="#platforms" data-i18n="nav.platforms">Platforms</a>
+      <a href="#build" data-i18n="nav.build">Build</a>
     </nav>
     <div class="header-right">
+      <div class="lang">
+        <button class="lang-btn" id="lang-btn" type="button" aria-haspopup="true" aria-expanded="false" data-i18n-aria-label="lang.label" aria-label="Change language">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/></svg>
+          <span id="lang-current">English</span>
+          <svg class="caret" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 11 3 5.5h10z"/></svg>
+        </button>
+        <ul class="lang-menu" id="lang-menu" hidden></ul>
+      </div>
       <a class="gh-link" id="gh-link" href="https://github.com/catalingrigoriev285/openclip" target="_blank" rel="noopener">
         <span class="gh-main">
           <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
           <span class="txt">GitHub</span>
         </span>
-        <span class="gh-stars" title="Stars on GitHub">
+        <span class="gh-stars" id="gh-stars-wrap" data-i18n-title="gh.stars" title="Stars on GitHub">
           <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
           <span id="gh-stars">Star</span>
         </span>
@@ -402,27 +436,27 @@
   <!-- ===== Hero ===== -->
   <section class="hero">
     <div class="wrap">
-      <div class="pill"><i aria-hidden="true"></i> Open source · Apache-2.0 · Written in Rust</div>
-      <h1>Screen recording <span>with nothing to install.</span></h1>
-      <p class="lead">
+      <div class="pill"><i aria-hidden="true"></i> <span data-i18n="hero.pill">Open source · Apache-2.0 · Written in Rust</span></div>
+      <h1 data-i18n-html="hero.h1">Screen recording <span>with nothing to install.</span></h1>
+      <p class="lead" data-i18n="hero.lead">
         openclip records a monitor, a window or a dragged region — with system audio and your microphone —
         straight to a standard MP4. No ffmpeg. No system codecs. One binary.
       </p>
       <div class="hero-actions">
         <a class="btn btn-primary btn-lg" id="dl-win" href="https://github.com/catalingrigoriev285/openclip/releases/latest" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10.5 4.4v7.1H3V5.5zm8.5-1.3L21 3v8.5h-9.5V4.2zM3 12.5h7.5v7.1L3 18.5v-6zm8.5 0H21V21l-9.5-1.3v-7.2z"/></svg>
-          Download for Windows
+          <span data-i18n="hero.download">Download for Windows</span>
         </a>
         <a class="btn btn-lg" href="https://github.com/catalingrigoriev285/openclip" target="_blank" rel="noopener">
           <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-          View on GitHub
+          <span data-i18n="hero.view">View on GitHub</span>
         </a>
       </div>
-      <div class="hero-note" id="dl-note">Latest release from <a href="https://github.com/catalingrigoriev285/openclip/releases" target="_blank" rel="noopener">GitHub</a> · macOS and Linux build from source</div>
+      <div class="hero-note" id="dl-note" data-i18n-html="hero.note">Latest release from <a href="https://github.com/catalingrigoriev285/openclip/releases" target="_blank" rel="noopener">GitHub</a> · macOS and Linux build from source</div>
       <div class="hero-meta">
-        <span><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> H.264 + MP3 in MP4</span>
-        <span><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> Windows · macOS · Linux</span>
-        <span><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> Zero runtime dependencies</span>
+        <span><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="hero.meta1">H.264 + MP3 in MP4</span></span>
+        <span><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="hero.meta2">Windows · macOS · Linux</span></span>
+        <span><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="hero.meta3">Zero runtime dependencies</span></span>
       </div>
 
     </div>
@@ -434,18 +468,18 @@
       <div class="strip">
         <div>
           <div class="icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
-          <h3>Pick a source</h3>
-          <p>A whole display, one window, or a rectangle you drag on screen. Regions are cropped on the GPU on Windows.</p>
+          <h3 data-i18n="strip.1.h">Pick a source</h3>
+          <p data-i18n="strip.1.p">A whole display, one window, or a rectangle you drag on screen. Regions are cropped on the GPU on Windows.</p>
         </div>
         <div>
           <div class="icon red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18M6 8v8M18 8v8M3 11v2M21 11v2"/></svg></div>
-          <h3>Toggle audio</h3>
-          <p>System audio, microphone, or both — mixed onto one timeline and resampled to 48 kHz stereo.</p>
+          <h3 data-i18n="strip.2.h">Toggle audio</h3>
+          <p data-i18n="strip.2.p">System audio, microphone, or both — mixed onto one timeline and resampled to 48 kHz stereo.</p>
         </div>
         <div>
           <div class="icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M10 9l5 3-5 3z" fill="currentColor" stroke="none"/></svg></div>
-          <h3>Hit REC</h3>
-          <p>Get a plain MP4 that plays in VLC, Windows Media Player, Chrome, Edge and any ffmpeg-based tool.</p>
+          <h3 data-i18n="strip.3.h">Hit REC</h3>
+          <p data-i18n="strip.3.p">Get a plain MP4 that plays in VLC, Windows Media Player, Chrome, Edge and any ffmpeg-based tool.</p>
         </div>
       </div>
     </div>
@@ -455,55 +489,55 @@
   <section id="tour" class="alt">
     <div class="wrap">
       <div class="section-head center">
-        <div class="eyebrow">A quick tour</div>
-        <h2>Three pages. That's the whole app.</h2>
-        <p>Toolbar on top, navigation on the left, pages on the right — a layout you already know how to use.</p>
+        <div class="eyebrow" data-i18n="tour.eyebrow">A quick tour</div>
+        <h2 data-i18n="tour.h2">Three pages. That's the whole app.</h2>
+        <p data-i18n="tour.p">Toolbar on top, navigation on the left, pages on the right — a layout you already know how to use.</p>
       </div>
 
       <div class="showcase">
         <div class="media">
-          <img src="assets/screen_01.png" width="997" height="765" alt="openclip Home page: the media library listing three recorded MP4 files with Play, Folder and Delete actions." loading="lazy">
+          <img src="assets/screen_01.png" width="997" height="765" data-i18n-alt="tour.1.alt" alt="openclip Home page: the media library listing three recorded MP4 files with Play, Folder and Delete actions." loading="lazy">
         </div>
         <div>
-          <span class="tag">Home</span>
-          <h3>Your recordings, right where you made them.</h3>
-          <p>Videos, screenshots and audio clips show up in a library the moment you stop recording. Play them, reveal them in the folder, or delete them without leaving the app.</p>
+          <span class="tag" data-i18n="tour.1.tag">Home</span>
+          <h3 data-i18n="tour.1.h">Your recordings, right where you made them.</h3>
+          <p data-i18n="tour.1.p">Videos, screenshots and audio clips show up in a library the moment you stop recording. Play them, reveal them in the folder, or delete them without leaving the app.</p>
           <ul class="checks">
-            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> Videos, Images and Audios tabs plus a live Preview</li>
-            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> Pause and resume mid-recording</li>
-            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> Compact floating mini-bar while you record</li>
+            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="tour.1.c1">Videos, Images and Audios tabs plus a live Preview</span></li>
+            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="tour.1.c2">Pause and resume mid-recording</span></li>
+            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="tour.1.c3">Compact floating mini-bar while you record</span></li>
           </ul>
         </div>
       </div>
 
       <div class="showcase">
         <div class="media">
-          <img src="assets/screen_02.png" width="997" height="761" alt="openclip Video page, Record tab: cursor and click-effect checkboxes, Full size / Half size toggle, and the H264 OpenH264 CBR and MP3 format summary." loading="lazy">
+          <img src="assets/screen_02.png" width="997" height="761" data-i18n-alt="tour.2.alt" alt="openclip Video page, Record tab: cursor and click-effect checkboxes, Full size / Half size toggle, and the H264 OpenH264 CBR and MP3 format summary." loading="lazy">
         </div>
         <div>
-          <span class="tag">Video</span>
-          <h3>The settings that matter, nothing else.</h3>
-          <p>Frame rate, bitrate, full or half size, and the H.264 + MP3 format at a glance. Detailed encoder settings are one click away when you want them.</p>
+          <span class="tag" data-i18n="tour.2.tag">Video</span>
+          <h3 data-i18n="tour.2.h">The settings that matter, nothing else.</h3>
+          <p data-i18n="tour.2.p">Frame rate, bitrate, full or half size, and the H.264 + MP3 format at a glance. Detailed encoder settings are one click away when you want them.</p>
           <ul class="checks">
-            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> H.264 via OpenH264, constant bitrate, 30 fps by default</li>
-            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> MP3 audio at 48 kHz stereo, 160 kbps</li>
-            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> Half size for lighter files on slower machines</li>
+            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="tour.2.c1">H.264 via OpenH264, constant bitrate, 30 fps by default</span></li>
+            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="tour.2.c2">MP3 audio at 48 kHz stereo, 160 kbps</span></li>
+            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="tour.2.c3">Half size for lighter files on slower machines</span></li>
           </ul>
         </div>
       </div>
 
       <div class="showcase">
         <div class="media">
-          <img src="assets/screen_03.png" width="997" height="760" alt="openclip Video page, Mouse tab: cursor size, left and right click colours, highlight colour and opacity, with a live preview of the highlight circle." loading="lazy">
+          <img src="assets/screen_03.png" width="997" height="760" data-i18n-alt="tour.3.alt" alt="openclip Video page, Mouse tab: cursor size, left and right click colours, highlight colour and opacity, with a live preview of the highlight circle." loading="lazy">
         </div>
         <div>
-          <span class="tag">Mouse effects</span>
-          <h3>Make the cursor easy to follow.</h3>
-          <p>Scale the cursor, colour left and right clicks, and add a soft highlight halo with adjustable opacity. The preview box lets you click and see the effect before you record.</p>
+          <span class="tag" data-i18n="tour.3.tag">Mouse effects</span>
+          <h3 data-i18n="tour.3.h">Make the cursor easy to follow.</h3>
+          <p data-i18n="tour.3.p">Scale the cursor, colour left and right clicks, and add a soft highlight halo with adjustable opacity. The preview box lets you click and see the effect before you record.</p>
           <ul class="checks">
-            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> Cursor size from 100% up</li>
-            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> Separate colours for left and right clicks</li>
-            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> Mouse snapshots are attached to every captured frame</li>
+            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="tour.3.c1">Cursor size from 100% up</span></li>
+            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="tour.3.c2">Separate colours for left and right clicks</span></li>
+            <li><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z"/></svg> <span data-i18n="tour.3.c3">Mouse snapshots are attached to every captured frame</span></li>
           </ul>
         </div>
       </div>
@@ -514,40 +548,40 @@
   <section id="features">
     <div class="wrap">
       <div class="section-head">
-        <div class="eyebrow">Features</div>
-        <h2>Everything a recorder should do. Nothing it shouldn't.</h2>
-        <p>Built to be small and predictable: one binary, one file format, and timing you can trust.</p>
+        <div class="eyebrow" data-i18n="feat.eyebrow">Features</div>
+        <h2 data-i18n="feat.h2">Everything a recorder should do. Nothing it shouldn't.</h2>
+        <p data-i18n="feat.p">Built to be small and predictable: one binary, one file format, and timing you can trust.</p>
       </div>
       <div class="grid">
         <div class="card">
           <div class="icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
-          <h3>Monitor, window or region</h3>
-          <p>Record a whole display, a single window, or drag a rectangle. On Windows, regions are cropped on the GPU so the encoder only sees the pixels you asked for.</p>
+          <h3 data-i18n="feat.1.h">Monitor, window or region</h3>
+          <p data-i18n="feat.1.p">Record a whole display, a single window, or drag a rectangle. On Windows, regions are cropped on the GPU so the encoder only sees the pixels you asked for.</p>
         </div>
         <div class="card">
           <div class="icon red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18M6 8v8M18 8v8M3 11v2M21 11v2"/></svg></div>
-          <h3>System audio + mic</h3>
-          <p>Capture what you hear, what you say, or both. Streams are mixed on one timeline and resampled to 48 kHz stereo.</p>
+          <h3 data-i18n="feat.2.h">System audio + mic</h3>
+          <p data-i18n="feat.2.p">Capture what you hear, what you say, or both. Streams are mixed on one timeline and resampled to 48 kHz stereo.</p>
         </div>
         <div class="card">
           <div class="icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></div>
-          <h3>Live preview</h3>
-          <p>See exactly what is being recorded — including the mouse cursor — before and while you record.</p>
+          <h3 data-i18n="feat.3.h">Live preview</h3>
+          <p data-i18n="feat.3.p">See exactly what is being recorded — including the mouse cursor — before and while you record.</p>
         </div>
         <div class="card">
           <div class="icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M10 9l5 3-5 3z" fill="currentColor" stroke="none"/></svg></div>
-          <h3>Standard MP4 that plays everywhere</h3>
-          <p>H.264 video and MP3 audio in a plain, non-fragmented MP4. Opens in VLC, Windows Media Player, Movies &amp; TV, Chrome, Edge and every ffmpeg-based tool. Files over 4 GiB use <code>co64</code>.</p>
+          <h3 data-i18n="feat.4.h">Standard MP4 that plays everywhere</h3>
+          <p data-i18n-html="feat.4.p">H.264 video and MP3 audio in a plain, non-fragmented MP4. Opens in VLC, Windows Media Player, Movies &amp; TV, Chrome, Edge and every ffmpeg-based tool. Files over 4 GiB use <code>co64</code>.</p>
         </div>
         <div class="card">
           <div class="icon amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3 7h7l-5.5 4.5L18.5 21 12 16.5 5.5 21l2-7.5L2 9h7z"/></svg></div>
-          <h3>No external runtime</h3>
-          <p>OpenH264 and LAME are compiled from bundled sources at build time. The MP4 muxer is in-house. Nothing to install next to the binary.</p>
+          <h3 data-i18n="feat.5.h">No external runtime</h3>
+          <p data-i18n="feat.5.p">OpenH264 and LAME are compiled from bundled sources at build time. The MP4 muxer is in-house. Nothing to install next to the binary.</p>
         </div>
         <div class="card">
           <div class="icon teal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
-          <h3>Timing you can trust</h3>
-          <p>Every frame carries its real capture timestamp. Frames are dropped — never desynchronised — if the encoder falls behind.</p>
+          <h3 data-i18n="feat.6.h">Timing you can trust</h3>
+          <p data-i18n="feat.6.p">Every frame carries its real capture timestamp. Frames are dropped — never desynchronised — if the encoder falls behind.</p>
         </div>
       </div>
     </div>
@@ -557,38 +591,38 @@
   <section id="how" class="alt">
     <div class="wrap">
       <div class="section-head">
-        <div class="eyebrow">How it works</div>
-        <h2>One pipeline, no detours.</h2>
-        <p>Frames go from the capture backend to a file without touching a system codec.</p>
+        <div class="eyebrow" data-i18n="how.eyebrow">How it works</div>
+        <h2 data-i18n="how.h2">One pipeline, no detours.</h2>
+        <p data-i18n="how.p">Frames go from the capture backend to a file without touching a system codec.</p>
       </div>
       <div class="steps">
-        <div class="step"><b>Capture</b><small>Windows.Graphics.Capture · xcap</small></div>
-        <div class="step"><b>Encode thread</b><small>BGRA → I420 (SIMD)</small></div>
-        <div class="step accent"><b>OpenH264</b><small>screen-content, real-time</small></div>
-        <div class="step"><b>MP4 muxer</b><small>in-house, streaming</small></div>
+        <div class="step"><b data-i18n="how.s1">Capture</b><small>Windows.Graphics.Capture · xcap</small></div>
+        <div class="step"><b data-i18n="how.s2">Encode thread</b><small>BGRA → I420 (SIMD)</small></div>
+        <div class="step accent"><b>OpenH264</b><small data-i18n="how.s3s">screen-content, real-time</small></div>
+        <div class="step"><b data-i18n="how.s4">MP4 muxer</b><small data-i18n="how.s4s">in-house, streaming</small></div>
         <div class="step"><b>.mp4</b><small>ftyp / mdat / moov</small></div>
       </div>
       <div class="audio-line">
-        <b>Audio</b>
-        <span>cpal mic / loopback</span><i>→</i><span>mixer · 48 kHz stereo</span><i>→</i><span>LAME MP3</span><i>→</i><span>muxer</span>
+        <b data-i18n="how.audio">Audio</b>
+        <span data-i18n="how.a1">cpal mic / loopback</span><i>→</i><span data-i18n="how.a2">mixer · 48 kHz stereo</span><i>→</i><span>LAME MP3</span><i>→</i><span data-i18n="how.a4">muxer</span>
       </div>
 
       <div class="defs">
         <div class="def">
-          <b>Capture</b>
-          <p>Windows uses Windows.Graphics.Capture via <code>windows-capture</code> (BGRA frames, GPU-side crop for regions). macOS and Linux/X11 use <code>xcap</code>'s video recorder for monitors and screenshot polling for windows.</p>
+          <b data-i18n="how.d1.t">Capture</b>
+          <p data-i18n-html="how.d1.p">Windows uses Windows.Graphics.Capture via <code>windows-capture</code> (BGRA frames, GPU-side crop for regions). macOS and Linux/X11 use <code>xcap</code>'s video recorder for monitors and screenshot polling for windows.</p>
         </div>
         <div class="def">
-          <b>Video</b>
-          <p>BGRA/RGBA → I420 with the SIMD <code>yuv</code> crate, then OpenH264 in screen-content real-time mode. Annex-B output becomes AVCC length-prefixed samples; SPS/PPS go into <code>avcC</code>.</p>
+          <b data-i18n="how.d2.t">Video</b>
+          <p data-i18n-html="how.d2.p">BGRA/RGBA → I420 with the SIMD <code>yuv</code> crate, then OpenH264 in screen-content real-time mode. Annex-B output becomes AVCC length-prefixed samples; SPS/PPS go into <code>avcC</code>.</p>
         </div>
         <div class="def">
-          <b>Audio</b>
-          <p>Each cpal stream pushes timestamped chunks. The mixer places them on the recording timeline — inserting silence for gaps such as WASAPI loopback going quiet — resamples, and feeds LAME. Each MP4 sample is exactly one 1152-sample MP3 frame.</p>
+          <b data-i18n="how.d3.t">Audio</b>
+          <p data-i18n="how.d3.p">Each cpal stream pushes timestamped chunks. The mixer places them on the recording timeline — inserting silence for gaps such as WASAPI loopback going quiet — resamples, and feeds LAME. Each MP4 sample is exactly one 1152-sample MP3 frame.</p>
         </div>
         <div class="def">
-          <b>Mux</b>
-          <p>A streaming, non-fragmented MP4 writer with per-sample durations from real timestamps, a keyframe table, 0.5 s interleaved chunks and <code>co64</code> for large files. Output is round-tripped through the independent <code>mp4-atom</code> parser in tests.</p>
+          <b data-i18n="how.d4.t">Mux</b>
+          <p data-i18n-html="how.d4.p">A streaming, non-fragmented MP4 writer with per-sample durations from real timestamps, a keyframe table, 0.5 s interleaved chunks and <code>co64</code> for large files. Output is round-tripped through the independent <code>mp4-atom</code> parser in tests.</p>
         </div>
       </div>
     </div>
@@ -598,33 +632,33 @@
   <section id="platforms">
     <div class="wrap">
       <div class="section-head">
-        <div class="eyebrow">Platforms</div>
-        <h2>Builds on the three desktops.</h2>
-        <p>You need a Rust toolchain (edition 2024 → Rust 1.85+) and a C/C++ compiler for the bundled codecs.</p>
+        <div class="eyebrow" data-i18n="plat.eyebrow">Platforms</div>
+        <h2 data-i18n="plat.h2">Builds on the three desktops.</h2>
+        <p data-i18n="plat.p">You need a Rust toolchain (edition 2024 → Rust 1.85+) and a C/C++ compiler for the bundled codecs.</p>
       </div>
       <div class="platforms">
         <div class="platform">
           <div class="os"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5l7.5-1v7H3v-6zm8.5-1.2L21 3v8.5h-9.5V4.3zM3 12.5h7.5v7L3 18.5v-6zm8.5 0H21V21l-9.5-1.3v-7.2z"/></svg></div>
           <h3>Windows</h3>
-          <p>Visual Studio Build Tools (MSVC). Nothing else. Capture uses native Windows.Graphics.Capture; system audio via WASAPI loopback.</p>
-          <div class="status"><i></i> Native capture · prebuilt release</div>
+          <p data-i18n="plat.win.p">Visual Studio Build Tools (MSVC). Nothing else. Capture uses native Windows.Graphics.Capture; system audio via WASAPI loopback.</p>
+          <div class="status"><i></i> <span data-i18n="plat.win.s">Native capture · prebuilt release</span></div>
         </div>
         <div class="platform">
           <div class="os"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.4 12.7c0-2.5 2-3.6 2.1-3.7-1.2-1.7-3-1.9-3.6-2-1.5-.2-3 .9-3.7.9-.8 0-2-.9-3.2-.9-1.7 0-3.2 1-4.1 2.5-1.7 3-.4 7.5 1.3 9.9.8 1.2 1.8 2.5 3.1 2.5 1.2 0 1.7-.8 3.2-.8s1.9.8 3.2.8c1.3 0 2.2-1.2 3-2.4.9-1.4 1.3-2.7 1.3-2.8-.1 0-2.6-1-2.6-4zM14 5.4c.7-.8 1.1-1.9 1-3-1 0-2.1.7-2.8 1.5-.6.7-1.2 1.8-1 2.9 1.1.1 2.1-.6 2.8-1.4z"/></svg></div>
           <h3>macOS</h3>
-          <p>Xcode command-line tools, plus <code>autoconf automake libtool</code> (LAME builds via autotools). macOS 13+ for capture; system-audio loopback needs macOS 14.6+.</p>
-          <div class="status"><i></i> Build from source</div>
+          <p data-i18n-html="plat.mac.p">Xcode command-line tools, plus <code>autoconf automake libtool</code> (LAME builds via autotools). macOS 13+ for capture; system-audio loopback needs macOS 14.6+.</p>
+          <div class="status"><i></i> <span data-i18n="plat.mac.s">Build from source</span></div>
         </div>
         <div class="platform">
           <div class="os"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2c-2.2 0-3.6 1.7-3.6 4.3 0 1.2.1 2-.4 3-.7 1.2-2.4 3-2.6 5.2-.1.9.1 1.7.5 2.4-.9.3-1.6.8-1.6 1.6 0 1.1 1.5 1.5 3 1.9.6.7 1.6 1.6 3.3 1.6h2.8c1.7 0 2.7-.9 3.3-1.6 1.5-.4 3-.8 3-1.9 0-.8-.7-1.3-1.6-1.6.4-.7.6-1.5.5-2.4-.2-2.2-1.9-4-2.6-5.2-.5-1-.4-1.8-.4-3C15.6 3.7 14.2 2 12 2zm-1.4 4.6c.5 0 .8.5.8 1.1s-.3 1.1-.8 1.1-.8-.5-.8-1.1.3-1.1.8-1.1zm2.8 0c.5 0 .8.5.8 1.1s-.3 1.1-.8 1.1-.8-.5-.8-1.1.3-1.1.8-1.1zM12 9.2c.9 0 2.1.6 2.1 1.1S12.9 11.6 12 11.6s-2.1-.8-2.1-1.3.6-1.1 2.1-1.1z"/></svg></div>
           <h3>Linux</h3>
           <p><code>build-essential autoconf automake libtool</code> and the dev headers used by eframe / xcap / cpal: <code>libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev libasound2-dev</code>.</p>
-          <div class="status"><i class="amber"></i> X11 only · build from source</div>
+          <div class="status"><i class="amber"></i> <span data-i18n="plat.linux.s">X11 only · build from source</span></div>
         </div>
       </div>
       <div class="note">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
-        <div>Installing <a href="https://www.nasm.us/" target="_blank" rel="noopener">nasm</a> before building enables OpenH264's assembly kernels and roughly doubles encoder throughput. Without it the build silently falls back to C.</div>
+        <div data-i18n-html="plat.note">Installing <a href="https://www.nasm.us/" target="_blank" rel="noopener">nasm</a> before building enables OpenH264's assembly kernels and roughly doubles encoder throughput. Without it the build silently falls back to C.</div>
       </div>
     </div>
   </section>
@@ -633,13 +667,13 @@
   <section id="build" class="alt">
     <div class="wrap">
       <div class="section-head">
-        <div class="eyebrow">Get started</div>
-        <h2>Two commands.</h2>
-        <p>Clone, build in release mode, run. Output lands in <code>~/Videos</code> as <code>&lt;prefix&gt;-YYYYMMDD-HHMMSS.mp4</code>.</p>
+        <div class="eyebrow" data-i18n="build.eyebrow">Get started</div>
+        <h2 data-i18n="build.h2">Two commands.</h2>
+        <p data-i18n-html="build.p">Clone, build in release mode, run. Output lands in <code>~/Videos</code> as <code>&lt;prefix&gt;-YYYYMMDD-HHMMSS.mp4</code>.</p>
       </div>
       <div class="cols">
         <div class="codebox">
-          <div class="code-head"><span>Build &amp; run</span><button class="copy" data-copy="git clone https://github.com/catalingrigoriev285/openclip.git
+          <div class="code-head"><span data-i18n="build.box1">Build &amp; run</span><button class="copy" data-i18n="build.copy" data-copy="git clone https://github.com/catalingrigoriev285/openclip.git
 cd openclip
 cargo build --release
 ./target/release/openclip">Copy</button></div>
@@ -649,21 +683,21 @@ cargo build --release
 <span class="p">$ </span>./target/release/openclip</code></pre>
         </div>
         <div class="codebox">
-          <div class="code-head"><span>Headless examples</span><button class="copy" data-copy="cargo run --release --example capture_to_mp4 -- 10 out.mp4
+          <div class="code-head"><span data-i18n="build.box2">Headless examples</span><button class="copy" data-i18n="build.copy" data-copy="cargo run --release --example capture_to_mp4 -- 10 out.mp4
 cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
-<pre><code><span class="c"># record the primary monitor for 10 s</span>
+<pre><code><span class="c" data-i18n="build.c1"># record the primary monitor for 10 s</span>
 <span class="p">$ </span>cargo run --release --example capture_to_mp4 -- 10 out.mp4
 
-<span class="c"># encoder throughput on synthetic content</span>
+<span class="c" data-i18n="build.c2"># encoder throughput on synthetic content</span>
 <span class="p">$ </span>cargo run --release --example bench_encode -- 1920 1080 5</code></pre>
         </div>
       </div>
 
       <div class="stats">
-        <div class="stat"><b>0</b><span>runtime dependencies</span></div>
-        <div class="stat"><b>1</b><span>binary, one MP4 out</span></div>
-        <div class="stat"><b>48 kHz</b><span>stereo audio timeline</span></div>
-        <div class="stat"><b>&gt;4 GiB</b><span>files supported via co64</span></div>
+        <div class="stat"><b>0</b><span data-i18n="build.stat1">runtime dependencies</span></div>
+        <div class="stat"><b>1</b><span data-i18n="build.stat2">binary, one MP4 out</span></div>
+        <div class="stat"><b>48 kHz</b><span data-i18n="build.stat3">stereo audio timeline</span></div>
+        <div class="stat"><b>&gt;4 GiB</b><span data-i18n="build.stat4">files supported via co64</span></div>
       </div>
     </div>
   </section>
@@ -673,14 +707,14 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
   <section>
     <div class="wrap">
       <div class="cta">
-        <h2>Open source. Apache-2.0.</h2>
-        <p>Bundled encoders: OpenH264 (BSD-2-Clause) and LAME (LGPL-2.1+). Stars, issues and pull requests are all welcome.</p>
+        <h2 data-i18n="cta.h2">Open source. Apache-2.0.</h2>
+        <p data-i18n="cta.p">Bundled encoders: OpenH264 (BSD-2-Clause) and LAME (LGPL-2.1+). Stars, issues and pull requests are all welcome.</p>
         <div class="hero-actions">
           <a class="btn btn-primary" href="https://github.com/catalingrigoriev285/openclip" target="_blank" rel="noopener">
             <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
-            Star on GitHub
+            <span data-i18n="cta.star">Star on GitHub</span>
           </a>
-          <a class="btn" href="https://github.com/catalingrigoriev285/openclip/issues" target="_blank" rel="noopener">Report an issue</a>
+          <a class="btn" href="https://github.com/catalingrigoriev285/openclip/issues" target="_blank" rel="noopener" data-i18n="cta.issue">Report an issue</a>
         </div>
       </div>
     </div>
@@ -690,7 +724,7 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
 
 <footer>
   <div class="wrap">
-    <div>© <span id="year"></span> Cătălin Grigoriev · openclip is licensed under Apache-2.0.</div>
+    <div>© <span id="year"></span> Cătălin Grigoriev · <span data-i18n="footer.license">openclip is licensed under Apache-2.0.</span></div>
     <nav aria-label="Footer">
       <a href="https://github.com/catalingrigoriev285/openclip" target="_blank" rel="noopener">GitHub</a>
       <a href="https://github.com/catalingrigoriev285/openclip/blob/main/README.md" target="_blank" rel="noopener">README</a>
@@ -698,6 +732,359 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
     </nav>
   </div>
 </footer>
+
+<script>
+  /* ---------- Localization -------------------------------------------------
+     Elements opt in with data-i18n (textContent), data-i18n-html (innerHTML),
+     data-i18n-alt / -title / -aria-label (attributes). English lives in the
+     markup and is the fallback for any key a translation is missing. */
+  var I18N = {
+    ro: {
+      "lang.label": "Schimbă limba",
+      "gh.stars": "Stele pe GitHub",
+      "nav.tour": "Tur", "nav.features": "Funcții", "nav.how": "Cum funcționează",
+      "nav.platforms": "Platforme", "nav.build": "Compilare",
+
+      "hero.pill": "Open source · Apache-2.0 · Scris în Rust",
+      "hero.h1": "Înregistrare de ecran <span>fără nimic de instalat.</span>",
+      "hero.lead": "openclip înregistrează un monitor, o fereastră sau o regiune trasă cu mouse-ul — cu sunetul de sistem și microfonul tău — direct într-un MP4 standard. Fără ffmpeg. Fără codecuri de sistem. Un singur executabil.",
+      "hero.download": "Descarcă pentru Windows",
+      "hero.view": "Vezi pe GitHub",
+      "hero.note": "Cea mai recentă versiune de pe <a href=\"https://github.com/catalingrigoriev285/openclip/releases\" target=\"_blank\" rel=\"noopener\">GitHub</a> · pe macOS și Linux se compilează din surse",
+      "hero.note.suffix": "pe macOS și Linux se compilează din surse",
+      "hero.note.latest": "Cea mai recentă versiune",
+      "hero.note.assets": "vezi fișierele versiunii",
+      "hero.meta1": "H.264 + MP3 în MP4",
+      "hero.meta2": "Windows · macOS · Linux",
+      "hero.meta3": "Zero dependențe la rulare",
+
+      "strip.1.h": "Alege o sursă",
+      "strip.1.p": "Un ecran întreg, o singură fereastră sau un dreptunghi tras pe ecran. Pe Windows regiunile sunt decupate pe GPU.",
+      "strip.2.h": "Comută sunetul",
+      "strip.2.p": "Sunet de sistem, microfon sau ambele — mixate pe o singură cronologie și reeșantionate la 48 kHz stereo.",
+      "strip.3.h": "Apasă REC",
+      "strip.3.p": "Obții un MP4 obișnuit care se redă în VLC, Windows Media Player, Chrome, Edge și în orice unealtă bazată pe ffmpeg.",
+
+      "tour.eyebrow": "Un tur rapid",
+      "tour.h2": "Trei pagini. Asta e toată aplicația.",
+      "tour.p": "Bara de instrumente sus, navigarea în stânga, paginile în dreapta — un aranjament pe care îl știi deja.",
+      "tour.1.alt": "Pagina Acasă din openclip: biblioteca media cu trei fișiere MP4 înregistrate și acțiunile Redă, Folder și Șterge.",
+      "tour.1.tag": "Acasă",
+      "tour.1.h": "Înregistrările tale, exact unde le-ai făcut.",
+      "tour.1.p": "Videoclipurile, capturile și clipurile audio apar în bibliotecă imediat ce oprești înregistrarea. Le poți reda, deschide în folder sau șterge fără să părăsești aplicația.",
+      "tour.1.c1": "File pentru Videoclipuri, Imagini și Audio, plus o previzualizare live",
+      "tour.1.c2": "Suspendare și reluare în timpul înregistrării",
+      "tour.1.c3": "Bară plutitoare compactă în timp ce înregistrezi",
+      "tour.2.alt": "Pagina Video din openclip, fila Înregistrare: casete pentru cursor și efecte de clic, comutator dimensiune completă / jumătate și rezumatul formatului H264 OpenH264 CBR și MP3.",
+      "tour.2.tag": "Video",
+      "tour.2.h": "Setările care contează, nimic altceva.",
+      "tour.2.p": "Rata de cadre, bitrate-ul, dimensiunea completă sau la jumătate și formatul H.264 + MP3, dintr-o privire. Setările detaliate ale codificatorului sunt la un clic distanță.",
+      "tour.2.c1": "H.264 prin OpenH264, bitrate constant, 30 fps implicit",
+      "tour.2.c2": "Sunet MP3 la 48 kHz stereo, 160 kbps",
+      "tour.2.c3": "Jumătate de dimensiune pentru fișiere mai ușoare pe calculatoare mai lente",
+      "tour.3.alt": "Pagina Video din openclip, fila Mouse: dimensiunea cursorului, culorile pentru clic stânga și dreapta, culoarea și opacitatea evidențierii, cu previzualizare live a cercului de evidențiere.",
+      "tour.3.tag": "Efecte de mouse",
+      "tour.3.h": "Fă cursorul ușor de urmărit.",
+      "tour.3.p": "Mărește cursorul, colorează clicurile stânga și dreapta și adaugă un halou de evidențiere cu opacitate reglabilă. Caseta de previzualizare îți arată efectul înainte de a înregistra.",
+      "tour.3.c1": "Dimensiunea cursorului de la 100% în sus",
+      "tour.3.c2": "Culori separate pentru clic stânga și dreapta",
+      "tour.3.c3": "Poziția mouse-ului este atașată fiecărui cadru capturat",
+
+      "feat.eyebrow": "Funcții",
+      "feat.h2": "Tot ce trebuie să facă un recorder. Nimic din ce n-ar trebui.",
+      "feat.p": "Construit să fie mic și previzibil: un singur executabil, un singur format de fișier și o sincronizare în care poți avea încredere.",
+      "feat.1.h": "Monitor, fereastră sau regiune",
+      "feat.1.p": "Înregistrează un ecran întreg, o singură fereastră sau trage un dreptunghi. Pe Windows regiunile sunt decupate pe GPU, așa că nu ajung la codificator decât pixelii ceruți.",
+      "feat.2.h": "Sunet de sistem + microfon",
+      "feat.2.p": "Capturează ce auzi, ce spui sau ambele. Fluxurile sunt mixate pe o singură cronologie și reeșantionate la 48 kHz stereo.",
+      "feat.3.h": "Previzualizare live",
+      "feat.3.p": "Vezi exact ce se înregistrează — inclusiv cursorul mouse-ului — înainte și în timpul înregistrării.",
+      "feat.4.h": "MP4 standard, care se redă oriunde",
+      "feat.4.p": "Video H.264 și sunet MP3 într-un MP4 simplu, nefragmentat. Se deschide în VLC, Windows Media Player, Filme și TV, Chrome, Edge și în orice unealtă bazată pe ffmpeg. Fișierele peste 4 GiB folosesc <code>co64</code>.",
+      "feat.5.h": "Fără dependențe la rulare",
+      "feat.5.p": "OpenH264 și LAME sunt compilate din surse incluse, la compilare. Muxerul MP4 este propriu. Nu ai nimic de instalat lângă executabil.",
+      "feat.6.h": "Sincronizare în care poți avea încredere",
+      "feat.6.p": "Fiecare cadru poartă marcajul real de timp al capturii. Dacă codificatorul rămâne în urmă, cadrele sunt eliminate — niciodată desincronizate.",
+
+      "how.eyebrow": "Cum funcționează",
+      "how.h2": "O singură cale, fără ocolișuri.",
+      "how.p": "Cadrele ajung de la backendul de captură direct într-un fișier, fără să atingă vreun codec de sistem.",
+      "how.s1": "Captură", "how.s2": "Fir de codificare", "how.s3s": "conținut de ecran, timp real",
+      "how.s4": "Muxer MP4", "how.s4s": "propriu, în flux",
+      "how.audio": "Audio", "how.a1": "cpal microfon / loopback", "how.a2": "mixer · 48 kHz stereo", "how.a4": "muxer",
+      "how.d1.t": "Captură",
+      "how.d1.p": "Pe Windows se folosește Windows.Graphics.Capture prin <code>windows-capture</code> (cadre BGRA, decupare pe GPU pentru regiuni). macOS și Linux/X11 folosesc recorderul video din <code>xcap</code> pentru monitoare și interogarea capturilor pentru ferestre.",
+      "how.d2.t": "Video",
+      "how.d2.p": "BGRA/RGBA → I420 cu crate-ul SIMD <code>yuv</code>, apoi OpenH264 în mod timp real pentru conținut de ecran. Ieșirea Annex-B devine mostre AVCC cu prefix de lungime; SPS/PPS ajung în <code>avcC</code>.",
+      "how.d3.t": "Audio",
+      "how.d3.p": "Fiecare flux cpal trimite fragmente cu marcaj de timp. Mixerul le așază pe cronologia înregistrării — inserând tăcere pentru goluri, cum ar fi loopback-ul WASAPI care amuțește — le reeșantionează și le trimite spre LAME. Fiecare mostră MP4 este exact un cadru MP3 de 1152 de eșantioane.",
+      "how.d4.t": "Multiplexare",
+      "how.d4.p": "Un scriitor MP4 în flux, nefragmentat, cu durate per mostră din marcaje de timp reale, tabel de cadre-cheie, fragmente intercalate la 0,5 s și <code>co64</code> pentru fișiere mari. Rezultatul este verificat în teste cu parserul independent <code>mp4-atom</code>.",
+
+      "plat.eyebrow": "Platforme",
+      "plat.h2": "Se compilează pe cele trei desktopuri.",
+      "plat.p": "Ai nevoie de un toolchain Rust (ediția 2024 → Rust 1.85+) și de un compilator C/C++ pentru codecurile incluse.",
+      "plat.win.p": "Visual Studio Build Tools (MSVC). Nimic altceva. Captura folosește Windows.Graphics.Capture nativ; sunetul de sistem prin loopback WASAPI.",
+      "plat.win.s": "Captură nativă · versiune precompilată",
+      "plat.mac.p": "Uneltele de linie de comandă Xcode, plus <code>autoconf automake libtool</code> (LAME se compilează cu autotools). macOS 13+ pentru captură; loopback-ul pentru sunetul de sistem necesită macOS 14.6+.",
+      "plat.mac.s": "Compilare din surse",
+      "plat.linux.s": "Doar X11 · compilare din surse",
+      "plat.note": "Instalarea <a href=\"https://www.nasm.us/\" target=\"_blank\" rel=\"noopener\">nasm</a> înainte de compilare activează nucleele în asamblare din OpenH264 și aproape dublează debitul codificatorului. Fără el, compilarea revine în tăcere la C.",
+
+      "build.eyebrow": "Începe aici",
+      "build.h2": "Două comenzi.",
+      "build.p": "Clonează, compilează în mod release, rulează. Rezultatul ajunge în <code>~/Videos</code> ca <code>&lt;prefix&gt;-AAAALLZZ-HHMMSS.mp4</code>.",
+      "build.box1": "Compilare și rulare",
+      "build.box2": "Exemple fără interfață",
+      "build.copy": "Copiază",
+      "build.copied": "Copiat",
+      "build.copyfail": "Copierea a eșuat",
+      "build.c1": "# înregistrează monitorul principal timp de 10 s",
+      "build.c2": "# debitul codificatorului pe conținut sintetic",
+      "build.stat1": "dependențe la rulare",
+      "build.stat2": "executabil, un singur MP4 la ieșire",
+      "build.stat3": "cronologie audio stereo",
+      "build.stat4": "fișiere acceptate prin co64",
+
+      "cta.h2": "Open source. Apache-2.0.",
+      "cta.p": "Codificatoare incluse: OpenH264 (BSD-2-Clause) și LAME (LGPL-2.1+). Stelele, problemele raportate și pull request-urile sunt binevenite.",
+      "cta.star": "Dă o stea pe GitHub",
+      "cta.issue": "Raportează o problemă",
+      "footer.license": "openclip este licențiat sub Apache-2.0.",
+
+      "doc.title": "openclip — un recorder de ecran de sine stătător",
+      "doc.description": "openclip este un recorder de ecran mic și de sine stătător, scris în Rust. Înregistrează monitoare, ferestre sau regiuni cu sunet de sistem și microfon în MP4 standard — fără ffmpeg, fără codecuri de sistem."
+    },
+
+    ru: {
+      "lang.label": "Сменить язык",
+      "gh.stars": "Звёзды на GitHub",
+      "nav.tour": "Обзор", "nav.features": "Возможности", "nav.how": "Как это работает",
+      "nav.platforms": "Платформы", "nav.build": "Сборка",
+
+      "hero.pill": "Открытый исходный код · Apache-2.0 · Написано на Rust",
+      "hero.h1": "Запись экрана <span>без единой установки.</span>",
+      "hero.lead": "openclip записывает монитор, окно или выделенную мышью область — вместе с системным звуком и микрофоном — сразу в обычный MP4. Без ffmpeg. Без системных кодеков. Один исполняемый файл.",
+      "hero.download": "Скачать для Windows",
+      "hero.view": "Открыть на GitHub",
+      "hero.note": "Последний выпуск на <a href=\"https://github.com/catalingrigoriev285/openclip/releases\" target=\"_blank\" rel=\"noopener\">GitHub</a> · для macOS и Linux — сборка из исходников",
+      "hero.note.suffix": "для macOS и Linux — сборка из исходников",
+      "hero.note.latest": "Последний выпуск",
+      "hero.note.assets": "см. файлы выпуска",
+      "hero.meta1": "H.264 + MP3 в MP4",
+      "hero.meta2": "Windows · macOS · Linux",
+      "hero.meta3": "Ноль зависимостей при запуске",
+
+      "strip.1.h": "Выберите источник",
+      "strip.1.p": "Весь экран, одно окно или прямоугольник, выделенный мышью. В Windows области обрезаются на GPU.",
+      "strip.2.h": "Включите звук",
+      "strip.2.p": "Системный звук, микрофон или оба сразу — сводятся на одну шкалу времени и пересчитываются в 48 кГц стерео.",
+      "strip.3.h": "Нажмите REC",
+      "strip.3.p": "На выходе — обычный MP4, который открывается в VLC, Windows Media Player, Chrome, Edge и любом инструменте на базе ffmpeg.",
+
+      "tour.eyebrow": "Быстрый обзор",
+      "tour.h2": "Три страницы. Это всё приложение.",
+      "tour.p": "Панель сверху, навигация слева, страницы справа — привычная раскладка, которую не нужно изучать.",
+      "tour.1.alt": "Главная страница openclip: медиатека со списком трёх записанных файлов MP4 и кнопками «Воспроизвести», «Папка» и «Удалить».",
+      "tour.1.tag": "Главная",
+      "tour.1.h": "Ваши записи — там же, где вы их сделали.",
+      "tour.1.p": "Видео, снимки экрана и аудиоклипы появляются в медиатеке сразу после остановки записи. Их можно воспроизвести, показать в папке или удалить, не выходя из приложения.",
+      "tour.1.c1": "Вкладки «Видео», «Изображения» и «Аудио» плюс живой предпросмотр",
+      "tour.1.c2": "Пауза и продолжение прямо во время записи",
+      "tour.1.c3": "Компактная плавающая мини-панель во время записи",
+      "tour.2.alt": "Страница «Видео» в openclip, вкладка «Запись»: флажки курсора и эффектов нажатий, переключатель полного и половинного размера и сводка формата H264 OpenH264 CBR и MP3.",
+      "tour.2.tag": "Видео",
+      "tour.2.h": "Только те настройки, которые важны.",
+      "tour.2.p": "Частота кадров, битрейт, полный или половинный размер и формат H.264 + MP3 — всё сразу на виду. Подробные настройки кодировщика — в одном клике.",
+      "tour.2.c1": "H.264 через OpenH264, постоянный битрейт, по умолчанию 30 кадр/с",
+      "tour.2.c2": "Звук MP3, 48 кГц стерео, 160 кбит/с",
+      "tour.2.c3": "Половинный размер — файлы легче на медленных машинах",
+      "tour.3.alt": "Страница «Видео» в openclip, вкладка «Мышь»: размер курсора, цвета левого и правого нажатий, цвет и прозрачность подсветки с живым предпросмотром круга подсветки.",
+      "tour.3.tag": "Эффекты мыши",
+      "tour.3.h": "Чтобы за курсором было легко следить.",
+      "tour.3.p": "Увеличьте курсор, задайте цвета левого и правого нажатий и добавьте мягкий ореол подсветки с регулируемой прозрачностью. В окне предпросмотра эффект видно ещё до записи.",
+      "tour.3.c1": "Размер курсора от 100% и выше",
+      "tour.3.c2": "Отдельные цвета для левого и правого нажатий",
+      "tour.3.c3": "Положение мыши прикрепляется к каждому захваченному кадру",
+
+      "feat.eyebrow": "Возможности",
+      "feat.h2": "Всё, что должна уметь программа записи. И ничего лишнего.",
+      "feat.p": "Сделано небольшим и предсказуемым: один исполняемый файл, один формат и тайминг, которому можно доверять.",
+      "feat.1.h": "Монитор, окно или область",
+      "feat.1.p": "Записывайте весь экран, отдельное окно или выделенный прямоугольник. В Windows области обрезаются на GPU, так что кодировщик видит только нужные пиксели.",
+      "feat.2.h": "Системный звук + микрофон",
+      "feat.2.p": "Записывайте то, что слышите, то, что говорите, или и то и другое. Потоки сводятся на одну шкалу времени и пересчитываются в 48 кГц стерео.",
+      "feat.3.h": "Живой предпросмотр",
+      "feat.3.p": "Видно ровно то, что записывается, — включая курсор мыши — до и во время записи.",
+      "feat.4.h": "Обычный MP4, который играет везде",
+      "feat.4.p": "Видео H.264 и звук MP3 в простом нефрагментированном MP4. Открывается в VLC, Windows Media Player, «Кино и ТВ», Chrome, Edge и любом инструменте на базе ffmpeg. Файлы больше 4 ГиБ используют <code>co64</code>.",
+      "feat.5.h": "Никаких внешних зависимостей",
+      "feat.5.p": "OpenH264 и LAME собираются из встроенных исходников во время сборки. Мультиплексор MP4 — собственный. Рядом с исполняемым файлом ставить нечего.",
+      "feat.6.h": "Тайминг, которому можно доверять",
+      "feat.6.p": "Каждый кадр несёт реальную метку времени захвата. Если кодировщик не успевает, кадры отбрасываются — но синхронизация не теряется.",
+
+      "how.eyebrow": "Как это работает",
+      "how.h2": "Один конвейер, без обходных путей.",
+      "how.p": "Кадры идут от механизма захвата прямо в файл, не касаясь системных кодеков.",
+      "how.s1": "Захват", "how.s2": "Поток кодирования", "how.s3s": "экранный контент, реальное время",
+      "how.s4": "Мультиплексор MP4", "how.s4s": "собственный, потоковый",
+      "how.audio": "Аудио", "how.a1": "cpal микрофон / loopback", "how.a2": "микшер · 48 кГц стерео", "how.a4": "мультиплексор",
+      "how.d1.t": "Захват",
+      "how.d1.p": "В Windows используется Windows.Graphics.Capture через <code>windows-capture</code> (кадры BGRA, обрезка областей на GPU). В macOS и Linux/X11 — видеозапись из <code>xcap</code> для мониторов и опрос снимков для окон.",
+      "how.d2.t": "Видео",
+      "how.d2.p": "BGRA/RGBA → I420 через SIMD-крейт <code>yuv</code>, затем OpenH264 в режиме реального времени для экранного контента. Выход Annex-B превращается в сэмплы AVCC с префиксом длины; SPS/PPS попадают в <code>avcC</code>.",
+      "how.d3.t": "Аудио",
+      "how.d3.p": "Каждый поток cpal отдаёт фрагменты с метками времени. Микшер расставляет их на шкале записи — вставляя тишину в разрывы, например когда loopback WASAPI замолкает, — пересчитывает частоту и передаёт в LAME. Каждый сэмпл MP4 — ровно один кадр MP3 из 1152 отсчётов.",
+      "how.d4.t": "Мультиплексирование",
+      "how.d4.p": "Потоковый нефрагментированный MP4-писатель с длительностями сэмплов из реальных меток времени, таблицей ключевых кадров, чередованием по 0,5 с и <code>co64</code> для больших файлов. В тестах результат проверяется независимым парсером <code>mp4-atom</code>.",
+
+      "plat.eyebrow": "Платформы",
+      "plat.h2": "Собирается на трёх настольных системах.",
+      "plat.p": "Нужны тулчейн Rust (редакция 2024 → Rust 1.85+) и компилятор C/C++ для встроенных кодеков.",
+      "plat.win.p": "Visual Studio Build Tools (MSVC). Больше ничего. Захват через нативный Windows.Graphics.Capture; системный звук — через loopback WASAPI.",
+      "plat.win.s": "Нативный захват · готовая сборка",
+      "plat.mac.p": "Инструменты командной строки Xcode плюс <code>autoconf automake libtool</code> (LAME собирается через autotools). Для захвата нужна macOS 13+; loopback системного звука — macOS 14.6+.",
+      "plat.mac.s": "Сборка из исходников",
+      "plat.linux.s": "Только X11 · сборка из исходников",
+      "plat.note": "Установка <a href=\"https://www.nasm.us/\" target=\"_blank\" rel=\"noopener\">nasm</a> перед сборкой включает ассемблерные ядра OpenH264 и примерно вдвое увеличивает пропускную способность кодировщика. Без него сборка молча откатывается на C.",
+
+      "build.eyebrow": "С чего начать",
+      "build.h2": "Две команды.",
+      "build.p": "Клонировать, собрать в режиме release, запустить. Результат появляется в <code>~/Videos</code> как <code>&lt;prefix&gt;-ГГГГММДД-ЧЧММСС.mp4</code>.",
+      "build.box1": "Сборка и запуск",
+      "build.box2": "Примеры без интерфейса",
+      "build.copy": "Копировать",
+      "build.copied": "Скопировано",
+      "build.copyfail": "Не удалось скопировать",
+      "build.c1": "# записать основной монитор в течение 10 с",
+      "build.c2": "# пропускная способность кодировщика на синтетическом контенте",
+      "build.stat1": "зависимостей при запуске",
+      "build.stat2": "исполняемый файл, один MP4 на выходе",
+      "build.stat3": "стереодорожка звука",
+      "build.stat4": "файлы поддерживаются через co64",
+
+      "cta.h2": "Открытый исходный код. Apache-2.0.",
+      "cta.p": "Встроенные кодировщики: OpenH264 (BSD-2-Clause) и LAME (LGPL-2.1+). Звёзды, сообщения об ошибках и pull-запросы приветствуются.",
+      "cta.star": "Поставить звезду на GitHub",
+      "cta.issue": "Сообщить о проблеме",
+      "footer.license": "openclip распространяется по лицензии Apache-2.0.",
+
+      "doc.title": "openclip — самодостаточная программа записи экрана",
+      "doc.description": "openclip — небольшая самодостаточная программа записи экрана, написанная на Rust. Записывает мониторы, окна или области с системным звуком и микрофоном в обычный MP4 — без ffmpeg и системных кодеков."
+    }
+  };
+
+  var LANGS = [
+    { code: "en", name: "English" },
+    { code: "ro", name: "Română" },
+    { code: "ru", name: "Русский" }
+  ];
+  var STORE_KEY = "openclip-lang";
+
+  /* English defaults, captured from the markup before anything is replaced. */
+  var EN = {};
+  function captureEnglish() {
+    var specs = [
+      ["data-i18n", "text"], ["data-i18n-html", "html"], ["data-i18n-alt", "alt"],
+      ["data-i18n-title", "title"], ["data-i18n-aria-label", "aria-label"]
+    ];
+    specs.forEach(function (spec) {
+      document.querySelectorAll("[" + spec[0] + "]").forEach(function (el) {
+        var key = el.getAttribute(spec[0]);
+        if (EN[key] !== undefined) { return; }
+        if (spec[1] === "text") { EN[key] = el.textContent.trim(); }
+        else if (spec[1] === "html") { EN[key] = el.innerHTML.trim(); }
+        else { EN[key] = el.getAttribute(spec[1]); }
+      });
+    });
+    EN["doc.title"] = document.title;
+    var d = document.querySelector('meta[name="description"]');
+    EN["doc.description"] = d ? d.getAttribute("content") : "";
+    EN["build.copy"] = "Copy";
+    EN["build.copied"] = "Copied";
+    EN["build.copyfail"] = "Copy failed";
+    EN["hero.note.suffix"] = "macOS and Linux build from source";
+    EN["hero.note.latest"] = "Latest";
+    EN["hero.note.assets"] = "see release assets";
+  }
+
+  var current = "en";
+  function tr(key) {
+    var table = I18N[current];
+    if (table && table[key] !== undefined) { return table[key]; }
+    return EN[key] !== undefined ? EN[key] : key;
+  }
+
+  function applyLang(code) {
+    current = (code === "en" || I18N[code]) ? code : "en";
+    document.documentElement.lang = current;
+    document.querySelectorAll("[data-i18n]").forEach(function (el) {
+      el.textContent = tr(el.getAttribute("data-i18n"));
+    });
+    document.querySelectorAll("[data-i18n-html]").forEach(function (el) {
+      el.innerHTML = tr(el.getAttribute("data-i18n-html"));
+    });
+    [["data-i18n-alt", "alt"], ["data-i18n-title", "title"], ["data-i18n-aria-label", "aria-label"]]
+      .forEach(function (spec) {
+        document.querySelectorAll("[" + spec[0] + "]").forEach(function (el) {
+          el.setAttribute(spec[1], tr(el.getAttribute(spec[0])));
+        });
+      });
+    document.title = tr("doc.title");
+    var desc = document.querySelector('meta[name="description"]');
+    if (desc) { desc.setAttribute("content", tr("doc.description")); }
+
+    var label = LANGS.filter(function (l) { return l.code === current; })[0];
+    document.getElementById("lang-current").textContent = label ? label.name : current;
+    document.querySelectorAll("#lang-menu button").forEach(function (b) {
+      b.setAttribute("aria-current", String(b.dataset.lang === current));
+    });
+    try { localStorage.setItem(STORE_KEY, current); } catch (_) { /* private mode */ }
+    if (typeof refreshDownloadNote === "function") { refreshDownloadNote(); }
+  }
+
+  function initLangPicker() {
+    var menu = document.getElementById("lang-menu");
+    var btn = document.getElementById("lang-btn");
+    LANGS.forEach(function (l) {
+      var li = document.createElement("li");
+      var b = document.createElement("button");
+      b.type = "button";
+      b.dataset.lang = l.code;
+      b.textContent = l.name;
+      b.addEventListener("click", function () {
+        applyLang(l.code);
+        close();
+      });
+      li.appendChild(b);
+      menu.appendChild(li);
+    });
+    function open() { menu.hidden = false; btn.setAttribute("aria-expanded", "true"); }
+    function close() { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); }
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (menu.hidden) { open(); } else { close(); }
+    });
+    document.addEventListener("click", close);
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") { close(); } });
+  }
+
+  function initialLang() {
+    var stored = null;
+    try { stored = localStorage.getItem(STORE_KEY); } catch (_) { /* private mode */ }
+    if (stored && (stored === "en" || I18N[stored])) { return stored; }
+    var nav = (navigator.languages || [navigator.language || "en"]);
+    for (var i = 0; i < nav.length; i++) {
+      var code = String(nav[i]).slice(0, 2).toLowerCase();
+      if (code === "en" || I18N[code]) { return code; }
+    }
+    return "en";
+  }
+
+  captureEnglish();
+  initLangPicker();
+  applyLang(initialLang());
+</script>
 
 <script>
   document.getElementById('year').textContent = new Date().getFullYear();
@@ -712,15 +1099,27 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
       const n = data.stargazers_count;
       if (typeof n === 'number') {
         el.textContent = n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
-        el.parentElement.title = n + ' stars on GitHub';
+        el.parentElement.title = n + ' ' + tr('gh.stars').toLowerCase();
       }
     } catch (_) { /* keep fallback label */ }
   })();
 
   // Point the download button at the Windows asset of the latest GitHub release.
+  // The note is rebuilt from translated fragments, so switching language keeps it.
+  var release = null;
+  function refreshDownloadNote() {
+    if (!release) { return; }
+    var note = document.getElementById('dl-note');
+    var tail = ' · ' + tr('hero.note.suffix');
+    if (release.asset) {
+      var mb = release.asset.size ? ' · ' + (release.asset.size / 1048576).toFixed(1) + ' MB' : '';
+      note.textContent = (release.tag || tr('hero.note.latest')) + ' · ' + release.asset.name + mb + tail;
+    } else {
+      note.textContent = (release.tag || tr('hero.note.latest')) + ' · ' + tr('hero.note.assets') + tail;
+    }
+  }
   (async function () {
     const btn = document.getElementById('dl-win');
-    const note = document.getElementById('dl-note');
     try {
       const r = await fetch('https://api.github.com/repos/catalingrigoriev285/openclip/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
       if (!r.ok) return;
@@ -732,12 +1131,12 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
         btn.href = asset.browser_download_url;
         btn.removeAttribute('target');
         btn.setAttribute('download', asset.name);
-        var mb = asset.size ? ' · ' + (asset.size / 1048576).toFixed(1) + ' MB' : '';
-        note.textContent = (rel.tag_name || 'Latest') + ' · ' + asset.name + mb + ' · macOS and Linux build from source';
+        release = { tag: rel.tag_name, asset: asset };
       } else if (rel.html_url) {
         btn.href = rel.html_url;
-        note.textContent = (rel.tag_name || 'Latest release') + ' · see release assets · macOS and Linux build from source';
+        release = { tag: rel.tag_name, asset: null };
       }
+      refreshDownloadNote();
     } catch (_) { /* keep releases/latest fallback */ }
   })();
 
@@ -746,9 +1145,9 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
     btn.addEventListener('click', async function () {
       try {
         await navigator.clipboard.writeText(btn.dataset.copy);
-        var prev = btn.textContent; btn.textContent = 'Copied';
-        setTimeout(function () { btn.textContent = prev; }, 1400);
-      } catch (_) { btn.textContent = 'Copy failed'; }
+        btn.textContent = tr('build.copied');
+        setTimeout(function () { btn.textContent = tr('build.copy'); }, 1400);
+      } catch (_) { btn.textContent = tr('build.copyfail'); }
     });
   });
 </script>

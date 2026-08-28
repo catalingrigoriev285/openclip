@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
+use crate::t;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibraryTab {
     Videos,
@@ -13,11 +15,12 @@ pub enum LibraryTab {
 impl LibraryTab {
     pub const ALL: [LibraryTab; 3] = [LibraryTab::Videos, LibraryTab::Images, LibraryTab::Audios];
 
-    pub fn label(self) -> &'static str {
+    /// Placeholder shown when the folder holds no file of this kind.
+    pub fn empty_label(self) -> &'static str {
         match self {
-            LibraryTab::Videos => "Videos",
-            LibraryTab::Images => "Images",
-            LibraryTab::Audios => "Audios",
+            LibraryTab::Videos => t!(NO_VIDEOS_YET),
+            LibraryTab::Images => t!(NO_IMAGES_YET),
+            LibraryTab::Audios => t!(NO_AUDIOS_YET),
         }
     }
 

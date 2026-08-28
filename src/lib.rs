@@ -20,6 +20,7 @@ pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
 
 pub mod audio;
 pub mod capture;
+pub mod i18n;
 pub mod mux;
 pub mod pipeline;
 pub mod settings;

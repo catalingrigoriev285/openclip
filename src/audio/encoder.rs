@@ -58,14 +58,14 @@ pub fn create_audio_encoder(
                     Err(e) => {
                         log::warn!("AAC encoder unavailable: {e:#}; falling back to MP3");
                         let enc = super::mp3::Mp3Encoder::new(sample_rate, channels as u8, bitrate_kbps)?;
-                        Ok((Box::new(enc), Some(format!("AAC unavailable ({e}); recorded MP3"))))
+                        Ok((Box::new(enc), Some(crate::t!(NOTE_AAC_UNAVAILABLE, e))))
                     }
                 }
             }
             #[cfg(not(windows))]
             {
                 let enc = super::mp3::Mp3Encoder::new(sample_rate, channels as u8, bitrate_kbps)?;
-                Ok((Box::new(enc), Some("AAC needs Windows; recorded MP3".into())))
+                Ok((Box::new(enc), Some(crate::t!(NOTE_AAC_NEEDS_WINDOWS).into())))
             }
         }
     }

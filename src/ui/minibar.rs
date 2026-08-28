@@ -10,6 +10,7 @@ use super::icons;
 use super::region_frame::{GAP_PX, THICKNESS_PT};
 use super::theme::*;
 use super::{format_duration, human_bytes, icon_button, pause_button, rec_button, App, RecClick, SourceKind, State};
+use crate::t;
 
 /// Inner size of the bar window, in points.
 pub const BAR_SIZE: Vec2 = Vec2::new(800.0, 104.0);
@@ -140,20 +141,20 @@ impl App {
 
         ui.horizontal(|ui| {
             // ----- Recording Area -----
-            group_box(ui, "Recording Area", 262.0, |ui| {
+            group_box(ui, t!(BAR_RECORDING_AREA), 262.0, |ui| {
                 ui.add_enabled_ui(!recording, |ui| {
                     ui.horizontal(|ui| {
                         let (icon, label) = match self.source_kind {
-                            SourceKind::Region => (icons::REGION, "Region"),
-                            SourceKind::Monitor => (icons::MONITOR, "Monitor"),
-                            SourceKind::Window => (icons::WINDOW, "Window"),
+                            SourceKind::Region => (icons::REGION, t!(MODE_REGION)),
+                            SourceKind::Monitor => (icons::MONITOR, t!(MODE_MONITOR)),
+                            SourceKind::Window => (icons::WINDOW, t!(MODE_WINDOW)),
                         };
                         let mut picked: Option<SourceKind> = None;
                         ui.menu_button(RichText::new(format!("{icon}  {label}  {}", icons::CARET_DOWN)).size(14.0), |ui| {
                             for (kind, icon, label) in [
-                                (SourceKind::Region, icons::REGION, "Region"),
-                                (SourceKind::Monitor, icons::MONITOR, "Monitor"),
-                                (SourceKind::Window, icons::WINDOW, "Window"),
+                                (SourceKind::Region, icons::REGION, t!(MODE_REGION)),
+                                (SourceKind::Monitor, icons::MONITOR, t!(MODE_MONITOR)),
+                                (SourceKind::Window, icons::WINDOW, t!(MODE_WINDOW)),
                             ] {
                                 if ui.button(format!("{icon}  {label}")).clicked() {
                                     picked = Some(kind);
@@ -178,7 +179,8 @@ impl App {
                                 });
                             }
                             SourceKind::Window => {
-                                let label = self.windows.get(self.window_idx).map(|w| w.title.clone()).unwrap_or("Pick…".into());
+                                let label =
+                                    self.windows.get(self.window_idx).map(|w| w.title.clone()).unwrap_or_else(|| t!(BAR_PICK).into());
                                 egui::ComboBox::from_id_salt("mini-window").width(96.0).selected_text(truncate(&label, 12)).show_ui(ui, |ui| {
                                     for (i, w) in self.windows.iter().enumerate() {
                                         ui.selectable_value(&mut self.window_idx, i, w.label());
@@ -186,7 +188,7 @@ impl App {
                                 });
                             }
                             SourceKind::Region
-                                if ui.small_button("Select…").on_hover_text("Drag a new region").clicked() =>
+                                if ui.small_button(t!(BAR_SELECT)).on_hover_text(t!(BAR_DRAG_NEW_REGION)).clicked() =>
                             {
                                 self.open_picker();
                             }
@@ -195,10 +197,10 @@ impl App {
                     });
                 });
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Dimensions").color(TEXT_DIM).small());
+                    ui.label(RichText::new(t!(BAR_DIMENSIONS)).color(TEXT_DIM).small());
                     ui.label(RichText::new(self.source_dimensions()).color(TEXT_BRIGHT).small());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button(icons::REFRESH).on_hover_text("Refresh monitors and windows").clicked() {
+                        if ui.small_button(icons::REFRESH).on_hover_text(t!(BAR_REFRESH_TIP)).clicked() {
                             self.refresh_sources();
                         }
                     });
@@ -206,19 +208,19 @@ impl App {
             });
 
             // ----- Recorded inputs -----
-            group_box(ui, "Recorded inputs", 350.0, |ui| {
+            group_box(ui, t!(BAR_INPUTS), 350.0, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(!recording, |ui| {
-                        input_toggle(ui, icons::MIC, "Microphone", &mut self.mic_enabled, self.mics.get(self.mic_idx).cloned());
-                        input_toggle(ui, icons::SPEAKER, "System audio", &mut self.system_audio, None);
+                        input_toggle(ui, icons::MIC, t!(MICROPHONE), &mut self.mic_enabled, self.mics.get(self.mic_idx).cloned());
+                        input_toggle(ui, icons::SPEAKER, t!(SYSTEM_AUDIO), &mut self.system_audio, None);
                         let mut show_cursor = self.mouse_fx.read().unwrap().show_cursor;
                         let before = show_cursor;
-                        input_toggle(ui, icons::CURSOR, "Cursor", &mut show_cursor, None);
+                        input_toggle(ui, icons::CURSOR, t!(CURSOR), &mut show_cursor, None);
                         if show_cursor != before {
                             self.mouse_fx.write().unwrap().show_cursor = show_cursor;
                         }
                         let (title, _) = self.format.video_summary(&self.encoders, self.source_size());
-                        let tip = format!("Format settings – {} / {}", self.format.container.label(), title);
+                        let tip = t!(BAR_FORMAT_TIP, self.format.container.label(), title);
                         if icon_button(ui, icons::GEAR, &tip).clicked() {
                             self.open_format_dialog();
                         }
@@ -261,17 +263,17 @@ impl App {
                             }
                         }
                         State::Picking(_) => {
-                            ui.label(RichText::new("Select region…").color(ACCENT).small());
+                            ui.label(RichText::new(t!(SELECT_REGION)).color(ACCENT).small());
                         }
                         State::Countdown { started } => {
                             let left = (self.countdown_secs as f32 - started.elapsed().as_secs_f32()).ceil().max(1.0);
-                            ui.label(RichText::new(format!("Starting in {left}")).strong().color(WARN_YELLOW).size(15.0));
-                            ui.label(RichText::new("Esc cancels").color(TEXT_DIM).small());
+                            ui.label(RichText::new(t!(BAR_STARTING_IN, left)).strong().color(WARN_YELLOW).size(15.0));
+                            ui.label(RichText::new(t!(BAR_ESC_CANCELS)).color(TEXT_DIM).small());
                             ctx.request_repaint_after(Duration::from_millis(100));
                         }
                         State::Idle => {
                             let ready = self.selected_source().is_some();
-                            let text = if ready { "Ready" } else { "Pick a source" };
+                            let text = if ready { t!(BAR_READY) } else { t!(BAR_PICK_SOURCE) };
                             ui.label(RichText::new(text).color(TEXT_DIM).small());
                         }
                     }
@@ -324,7 +326,7 @@ fn input_toggle(ui: &mut egui::Ui, icon: &str, name: &str, value: &mut bool, tip
             p.text(rect.center(), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), color);
             let badge = if *value { (icons::CHECK, OK_GREEN) } else { (icons::XMARK, ERR_RED) };
             p.text(rect.right_bottom() - Vec2::new(6.0, 6.0), Align2::CENTER_CENTER, badge.0, FontId::proportional(10.0), badge.1);
-            let caption = format!("{name} {}", if *value { "on" } else { "off" });
+            let caption = format!("{name} {}", if *value { t!(ON) } else { t!(OFF) });
             ui.label(RichText::new(caption).size(11.0).color(if *value { TEXT_NORMAL } else { TEXT_DIM }));
             if let Some(t) = tip {
                 resp.on_hover_text(t);

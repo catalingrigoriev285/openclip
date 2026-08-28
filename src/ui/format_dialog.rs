@@ -9,6 +9,7 @@ use crate::settings::{
     AudioCodec, Container, FormatSettings, H264Profile, HevcProfile, RateControl, SizeMode, VideoCodec,
     AAC_BITRATES, FPS_PRESETS, QUALITY_STEPS, SAMPLE_RATES, SIZE_PRESETS,
 };
+use crate::t;
 use crate::video::encoder::EncoderInfo;
 
 pub enum DialogOutcome {
@@ -79,10 +80,10 @@ impl FormatDialog {
         let mut outcome = DialogOutcome::None;
         let modal = egui::Modal::new(egui::Id::new("format-settings")).show(ctx, |ui| {
             ui.set_width(540.0);
-            ui.heading("Format settings");
+            ui.heading(t!(FMT_TITLE));
             ui.add_space(8.0);
 
-            group(ui, "File Type", |ui| {
+            group(ui, t!(FMT_GROUP_FILE_TYPE), |ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(150.0);
                     ui.radio_value(&mut self.draft.container, Container::Avi, "AVI");
@@ -91,11 +92,11 @@ impl FormatDialog {
                 });
             });
 
-            group(ui, "Video", |ui| {
+            group(ui, t!(BOX_VIDEO), |ui| {
                 self.video_rows(ui, encoders, source);
             });
 
-            group(ui, "Audio", |ui| {
+            group(ui, t!(BOX_AUDIO), |ui| {
                 self.audio_rows(ui);
             });
 
@@ -103,16 +104,16 @@ impl FormatDialog {
                 ui.label(RichText::new(n).color(WARN_YELLOW).small());
             }
             if recording {
-                ui.label(RichText::new("Settings cannot be changed while recording.").color(WARN_YELLOW).small());
+                ui.label(RichText::new(t!(FMT_LOCKED)).color(WARN_YELLOW).small());
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.hyperlink_to("[ Help ]", "https://github.com/catalingrigoriev285/openclip#format-settings");
+                ui.hyperlink_to(t!(FMT_HELP), "https://github.com/catalingrigoriev285/openclip#format-settings");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(100.0, 28.0))).clicked() {
+                    if ui.add(egui::Button::new(t!(CANCEL)).min_size(Vec2::new(100.0, 28.0))).clicked() {
                         outcome = DialogOutcome::Cancel;
                     }
-                    let ok = egui::Button::new(RichText::new("OK").color(TEXT_BRIGHT)).min_size(Vec2::new(100.0, 28.0));
+                    let ok = egui::Button::new(RichText::new(t!(OK)).color(TEXT_BRIGHT)).min_size(Vec2::new(100.0, 28.0));
                     if ui.add_enabled(!recording, ok).clicked() {
                         self.notes = self.draft.normalize(encoders);
                         outcome = DialogOutcome::Ok(self.draft.clone());
@@ -137,15 +138,15 @@ impl FormatDialog {
 
     fn video_rows(&mut self, ui: &mut egui::Ui, encoders: &[EncoderInfo], source: Option<(u32, u32)>) {
         let d = &mut self.draft;
-        row(ui, "Size", |ui| {
+        row(ui, t!(FMT_ROW_SIZE), |ui| {
             let is_percent = matches!(d.size, SizeMode::Percent { .. });
             egui::ComboBox::from_id_salt("fmt-size").width(230.0).selected_text(d.size.label()).show_ui(ui, |ui| {
-                ui.selectable_value(&mut d.size, SizeMode::Full, "Full Size");
-                ui.selectable_value(&mut d.size, SizeMode::Half, "Half Size");
+                ui.selectable_value(&mut d.size, SizeMode::Full, t!(FMT_FULL_SIZE));
+                ui.selectable_value(&mut d.size, SizeMode::Half, t!(FMT_HALF_SIZE));
                 for (w, h) in SIZE_PRESETS {
                     ui.selectable_value(&mut d.size, SizeMode::Preset { width: w, height: h }, format!("{w}×{h}"));
                 }
-                if ui.selectable_label(is_percent, "Custom (W% × H%)").clicked() && !is_percent {
+                if ui.selectable_label(is_percent, t!(FMT_CUSTOM_PERCENT)).clicked() && !is_percent {
                     d.size = SizeMode::Percent { x: 100, y: 100 };
                 }
             });
@@ -162,8 +163,8 @@ impl FormatDialog {
             });
         }
 
-        row(ui, "FPS", |ui| {
-            let label = if self.custom_fps { format!("Custom ({})", d.fps) } else { d.fps.to_string() };
+        row(ui, t!(FMT_ROW_FPS), |ui| {
+            let label = if self.custom_fps { t!(FMT_CUSTOM_FPS, d.fps) } else { d.fps.to_string() };
             egui::ComboBox::from_id_salt("fmt-fps").width(230.0).selected_text(label).show_ui(ui, |ui| {
                 for f in FPS_PRESETS {
                     if ui.selectable_label(!self.custom_fps && d.fps == f, f.to_string()).clicked() {
@@ -171,7 +172,7 @@ impl FormatDialog {
                         self.custom_fps = false;
                     }
                 }
-                if ui.selectable_label(self.custom_fps, "Custom…").clicked() {
+                if ui.selectable_label(self.custom_fps, t!(FMT_CUSTOM)).clicked() {
                     self.custom_fps = true;
                 }
             });
@@ -180,11 +181,11 @@ impl FormatDialog {
             }
         });
 
-        row(ui, "Codec", |ui| {
+        row(ui, t!(FMT_ROW_CODEC), |ui| {
             let current = d.video_codec.label(encoders);
             egui::ComboBox::from_id_salt("fmt-vcodec").width(230.0).selected_text(current).show_ui(ui, |ui| {
                 ui.selectable_value(&mut d.video_codec, VideoCodec::Auto, VideoCodec::Auto.label(encoders))
-                    .on_hover_text("Uses a GPU encoder when one is available, otherwise OpenH264");
+                    .on_hover_text(t!(FMT_AUTO_TIP));
                 ui.selectable_value(&mut d.video_codec, VideoCodec::OpenH264, VideoCodec::OpenH264.label(encoders));
                 for e in encoders {
                     let codec = e.codec();
@@ -195,46 +196,46 @@ impl FormatDialog {
                 }
                 if d.video_codec.needs_mf() && d.video_codec.info(encoders).is_none() {
                     ui.add_enabled(false, egui::Button::selectable(true, d.video_codec.label(encoders)))
-                        .on_disabled_hover_text("This encoder was not found on this system");
+                        .on_disabled_hover_text(t!(FMT_ENCODER_MISSING));
                 }
                 if encoders.is_empty() {
                     ui.label(
                         RichText::new(if FormatSettings::platform_has_mf() {
-                            "No Media Foundation encoders found"
+                            t!(FMT_NO_MF_ENCODERS)
                         } else {
-                            "Hardware encoders are only available on Windows"
+                            t!(FMT_MF_WINDOWS_ONLY)
                         })
                         .color(TEXT_DIM)
                         .small(),
                     );
                 }
             });
-            if ui.button("...").on_hover_text("Encoder details").clicked() {
+            if ui.button("...").on_hover_text(t!(FMT_ENCODER_DETAILS)).clicked() {
                 self.advanced = Some(Advanced::Codec);
             }
         });
 
-        row(ui, "Quality", |ui| {
+        row(ui, t!(FMT_ROW_QUALITY), |ui| {
             let label = match d.rate_control {
                 RateControl::Quality(q) => q.to_string(),
-                RateControl::ConstantBitrate { kbps } => format!("Custom bitrate ({kbps} kbps)"),
+                RateControl::ConstantBitrate { kbps } => t!(CBR_LABEL, kbps),
             };
             egui::ComboBox::from_id_salt("fmt-quality").width(230.0).selected_text(label).show_ui(ui, |ui| {
                 for q in QUALITY_STEPS {
                     let text = match q {
-                        100 => "100 (best)".to_string(),
-                        10 => "10 (smallest file)".to_string(),
+                        100 => t!(FMT_QUALITY_BEST).to_string(),
+                        10 => t!(FMT_QUALITY_SMALLEST).to_string(),
                         _ => q.to_string(),
                     };
                     ui.selectable_value(&mut d.rate_control, RateControl::Quality(q), text);
                 }
             });
-            if ui.button("...").on_hover_text("Bitrate and keyframe settings").clicked() {
+            if ui.button("...").on_hover_text(t!(FMT_BITRATE_TIP)).clicked() {
                 self.advanced = Some(Advanced::Quality);
             }
         });
 
-        row(ui, "Profile", |ui| {
+        row(ui, t!(FMT_ROW_PROFILE), |ui| {
             if d.video_codec.is_hevc() {
                 egui::ComboBox::from_id_salt("fmt-profile-hevc")
                     .width(230.0)
@@ -254,22 +255,19 @@ impl FormatDialog {
                         }
                     });
             }
-            ui.button("?").on_hover_text(
-                "Auto lets the encoder choose. Baseline plays everywhere but compresses worst; \
-                 High gives the best quality per bitrate on modern players.",
-            );
+            ui.button("?").on_hover_text(t!(FMT_PROFILE_HELP));
         });
     }
 
     fn audio_rows(&mut self, ui: &mut egui::Ui) {
         let d = &mut self.draft;
-        row(ui, "Codec", |ui| {
+        row(ui, t!(FMT_ROW_CODEC), |ui| {
             egui::ComboBox::from_id_salt("fmt-acodec").width(230.0).selected_text(d.audio_codec.label()).show_ui(ui, |ui| {
                 for c in AudioCodec::ALL {
                     let (available, why) = match c {
                         AudioCodec::Mp3 => (true, ""),
-                        AudioCodec::Aac => (FormatSettings::platform_has_mf(), "AAC needs Windows (Media Foundation)"),
-                        AudioCodec::Pcm => (d.container == Container::Avi, "PCM is only available in AVI"),
+                        AudioCodec::Aac => (FormatSettings::platform_has_mf(), t!(FMT_AAC_NEEDS_WINDOWS)),
+                        AudioCodec::Pcm => (d.container == Container::Avi, t!(FMT_PCM_AVI_ONLY)),
                     };
                     let resp = ui.add_enabled(available, egui::Button::selectable(d.audio_codec == c, c.label()));
                     if resp.clicked() {
@@ -284,7 +282,7 @@ impl FormatDialog {
                 }
             });
         });
-        row(ui, "Bitrate", |ui| {
+        row(ui, t!(FMT_ROW_BITRATE), |ui| {
             let allowed = d.audio_codec.allowed_bitrates();
             ui.add_enabled_ui(!allowed.is_empty(), |ui| {
                 let label = if allowed.is_empty() { "—".to_string() } else { d.audio_bitrate_kbps.to_string() };
@@ -296,14 +294,14 @@ impl FormatDialog {
             });
             ui.label("kbps");
         });
-        row(ui, "Channels", |ui| {
-            let label = if d.audio_channels == 1 { "Mono" } else { "Stereo" };
+        row(ui, t!(FMT_ROW_CHANNELS), |ui| {
+            let label = if d.audio_channels == 1 { t!(MONO) } else { t!(STEREO) };
             egui::ComboBox::from_id_salt("fmt-channels").width(230.0).selected_text(label).show_ui(ui, |ui| {
-                ui.selectable_value(&mut d.audio_channels, 1, "Mono");
-                ui.selectable_value(&mut d.audio_channels, 2, "Stereo");
+                ui.selectable_value(&mut d.audio_channels, 1, t!(MONO));
+                ui.selectable_value(&mut d.audio_channels, 2, t!(STEREO));
             });
         });
-        row(ui, "Frequency", |ui| {
+        row(ui, t!(FMT_ROW_FREQUENCY), |ui| {
             egui::ComboBox::from_id_salt("fmt-rate").width(230.0).selected_text(d.audio_sample_rate.to_string()).show_ui(ui, |ui| {
                 for r in SAMPLE_RATES {
                     ui.selectable_value(&mut d.audio_sample_rate, r, r.to_string());
@@ -319,16 +317,16 @@ impl FormatDialog {
             ui.set_width(420.0);
             match which {
                 Advanced::Quality => {
-                    ui.heading("Bitrate");
+                    ui.heading(t!(FMT_ROW_BITRATE));
                     ui.add_space(6.0);
                     let d = &mut self.draft;
                     let mut quality_mode = matches!(d.rate_control, RateControl::Quality(_));
-                    if ui.radio_value(&mut quality_mode, true, "Quality-based (bitrate derived from quality)").clicked()
+                    if ui.radio_value(&mut quality_mode, true, t!(FMT_QUALITY_MODE)).clicked()
                         && !matches!(d.rate_control, RateControl::Quality(_))
                     {
                         d.rate_control = RateControl::Quality(80);
                     }
-                    if ui.radio_value(&mut quality_mode, false, "Constant bitrate").clicked()
+                    if ui.radio_value(&mut quality_mode, false, t!(FMT_CBR_MODE)).clicked()
                         && !matches!(d.rate_control, RateControl::ConstantBitrate { .. })
                     {
                         let kbps = source.map(|(w, h)| d.target_bitrate_kbps(w, h)).unwrap_or(6000);
@@ -337,12 +335,12 @@ impl FormatDialog {
                     ui.add_space(4.0);
                     match &mut d.rate_control {
                         RateControl::Quality(q) => {
-                            row(ui, "Quality", |ui| {
+                            row(ui, t!(FMT_ROW_QUALITY), |ui| {
                                 ui.add(egui::Slider::new(q, 10..=100).step_by(10.0));
                             });
                         }
                         RateControl::ConstantBitrate { kbps } => {
-                            row(ui, "Bitrate", |ui| {
+                            row(ui, t!(FMT_ROW_BITRATE), |ui| {
                                 ui.add(egui::DragValue::new(kbps).range(200..=100_000).suffix(" kbps").speed(50));
                             });
                         }
@@ -350,39 +348,32 @@ impl FormatDialog {
                     if let Some((w, h)) = source {
                         let (ow, oh) = d.size.resolve(w, h);
                         ui.label(
-                            RichText::new(format!("≈ {} kbps at {ow}×{oh}, {} fps", d.target_bitrate_kbps(ow, oh), d.fps))
+                            RichText::new(t!(FMT_BITRATE_ESTIMATE, d.target_bitrate_kbps(ow, oh), ow, oh, d.fps))
                                 .color(TEXT_DIM)
                                 .small(),
                         );
                     }
-                    row(ui, "Keyframe every", |ui| {
+                    row(ui, t!(FMT_ROW_KEYFRAME), |ui| {
                         ui.add(egui::DragValue::new(&mut d.keyframe_interval_s).range(0.5..=10.0).suffix(" s").speed(0.1));
                     });
-                    ui.label(
-                        RichText::new(
-                            "Quality mode lets the encoder vary the bitrate with the content (hardware encoders \
-                             use their own quality rate control). Constant bitrate gives predictable file sizes.",
-                        )
-                        .color(TEXT_DIM)
-                        .small(),
-                    );
+                    ui.label(RichText::new(t!(FMT_RATE_CONTROL_NOTE)).color(TEXT_DIM).small());
                 }
                 Advanced::Codec => {
-                    ui.heading("Encoder details");
+                    ui.heading(t!(FMT_ENCODER_DETAILS));
                     ui.add_space(6.0);
                     let codec = self.draft.video_codec.clone();
                     match codec.info(encoders) {
                         Some(info) => {
-                            row(ui, "Encoder", |ui| {
+                            row(ui, t!(FMT_ROW_ENCODER), |ui| {
                                 ui.label(RichText::new(&info.label).color(TEXT_BRIGHT));
                             });
-                            row(ui, "Vendor", |ui| {
+                            row(ui, t!(FMT_ROW_VENDOR), |ui| {
                                 ui.label(info.vendor.label());
                             });
-                            row(ui, "Hardware", |ui| {
-                                ui.label(if info.hardware { "yes (GPU)" } else { "no (CPU)" });
+                            row(ui, t!(FMT_ROW_HARDWARE), |ui| {
+                                ui.label(if info.hardware { t!(YES_GPU) } else { t!(NO_CPU) });
                             });
-                            row(ui, "Transform", |ui| {
+                            row(ui, t!(FMT_ROW_TRANSFORM), |ui| {
                                 ui.label(RichText::new(&info.friendly_name).small());
                             });
                             row(ui, "CLSID", |ui| {
@@ -390,15 +381,14 @@ impl FormatDialog {
                             });
                         }
                         None => {
-                            row(ui, "Encoder", |ui| {
+                            row(ui, t!(FMT_ROW_ENCODER), |ui| {
                                 ui.label(RichText::new(codec.generic_label()).color(TEXT_BRIGHT));
                             });
-                            row(ui, "Details", |ui| {
+                            row(ui, t!(FMT_ROW_DETAILS), |ui| {
                                 ui.label(if codec == VideoCodec::OpenH264 {
-                                    "Bundled OpenH264 (Cisco), software encoder on the CPU. Works everywhere; \
-                                     use a hardware encoder for high resolutions and frame rates."
+                                    t!(FMT_OPENH264_DETAILS)
                                 } else {
-                                    "Not found on this system."
+                                    t!(FMT_NOT_FOUND)
                                 });
                             });
                         }
@@ -406,8 +396,8 @@ impl FormatDialog {
                     ui.add_space(6.0);
                     if FormatSettings::platform_has_mf() {
                         let found = encoders.len();
-                        ui.label(RichText::new(format!("{found} Media Foundation encoder(s) found.")).color(TEXT_DIM).small());
-                        if ui.button("Rescan encoders").clicked() {
+                        ui.label(RichText::new(t!(FMT_MF_COUNT, found)).color(TEXT_DIM).small());
+                        if ui.button(t!(FMT_RESCAN)).clicked() {
                             self.rescan = true;
                         }
                     }
@@ -415,7 +405,7 @@ impl FormatDialog {
             }
             ui.add_space(10.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(egui::Button::new("Close").min_size(Vec2::new(90.0, 26.0))).clicked() {
+                if ui.add(egui::Button::new(t!(CLOSE)).min_size(Vec2::new(90.0, 26.0))).clicked() {
                     close = true;
                 }
             });
