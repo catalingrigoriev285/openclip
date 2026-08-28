@@ -1,5 +1,5 @@
 //! Video encoder abstraction: OpenH264 (bundled, CPU) and, on Windows, Media
-//! Foundation transforms (hardware H.264 / HEVC and Microsoft's software H.264).
+//! Foundation transforms (hardware H.264 / HEVC and software encoders).
 //!
 //! Encoders produce Annex-B access units (start codes, parameter-set NALs kept
 //! in-band on keyframes). Container writers convert as they need: the MP4 muxer
@@ -67,7 +67,9 @@ impl FrameInput<'_> {
     }
 }
 
-pub trait VideoEncoder: Send {
+/// Encoders are created and used on one thread (the encode thread): Media
+/// Foundation objects are not `Send`.
+pub trait VideoEncoder {
     fn input_layout(&self) -> InputLayout;
     /// Whether the output bitstream is HEVC (else H.264).
     fn is_hevc(&self) -> bool;
@@ -140,15 +142,22 @@ impl Vendor {
 /// An encoder found on this machine (Media Foundation on Windows).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderInfo {
-    pub codec: VideoCodec,
+    pub hevc: bool,
     /// Short user-facing label, e.g. "H264 (NVIDIA® NVENC)".
     pub label: String,
-    /// The transform's own name, e.g. "NVIDIA H264 Encoder MFT".
+    /// The transform's own name, e.g. "NVIDIA H.264 Encoder MFT".
     pub friendly_name: String,
     pub vendor: Vendor,
     pub hardware: bool,
-    /// Transform CLSID as a 128-bit integer (platform-neutral storage).
-    pub clsid: u128,
+    /// Stable identity: the transform CLSID as 32 lowercase hex digits, or
+    /// `name:<hardware url>` for transforms registered without a CLSID.
+    pub clsid: String,
+}
+
+impl EncoderInfo {
+    pub fn codec(&self) -> VideoCodec {
+        VideoCodec::Mf { hevc: self.hevc, clsid: self.clsid.clone() }
+    }
 }
 
 /// Encoders available on this machine besides the bundled OpenH264. Empty on
@@ -177,29 +186,47 @@ pub fn refresh_encoders() -> Vec<EncoderInfo> {
     }
 }
 
-/// Creates the requested encoder, falling back to OpenH264 when a Media
-/// Foundation encoder is unavailable or refuses the configuration. The note
-/// explains the fallback for the user.
+/// Creates the requested encoder. When a Media Foundation encoder is missing
+/// or refuses the configuration, other encoders of the same family are tried
+/// (hardware first), then OpenH264. The note explains any substitution.
 pub fn create_video_encoder(req: &EncoderRequest) -> Result<(Box<dyn VideoEncoder>, Option<String>)> {
-    if req.codec.needs_mf() {
-        #[cfg(windows)]
-        {
-            match super::mf::create_encoder(req) {
-                Ok(enc) => return Ok((enc, None)),
+    let VideoCodec::Mf { hevc, clsid } = &req.codec else {
+        return Ok((Box::new(super::openh264::H264Encoder::new(req)?), None));
+    };
+    let wanted = req.codec.family();
+    let mut failures: Vec<String> = Vec::new();
+    #[cfg(windows)]
+    {
+        let list = super::mf::available_encoders();
+        let requested = list.iter().find(|e| &e.clsid == clsid);
+        let mut candidates: Vec<&EncoderInfo> = requested.into_iter().collect();
+        let mut others: Vec<&EncoderInfo> = list.iter().filter(|e| e.hevc == *hevc && &e.clsid != clsid).collect();
+        others.sort_by_key(|e| !e.hardware);
+        candidates.extend(others);
+        if requested.is_none() {
+            failures.push(format!("the selected {wanted} encoder was not found"));
+        }
+        for info in candidates {
+            match super::mf::video::MfVideoEncoder::new(info, req) {
+                Ok(enc) => {
+                    let note = (Some(&info.clsid) != Some(clsid)).then(|| {
+                        format!("{}; using {}", failures.join("; "), info.label)
+                    });
+                    return Ok((Box::new(enc), note));
+                }
                 Err(e) => {
-                    log::warn!("{}: {e:#}; falling back to OpenH264", req.codec.generic_label());
-                    let enc = super::openh264::H264Encoder::new(req)?;
-                    let note = format!("{} unavailable ({e}); recorded with OpenH264", req.codec.generic_label());
-                    return Ok((Box::new(enc), Some(note)));
+                    log::warn!("{} failed: {e:#}", info.label);
+                    failures.push(format!("{} failed ({e})", info.label));
                 }
             }
         }
-        #[cfg(not(windows))]
-        {
-            let enc = super::openh264::H264Encoder::new(req)?;
-            let note = format!("{} needs Windows; recorded with OpenH264", req.codec.generic_label());
-            return Ok((Box::new(enc), Some(note)));
-        }
     }
-    Ok((Box::new(super::openh264::H264Encoder::new(req)?), None))
+    #[cfg(not(windows))]
+    {
+        let _ = (hevc, clsid);
+        failures.push(format!("{wanted} hardware encoding needs Windows"));
+    }
+    let enc = super::openh264::H264Encoder::new(req)?;
+    let note = format!("{}; recorded H.264 with OpenH264", failures.join("; "));
+    Ok((Box::new(enc), Some(note)))
 }

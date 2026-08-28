@@ -499,7 +499,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         for enc in encoded {
             st.push(&enc, &stats)?;
         }
-        if frames_in % preview_every == 0 && !is_heartbeat {
+        if frames_in.is_multiple_of(preview_every) && !is_heartbeat {
             *preview.image.lock().unwrap() = Some(make_preview(shown, PREVIEW_MAX_SIDE));
             if let Some(cb) = &on_preview {
                 cb();
@@ -582,7 +582,7 @@ impl EncodeState {
             return Err(anyhow!("frame too small to encode: {}x{}", src.0, src.1));
         }
         let req = EncoderRequest {
-            codec: fmt.video_codec,
+            codec: fmt.video_codec.clone(),
             width: dims.0,
             height: dims.1,
             fps: config.fps(),
@@ -752,7 +752,7 @@ fn spawn_audio_thread(args: AudioArgs) -> Result<(JoinHandle<Result<()>>, AudioT
                 let input: &[f32] = if channels == 1 {
                     // The mixer always produces stereo; fold it down.
                     mono.clear();
-                    mono.extend(pcm.chunks_exact(2).map(|lr| (lr[0] + lr[1]) * 0.5));
+                    mono.extend(pcm.as_chunks::<2>().0.iter().map(|[l, r]| (l + r) * 0.5));
                     &mono
                 } else {
                     &pcm

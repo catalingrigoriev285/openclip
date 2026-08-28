@@ -80,8 +80,8 @@ mod tests {
     fn scales_to_target_size() {
         let (w, h) = (64, 48);
         let mut data = vec![0u8; (w * h * 4) as usize];
-        for px in data.chunks_exact_mut(4) {
-            px.copy_from_slice(&[10, 20, 30, 255]);
+        for px in data.as_chunks_mut::<4>().0 {
+            *px = [10, 20, 30, 255];
         }
         let frame = RawFrame { data, width: w, height: h, stride: w * 4, format: PixelFormat::Bgra, pts: Duration::ZERO, mouse: None };
         let mut s = Scaler::new((w, h), (32, 24));

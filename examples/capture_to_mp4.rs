@@ -3,7 +3,7 @@
 //!
 //! Usage: cargo run --release --example capture_to_mp4 [-- SECONDS OUT.mp4 [flags]]
 //! Flags: --half --mic --no-audio --fx --region X,Y,W,H --window TITLE --pause-at S --resume-at S
-//!        --codec openh264|h264-hw|h264-sw|hevc  --audio mp3|aac|pcm  --avi  --fps N  --quality Q
+//!        --codec openh264|h264-hw|h264-sw|hevc|hevc-sw|<label substring>  --audio mp3|aac|pcm  --avi  --fps N  --quality Q
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use openclip::capture::monitors::{list_monitors, list_windows};
 use openclip::capture::{Rect, Source};
 use openclip::pipeline::{RecordConfig, Recorder};
-use openclip::settings::{AudioCodec, Container, FormatSettings, RateControl, SizeMode, VideoCodec};
+use openclip::settings::{pick_encoder, AudioCodec, Container, FormatSettings, RateControl, SizeMode, VideoCodec};
 use openclip::video::available_encoders;
 use openclip::video::mouse_fx::MouseFx;
 
@@ -36,11 +36,11 @@ fn main() -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--avi") {
         format.container = Container::Avi;
     }
-    format.video_codec = match flag("--codec").map(|s| s.as_str()) {
-        Some("h264-hw") => VideoCodec::MfH264Hardware,
-        Some("h264-sw") => VideoCodec::MfH264Software,
-        Some("hevc") => VideoCodec::MfHevcHardware,
-        _ => VideoCodec::OpenH264,
+    let encoders = available_encoders();
+    format.video_codec = match flag("--codec") {
+        Some(name) => pick_encoder(name, &encoders)
+            .ok_or_else(|| anyhow::anyhow!("no encoder matches '{name}' (see `cargo run --example list_encoders`)"))?,
+        None => VideoCodec::OpenH264,
     };
     format.audio_codec = match flag("--audio").map(|s| s.as_str()) {
         Some("aac") => AudioCodec::Aac,
@@ -53,7 +53,6 @@ fn main() -> anyhow::Result<()> {
     if let Some(q) = flag("--quality").and_then(|s| s.parse().ok()) {
         format.rate_control = RateControl::Quality(q);
     }
-    let encoders = available_encoders();
     for n in format.normalize(&encoders) {
         println!("note: {n}");
     }

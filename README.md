@@ -7,8 +7,9 @@ A small, self-contained screen recorder written in Rust with an [egui](https://g
 - Records a **whole monitor**, a **single window**, or a **dragged region**
 - Captures **system audio** (what you hear) and/or a **microphone**
 - **Live preview** of what is being recorded
-- Writes a standard **MP4** (H.264 video + MP3 audio) that plays in VLC, Windows Media Player / Movies & TV, Chrome/Edge and ffmpeg-based tools
-- **No external runtime dependencies**: no ffmpeg, no system codecs. The H.264 encoder ([OpenH264](https://www.openh264.org/)) and the MP3 encoder ([LAME](https://lame.sourceforge.io/)) are compiled from bundled sources at build time, and the MP4 muxer is in-house.
+- Writes standard **MP4** or **AVI** files that play in VLC, Windows Media Player / Movies & TV, Chrome/Edge and ffmpeg-based tools
+- **GPU encoding** on Windows: H.264 and H.265/HEVC through NVIDIA NVENC, Intel Quick Sync or AMD AMF (Windows Media Foundation), plus Microsoft's software encoders; AAC audio the same way
+- **No external runtime dependencies**: no ffmpeg, no codec packs. The bundled H.264 encoder ([OpenH264](https://www.openh264.org/)) and MP3 encoder ([LAME](https://lame.sourceforge.io/)) are compiled from source at build time, hardware/AAC encoders come from Media Foundation (part of Windows), and the MP4 and AVI muxers are in-house.
 
 ## Building
 
@@ -33,11 +34,25 @@ The window is laid out like a classic recorder (about 800×640): a toolbar on to
 
 1. **Toolbar** – pick a recording mode (**Region** opens the on-screen selector: drag a rectangle, Esc cancels; **Monitor**; **Window**), toggle **system audio**, **microphone** and **cursor**, then press the round **REC** button. **⏸** pauses and resumes (paused time is cut out of the file, video and audio stay in sync); the camera button saves a PNG snapshot.
 2. **Home** – a file browser for your output folder with **Videos / Images / Audios** tabs (newest first, with sizes; double-click or **Play** opens the file, **Folder** reveals it, **Delete** asks for confirmation). The **Preview** tab shows a live view of exactly what will be recorded — cursor and mouse effects included — together with the monitor/window/region selector; the preview capture only runs while that tab is open. The status strip's **Change…** button jumps there.
-3. **Video** has three tabs: **Record** (cursor / click / highlight toggles, size, and the format summary boxes), **Format** (codec, frame rate, bitrate, size; system audio, microphone and device) and **Mouse** (mouse effects, below). **General** sets the output folder and file-name prefix.
-4. **Mini bar** – the ▭ toolbar button collapses the window into a small always-on-top bar (Camtasia-style) with the recording area, the input toggles, pause / REC and a restore button; drag it by its background to move it out of the recorded area.
-5. Press **REC** again (it turns into a stop button) to finish. Files are written as `<prefix>-YYYYMMDD-HHMMSS.mp4` into the chosen folder (defaults to `~/Videos`).
+3. **Video** has two tabs: **Record** (cursor / click / highlight toggles, system audio, microphone and device, and the format summary boxes with a **Settings** button that opens the Format settings dialog below) and **Mouse** (mouse effects, below). **General** sets the output folder and file-name prefix.
+4. **Mini bar** – the ▭ toolbar button collapses the window into a small always-on-top bar (Camtasia-style) with the recording area, the input toggles, a ⚙ button for the Format settings, pause / REC and a restore button; drag it by its background to move it out of the recorded area.
+5. Press **REC** again (it turns into a stop button) to finish. Files are written as `<prefix>-YYYYMMDD-HHMMSS.mp4` (or `.avi`) into the chosen folder (defaults to `~/Videos`).
 
-"Half size" halves both dimensions, which is the easiest way to keep up on slow machines or 4K displays. The status strip shows elapsed (recorded) time, encoded fps, dropped frames and file size while recording. Frames are dropped (never desynchronised) when the encoder cannot keep up, and the encoder may skip frames to hold the bitrate; each frame carries its real capture timestamp, so playback timing stays correct either way. When the screen is static the last frame is re-encoded at the target rate so the video keeps a steady cadence.
+The status strip shows elapsed (recorded) time, encoded fps, dropped frames and file size while recording, plus a note when an encoder had to be substituted. Frames are dropped (never desynchronised) when the encoder cannot keep up, and the encoder may skip frames to hold the bitrate; each frame carries its real capture timestamp, so playback timing stays correct either way. When the screen is static the last frame is re-encoded at the target rate so the video keeps a steady cadence. All settings are remembered between runs (`%APPDATA%\openclip\settings.json` on Windows, `~/.config/openclip/` on Linux, `~/Library/Application Support/openclip/` on macOS).
+
+### Format settings
+
+The **Settings** button on the Video → Record page (and the ⚙ button on the mini bar) opens a dialog laid out like classic recorders:
+
+- **File Type** – **MP4** or **AVI**. AVI is the crash-tolerant, "plays anywhere" option and the only one that can hold PCM audio; HEVC is written to MP4 only.
+- **Size** – Full Size, Half Size, a preset (1920×1080, 1280×720, 854×480, 640×360 — fitted inside, aspect kept, never upscaled) or a custom **W% × H%**.
+- **FPS** – 10 … 120 or a custom value.
+- **Codec** – `H264 (OpenH264, CPU)` always; on Windows also every Media Foundation encoder found on the machine, e.g. `H264 (NVIDIA® NVENC)`, `H264 (Intel® Quick Sync)`, `H264 (AMD AMF/VCE)`, `H264 (Microsoft software)`, `H265/HEVC (NVIDIA® NVENC)`, … The **…** button shows the encoder's details and can rescan. If the chosen encoder cannot start (driver gone, unsupported size), the next encoder of the same family is used, then OpenH264 — the status strip tells you.
+- **Quality** – 100 … 10; the bitrate is derived from the quality, the output size and the frame rate (≈ 10 Mbps for 1080p30 at 80). The **…** button switches to a constant bitrate and sets the keyframe interval.
+- **Profile** – Auto / Baseline / Main / High for H.264, Auto / Main for HEVC.
+- **Audio** – **MP3** (bundled LAME), **AAC** (Windows Media Foundation) or **PCM** (AVI only); bitrate (MP3 64–320 kbps, AAC 96/128/160/192 kbps), Mono/Stereo, 44100 or 48000 Hz.
+
+On laptops with hybrid graphics the executable asks Windows to run it on the discrete GPU (it exports `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance`), which is what lets the NVIDIA / AMD encoders activate. `cargo run --example list_encoders` prints every encoder Media Foundation offers and whether it activates.
 
 ### Mouse effects
 
@@ -54,31 +69,36 @@ Effects are painted onto the captured frames themselves (in the encode thread, a
 
 ```sh
 cargo run --release --example capture_to_mp4 -- 10 out.mp4      # record the primary monitor for 10 s
-                                    # flags: --half --mic --no-audio --fx --region X,Y,W,H --window TITLE --pause-at S --resume-at S
-cargo run --release --example bench_encode -- 1920 1080 5       # encoder throughput on synthetic content
+    # flags: --half --mic --no-audio --fx --region X,Y,W,H --window TITLE --pause-at S --resume-at S
+    #        --codec openh264|h264-hw|h264-sw|hevc|nvenc|quick|… --audio mp3|aac|pcm --avi --fps N --quality Q
+cargo run --release --example bench_encode -- 1920 1080 5 out.mp4 --codec nvenc   # encoder throughput on synthetic content
+cargo run --example list_encoders                                 # what Media Foundation offers on this machine
 ```
 
 ## How it works
 
 ```
-capture backend ──RawFrame──▶ encode thread ──▶ OpenH264 ──▶ MP4 muxer ──▶ file
-                                   ▲                             ▲
-cpal (mic / loopback) ──▶ mixer ───┴──▶ LAME MP3 ────────────────┘
+capture backend ──RawFrame──▶ scale ──▶ I420 / NV12 ──▶ OpenH264 | Media Foundation (NVENC / QSV / AMF / software) ──▶ MP4 | AVI muxer ──▶ file
+                                                                                                                             ▲
+cpal (mic / loopback) ──▶ mixer ──▶ LAME MP3 | MF AAC | PCM ────────────────────────────────────────────────────────────────┘
 ```
 
 - **Capture** (`src/capture`): Windows uses Windows.Graphics.Capture via `windows-capture` (BGRA frames, GPU-side crop for regions). macOS and Linux/X11 use `xcap`'s video recorder for monitors and screenshot polling for windows. Monitor/window enumeration and the region-picker backdrop use `xcap` everywhere.
-- **Video** (`src/video`): BGRA/RGBA → I420 with the SIMD `yuv` crate, then OpenH264 in screen-content real-time mode. Annex-B output is converted to AVCC length-prefixed samples; SPS/PPS go into `avcC`.
-- **Audio** (`src/audio`): each cpal stream pushes timestamped chunks; the mixer places them on the recording timeline (inserting silence for gaps such as WASAPI loopback going quiet), resamples to 48 kHz stereo, and feeds LAME. An MP3 frame splitter makes each MP4 sample exactly one 1152-sample frame.
-- **Mux** (`src/mux`): a streaming, non-fragmented MP4 writer (`ftyp` / 64-bit `mdat` / `moov`) with per-sample durations from real timestamps, keyframe table, 0.5 s interleaved chunks and `co64` for files over 4 GiB. The integration test round-trips output through the independent `mp4-atom` parser.
+- **Video** (`src/video`): frames are scaled (`fast_image_resize`) to the chosen size, converted to I420 or NV12 with the SIMD `yuv` crate and encoded by OpenH264 (screen-content real-time mode) or by a Media Foundation transform (`src/video/mf`: enumeration, a sync/async transform session, NV12 upload from system memory, no B-frames so presentation order equals decode order). Encoders hand out Annex-B; parameter sets are harvested from the first keyframe.
+- **Audio** (`src/audio`): each cpal stream pushes timestamped chunks; the mixer places them on the recording timeline (inserting silence for gaps such as WASAPI loopback going quiet), resamples to the chosen rate and feeds the encoder: LAME (one 1152-sample MP3 frame per container sample), the Media Foundation AAC encoder (1024-sample access units, AudioSpecificConfig from the transform) or 16-bit PCM.
+- **Mux** (`src/mux`): a streaming, non-fragmented MP4 writer (`ftyp` / 64-bit `mdat` / `moov`, `avc1` or `hvc1`, `esds` for MP3/AAC) with per-sample durations from real timestamps, keyframe table, 0.5 s interleaved chunks and `co64` for files over 4 GiB; and an OpenDML AVI writer (`hdrl` with super-indexes, ≤ 1 GiB `RIFF` chunks with `AVIX` continuations, standard `ix##` indexes, legacy `idx1`, empty chunks for dropped frame slots). Integration tests round-trip both through independent readers.
+- **Settings** (`src/settings.rs`): the format settings, output folder, prefix, input toggles and mouse effects, saved as JSON.
 
 ## Limitations (v1)
 
 - **Wayland** is not supported (xcap limitation); use an X11 session.
 - **Window capture on macOS/Linux** polls screenshots and is slower than monitor capture; on Windows it is native.
 - **System audio on Linux** has no loopback API in cpal; select a PulseAudio/PipeWire monitor source as the input device instead.
+- **Hardware encoders, HEVC and AAC are Windows-only** (Media Foundation). macOS and Linux record with OpenH264 + MP3/PCM. HEVC is written to MP4 only.
+- Microsoft's **DX12 encoder** transforms are listed by Windows but need a D3D12 device manager; they are skipped during enumeration.
 - If a captured window is **resized** mid-recording, frames of the new size are skipped (the encoder keeps the original dimensions).
-- Without `nasm`, OpenH264 manages roughly 25–30 fps at 1080p on high-entropy content on a modern desktop CPU; typical desktop content is much cheaper. Use "Half resolution" or a lower frame rate if you see drops.
+- Without `nasm`, OpenH264 manages roughly 25–30 fps at 1080p on high-entropy content on a modern desktop CPU; typical desktop content is much cheaper. Use a hardware encoder, Half Size or a lower frame rate if you see drops.
 
 ## Licensing notes
 
-The code is Apache-2.0. Bundled third-party encoders: OpenH264 (BSD-2-Clause) and LAME (LGPL-2.1+). UI icons are Font Awesome Free (SIL OFL 1.1 font, CC BY 4.0 icons — `assets/fonts/FONT-AWESOME-LICENSE.txt`). Note that Cisco's MPEG-LA H.264 patent coverage applies only to the binary they distribute, not to source builds like this one; whether that matters depends on your jurisdiction and use.
+The code is Apache-2.0. Bundled third-party encoders: OpenH264 (BSD-2-Clause) and LAME (LGPL-2.1+). UI icons are Font Awesome Free (SIL OFL 1.1 font, CC BY 4.0 icons — `assets/fonts/FONT-AWESOME-LICENSE.txt`). Note that Cisco's MPEG-LA H.264 patent coverage applies only to the binary they distribute, not to source builds like this one; whether that matters depends on your jurisdiction and use. Media Foundation encoders are provided by Windows / your GPU driver under their own terms.

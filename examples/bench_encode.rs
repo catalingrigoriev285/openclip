@@ -1,7 +1,8 @@
 //! Encodes a synthetic moving-gradient sequence to measure encoder throughput
 //! and produce a test MP4 (video + 440 Hz tone that beeps on white flashes).
 //!
-//! Usage: cargo run --release --example bench_encode [-- WIDTH HEIGHT SECONDS OUT.mp4 [--codec openh264|h264-hw|h264-sw|hevc]]
+//! Usage: cargo run --release --example bench_encode [-- WIDTH HEIGHT SECONDS OUT.mp4 [--codec NAME]]
+//! NAME: openh264 | h264-hw | h264-sw | hevc | hevc-sw | a label substring (nvenc, quick, dx12 …)
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -9,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use openclip::audio::{AudioEncoder, Mp3Encoder};
 use openclip::mux::{AudioTrackConfig, Mp4Writer, VideoCodecConfig, VideoTrackConfig};
-use openclip::settings::VideoCodec;
-use openclip::video::{create_video_encoder, Converter, EncoderRequest, PixelFormat, RawFrame};
+use openclip::settings::{pick_encoder, VideoCodec};
+use openclip::video::{available_encoders, create_video_encoder, Converter, EncoderRequest, PixelFormat, RawFrame};
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -19,11 +20,10 @@ fn main() -> anyhow::Result<()> {
     let height: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1080);
     let seconds: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
     let out = args.get(4).cloned().unwrap_or_else(|| "bench.mp4".to_string());
-    let codec = match args.iter().position(|a| a == "--codec").and_then(|i| args.get(i + 1)).map(|s| s.as_str()) {
-        Some("h264-hw") => VideoCodec::MfH264Hardware,
-        Some("h264-sw") => VideoCodec::MfH264Software,
-        Some("hevc") => VideoCodec::MfHevcHardware,
-        _ => VideoCodec::OpenH264,
+    let codec = match args.iter().position(|a| a == "--codec").and_then(|i| args.get(i + 1)) {
+        Some(name) => pick_encoder(name, &available_encoders())
+            .ok_or_else(|| anyhow::anyhow!("no encoder matches '{name}' (see `cargo run --example list_encoders`)"))?,
+        None => VideoCodec::OpenH264,
     };
     let fps = 30u32;
     let sample_rate = 48_000u32;
@@ -140,9 +140,9 @@ fn fill_gradient(frame: &mut RawFrame, t: f32, flash: bool) {
     let shift = (t * 200.0) as usize;
     for y in 0..h {
         let row = &mut frame.data[y * frame.stride as usize..][..w * 4];
-        for (x, px) in row.chunks_exact_mut(4).enumerate() {
+        for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             if flash {
-                px.copy_from_slice(&[255, 255, 255, 255]);
+                *px = [255, 255, 255, 255];
                 continue;
             }
             let xx = (x + shift) % w;

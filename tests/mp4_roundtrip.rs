@@ -87,7 +87,7 @@ fn build(with_audio: bool) -> Built {
     let mut audio_samples = 0;
     let mut pcm = Vec::new();
     for i in 0..FRAMES {
-        for (n, px) in frame.data.chunks_exact_mut(4).enumerate() {
+        for (n, px) in frame.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let x = (n as u32 % W + i * 3) % W;
             px[0] = (x * 255 / W) as u8;
             px[1] = ((n as u32 / W) * 255 / H) as u8;
@@ -297,6 +297,11 @@ fn find_box<'a>(bytes: &'a [u8], fourcc: &[u8; 4]) -> Option<&'a [u8]> {
     let pos = bytes.windows(4).position(|w| w == fourcc)?;
     let start = pos - 4;
     let size = u32::from_be_bytes(bytes[start..start + 4].try_into().unwrap()) as usize;
+    if size == 1 {
+        // 64-bit largesize (used by mdat).
+        let large = u64::from_be_bytes(bytes[start + 8..start + 16].try_into().unwrap()) as usize;
+        return Some(&bytes[start + 16..start + large]);
+    }
     Some(&bytes[start + 8..start + size])
 }
 
@@ -371,9 +376,7 @@ fn hevc_sample_entry() {
     assert_eq!(count, 5);
     let first_size = u32::from_be_bytes(stsz[12..16].try_into().unwrap()) as usize;
     assert_eq!(first_size, 4 + idr.len(), "keyframe sample holds only the IDR NAL");
-    let mdat = find_box(&bytes, b"mdat").unwrap();
-    // 64-bit mdat: payload begins after the 8-byte largesize.
-    let payload = &mdat[8..];
+    let payload = find_box(&bytes, b"mdat").unwrap();
     assert_eq!(&payload[..4], &(idr.len() as u32).to_be_bytes());
     assert_eq!(&payload[4..4 + idr.len()], &idr[..]);
     assert_eq!(&payload[4 + idr.len()..8 + idr.len()], &(slice.len() as u32).to_be_bytes());

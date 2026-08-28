@@ -33,50 +33,67 @@ impl Container {
     }
 }
 
-/// What the user picked; the concrete encoder is resolved when recording starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+/// The video encoder to use. Media Foundation encoders are identified by the
+/// transform CLSID (32 hex digits) so a specific GPU's encoder can be chosen.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum VideoCodec {
     /// Bundled OpenH264 (CPU, every platform).
     #[default]
     OpenH264,
-    /// H.264 through a hardware Media Foundation encoder (NVENC / AMF / Quick Sync).
-    MfH264Hardware,
-    /// Microsoft's software H.264 Media Foundation encoder.
-    MfH264Software,
-    /// H.265 / HEVC through a hardware Media Foundation encoder.
-    MfHevcHardware,
+    /// A Windows Media Foundation transform (hardware NVENC / AMF / Quick Sync /
+    /// DX12, or a software encoder).
+    Mf { hevc: bool, clsid: String },
 }
 
 impl VideoCodec {
-    pub const ALL: [VideoCodec; 4] =
-        [VideoCodec::OpenH264, VideoCodec::MfH264Hardware, VideoCodec::MfH264Software, VideoCodec::MfHevcHardware];
-
-    pub fn is_hevc(self) -> bool {
-        matches!(self, VideoCodec::MfHevcHardware)
+    pub fn is_hevc(&self) -> bool {
+        matches!(self, VideoCodec::Mf { hevc: true, .. })
     }
 
     /// Whether this codec needs Windows Media Foundation.
-    pub fn needs_mf(self) -> bool {
-        !matches!(self, VideoCodec::OpenH264)
+    pub fn needs_mf(&self) -> bool {
+        matches!(self, VideoCodec::Mf { .. })
+    }
+
+    pub fn family(&self) -> &'static str {
+        if self.is_hevc() { "H265/HEVC" } else { "H264" }
+    }
+
+    /// The enumerated encoder behind this choice, if present on this machine.
+    pub fn info<'a>(&self, available: &'a [EncoderInfo]) -> Option<&'a EncoderInfo> {
+        match self {
+            VideoCodec::OpenH264 => None,
+            VideoCodec::Mf { clsid, .. } => available.iter().find(|e| &e.clsid == clsid),
+        }
     }
 
     /// Label used when no enumerated encoder describes this codec better.
-    pub fn generic_label(self) -> &'static str {
+    pub fn generic_label(&self) -> String {
         match self {
-            VideoCodec::OpenH264 => "H264 (OpenH264, CPU)",
-            VideoCodec::MfH264Hardware => "H264 (GPU hardware encoder)",
-            VideoCodec::MfH264Software => "H264 (Microsoft software)",
-            VideoCodec::MfHevcHardware => "H265/HEVC (GPU hardware encoder)",
+            VideoCodec::OpenH264 => "H264 (OpenH264, CPU)".into(),
+            VideoCodec::Mf { .. } => format!("{} (Media Foundation encoder)", self.family()),
         }
     }
 
     /// Display label, preferring the enumerated encoder's vendor-specific name.
-    pub fn label(self, available: &[EncoderInfo]) -> String {
-        available
-            .iter()
-            .find(|e| e.codec == self)
-            .map(|e| e.label.clone())
-            .unwrap_or_else(|| self.generic_label().to_string())
+    pub fn label(&self, available: &[EncoderInfo]) -> String {
+        self.info(available).map(|e| e.label.clone()).unwrap_or_else(|| self.generic_label())
+    }
+}
+
+/// Resolves a command-line style encoder choice: `openh264`, `h264-hw`,
+/// `h264-sw`, `hevc`, `hevc-sw`, a substring of an encoder label (`nvenc`,
+/// `quick`, `dx12`, …) or a CLSID.
+pub fn pick_encoder(query: &str, available: &[EncoderInfo]) -> Option<VideoCodec> {
+    let q = query.trim().to_ascii_lowercase();
+    let find = |f: &dyn Fn(&EncoderInfo) -> bool| available.iter().find(|e| f(e)).map(EncoderInfo::codec);
+    match q.as_str() {
+        "openh264" | "cpu" => Some(VideoCodec::OpenH264),
+        "h264-hw" | "h264" => find(&|e| !e.hevc && e.hardware),
+        "h264-sw" => find(&|e| !e.hevc && !e.hardware),
+        "hevc" | "hevc-hw" | "h265" => find(&|e| e.hevc && e.hardware),
+        "hevc-sw" | "h265-sw" => find(&|e| e.hevc && !e.hardware),
+        _ => find(&|e| e.clsid == q || e.label.to_ascii_lowercase().contains(&q)),
     }
 }
 
@@ -266,7 +283,6 @@ impl FormatSettings {
     /// Applies the compatibility rules and returns a note for every change made.
     pub fn normalize(&mut self, available: &[EncoderInfo]) -> Vec<String> {
         let mut notes = Vec::new();
-        let has = |c: VideoCodec| available.iter().any(|e| e.codec == c);
 
         if self.audio_codec == AudioCodec::Pcm && self.container == Container::Mp4 {
             self.audio_codec = if Self::platform_has_mf() { AudioCodec::Aac } else { AudioCodec::Mp3 };
@@ -277,13 +293,20 @@ impl FormatSettings {
             notes.push("AAC needs Windows Media Foundation; using MP3.".into());
         }
         if self.video_codec.is_hevc() && self.container == Container::Avi {
-            self.video_codec = if has(VideoCodec::MfH264Hardware) { VideoCodec::MfH264Hardware } else { VideoCodec::OpenH264 };
+            // Prefer a hardware H.264 encoder, then any H.264 encoder, then OpenH264.
+            let h264 = available
+                .iter()
+                .find(|e| !e.hevc && e.hardware)
+                .or_else(|| available.iter().find(|e| !e.hevc))
+                .map(EncoderInfo::codec)
+                .unwrap_or(VideoCodec::OpenH264);
+            self.video_codec = h264;
             notes.push(format!("HEVC is only written to MP4; using {}.", self.video_codec.label(available)));
         }
-        if self.video_codec.needs_mf() && !has(self.video_codec) {
-            let wanted = self.video_codec.generic_label();
+        if self.video_codec.needs_mf() && self.video_codec.info(available).is_none() {
+            let wanted = self.video_codec.family();
             self.video_codec = VideoCodec::OpenH264;
-            notes.push(format!("{wanted} is not available on this system; using OpenH264."));
+            notes.push(format!("The selected {wanted} encoder is not available on this system; using OpenH264."));
         }
 
         let allowed = self.audio_codec.allowed_bitrates();
@@ -453,6 +476,18 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::encoder::Vendor;
+
+    fn nvenc() -> EncoderInfo {
+        EncoderInfo {
+            hevc: false,
+            label: "H264 (NVIDIA® NVENC)".into(),
+            friendly_name: "NVIDIA H.264 Encoder MFT".into(),
+            vendor: Vendor::Nvidia,
+            hardware: true,
+            clsid: "60f445605a204857bfefd29773cb8040".into(),
+        }
+    }
 
     #[test]
     fn size_modes_resolve_even_dims() {
@@ -472,9 +507,15 @@ mod tests {
         assert_ne!(f.audio_codec, AudioCodec::Pcm);
         assert_eq!(notes.len(), 1);
 
-        let mut f = FormatSettings { video_codec: VideoCodec::MfHevcHardware, ..Default::default() };
+        let hevc = VideoCodec::Mf { hevc: true, clsid: "abc".into() };
+        let mut f = FormatSettings { video_codec: hevc.clone(), ..Default::default() };
         f.normalize(&[]);
         assert_eq!(f.video_codec, VideoCodec::OpenH264);
+
+        // HEVC in AVI falls back to an available hardware H.264 encoder.
+        let mut f = FormatSettings { video_codec: hevc, container: Container::Avi, ..Default::default() };
+        f.normalize(&[nvenc()]);
+        assert_eq!(f.video_codec, nvenc().codec());
 
         let mut f = FormatSettings { audio_bitrate_kbps: 150, audio_codec: AudioCodec::Aac, ..Default::default() };
         f.normalize(&[]);
@@ -483,6 +524,17 @@ mod tests {
         } else {
             assert_eq!(f.audio_codec, AudioCodec::Mp3);
         }
+    }
+
+    #[test]
+    fn picks_encoders_by_name() {
+        let list = [nvenc()];
+        assert_eq!(pick_encoder("openh264", &list), Some(VideoCodec::OpenH264));
+        assert_eq!(pick_encoder("h264-hw", &list), Some(nvenc().codec()));
+        assert_eq!(pick_encoder("nvenc", &list), Some(nvenc().codec()));
+        assert_eq!(pick_encoder("hevc", &list), None);
+        assert_eq!(VideoCodec::OpenH264.label(&list), "H264 (OpenH264, CPU)");
+        assert_eq!(nvenc().codec().label(&list), "H264 (NVIDIA® NVENC)");
     }
 
     #[test]
@@ -498,7 +550,11 @@ mod tests {
 
     #[test]
     fn settings_roundtrip_json() {
-        let s = Settings { file_prefix: "x".into(), ..Default::default() };
+        let s = Settings {
+            file_prefix: "x".into(),
+            format: FormatSettings { video_codec: nvenc().codec(), ..Default::default() },
+            ..Default::default()
+        };
         let json = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.file_prefix, "x");

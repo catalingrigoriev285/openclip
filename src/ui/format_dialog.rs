@@ -183,20 +183,28 @@ impl FormatDialog {
         row(ui, "Codec", |ui| {
             let current = d.video_codec.label(encoders);
             egui::ComboBox::from_id_salt("fmt-vcodec").width(230.0).selected_text(current).show_ui(ui, |ui| {
-                for c in VideoCodec::ALL {
-                    let available = !c.needs_mf() || encoders.iter().any(|e| e.codec == c);
-                    let label = c.label(encoders);
-                    let resp = ui.add_enabled(available, egui::Button::selectable(d.video_codec == c, label));
+                ui.selectable_value(&mut d.video_codec, VideoCodec::OpenH264, VideoCodec::OpenH264.label(encoders));
+                for e in encoders {
+                    let codec = e.codec();
+                    let resp = ui.selectable_label(d.video_codec == codec, &e.label).on_hover_text(&e.friendly_name);
                     if resp.clicked() {
-                        d.video_codec = c;
+                        d.video_codec = codec;
                     }
-                    if !available {
-                        resp.on_disabled_hover_text(if FormatSettings::platform_has_mf() {
-                            "No such encoder was found on this system"
+                }
+                if d.video_codec.needs_mf() && d.video_codec.info(encoders).is_none() {
+                    ui.add_enabled(false, egui::Button::selectable(true, d.video_codec.label(encoders)))
+                        .on_disabled_hover_text("This encoder was not found on this system");
+                }
+                if encoders.is_empty() {
+                    ui.label(
+                        RichText::new(if FormatSettings::platform_has_mf() {
+                            "No Media Foundation encoders found"
                         } else {
-                            "Only available on Windows (Media Foundation)"
-                        });
-                    }
+                            "Hardware encoders are only available on Windows"
+                        })
+                        .color(TEXT_DIM)
+                        .small(),
+                    );
                 }
             });
             if ui.button("...").on_hover_text("Encoder details").clicked() {
@@ -360,8 +368,8 @@ impl FormatDialog {
                 Advanced::Codec => {
                     ui.heading("Encoder details");
                     ui.add_space(6.0);
-                    let codec = self.draft.video_codec;
-                    match encoders.iter().find(|e| e.codec == codec) {
+                    let codec = self.draft.video_codec.clone();
+                    match codec.info(encoders) {
                         Some(info) => {
                             row(ui, "Encoder", |ui| {
                                 ui.label(RichText::new(&info.label).color(TEXT_BRIGHT));
@@ -376,7 +384,7 @@ impl FormatDialog {
                                 ui.label(RichText::new(&info.friendly_name).small());
                             });
                             row(ui, "CLSID", |ui| {
-                                ui.label(RichText::new(format!("{:032x}", info.clsid)).monospace().small());
+                                ui.label(RichText::new(&info.clsid).monospace().small());
                             });
                         }
                         None => {

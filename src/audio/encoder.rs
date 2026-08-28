@@ -23,7 +23,9 @@ pub enum AudioCodecConfig {
     Pcm { bits: u16 },
 }
 
-pub trait AudioEncoder: Send {
+/// Encoders are created and used on one thread (the audio thread): Media
+/// Foundation objects are not `Send`.
+pub trait AudioEncoder {
     /// Encodes interleaved f32 PCM in -1..1 at the encoder's rate/channels.
     fn encode(&mut self, interleaved: &[f32]) -> Result<Vec<AudioFrame>>;
     fn flush(&mut self) -> Result<Vec<AudioFrame>>;
@@ -52,11 +54,11 @@ pub fn create_audio_encoder(
             #[cfg(windows)]
             {
                 match super::mf_aac::AacEncoder::new(sample_rate, channels, bitrate_kbps) {
-                    Ok(enc) => return Ok((Box::new(enc), None)),
+                    Ok(enc) => Ok((Box::new(enc), None)),
                     Err(e) => {
                         log::warn!("AAC encoder unavailable: {e:#}; falling back to MP3");
                         let enc = super::mp3::Mp3Encoder::new(sample_rate, channels as u8, bitrate_kbps)?;
-                        return Ok((Box::new(enc), Some(format!("AAC unavailable ({e}); recorded MP3"))));
+                        Ok((Box::new(enc), Some(format!("AAC unavailable ({e}); recorded MP3"))))
                     }
                 }
             }

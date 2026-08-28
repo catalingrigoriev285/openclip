@@ -4,82 +4,97 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-openclip is a cross-platform screen recorder in Rust (edition 2024, Rust 1.85+) with an egui/eframe GUI. It writes standard MP4 (H.264 + MP3) with **no external runtime dependencies**: OpenH264 and LAME are compiled from bundled sources by their crates at build time, and the MP4 muxer is in-house. A C/C++ toolchain is required to build (MSVC on Windows; autotools on macOS/Linux — see README for the full package list). Installing `nasm` before building enables OpenH264's assembly kernels (~2× encoder throughput); without it the build silently falls back to C.
+openclip is a cross-platform screen recorder in Rust (edition 2024, Rust 1.85+) with an egui/eframe GUI. It writes standard MP4 or AVI with **no external runtime dependencies**: OpenH264 and LAME are compiled from bundled sources by their crates at build time, hardware H.264/HEVC and AAC encoders come from Windows Media Foundation (part of the OS, Windows only), and the MP4 and AVI muxers are in-house. A C/C++ toolchain is required to build (MSVC on Windows; autotools on macOS/Linux — see README for the full package list). Installing `nasm` before building enables OpenH264's assembly kernels (~2× encoder throughput); without it the build silently falls back to C.
 
 ## Commands
 
 ```sh
 cargo build --release                 # first build compiles OpenH264 + LAME from source (slow)
 cargo run --release                   # launch the GUI
-cargo test                            # unit tests (src/audio, src/mux) + tests/mp4_roundtrip.rs
+cargo test                            # unit tests + tests/mp4_roundtrip.rs + tests/avi_roundtrip.rs
 cargo test --test mp4_roundtrip       # just the MP4 round-trip integration test
+cargo test --test avi_roundtrip       # just the AVI round-trip integration test
 cargo test --lib avc                  # run unit tests matching a name
 cargo clippy --all-targets
 
 # Headless examples (useful for testing the pipeline without the GUI)
 cargo run --release --example capture_to_mp4 -- 10 out.mp4   # record primary monitor for 10 s
 #   flags: --half --mic --no-audio --fx --region X,Y,W,H --window TITLE --pause-at S --resume-at S
-cargo run --release --example bench_encode -- 1920 1080 5    # encoder throughput on synthetic content
+#          --codec openh264|h264-hw|h264-sw|hevc|<label substring> --audio mp3|aac|pcm --avi --fps N --quality Q
+cargo run --release --example bench_encode -- 1920 1080 5 out.mp4 --codec nvenc   # encoder throughput on synthetic content
+cargo run --example list_encoders                            # every Media Foundation encoder + whether it activates
 ```
 
-`profile.dev` uses `opt-level = 1` for the crate and `opt-level = 3` for dependencies, so debug builds are usable for real-time capture. In release builds `main.rs` sets `windows_subsystem = "windows"` (no console); use a debug build or `RUST_LOG` via `env_logger` when you need log output.
+`profile.dev` uses `opt-level = 1` for the crate and `opt-level = 3` for dependencies, so debug builds are usable for real-time capture. In release builds `main.rs` sets `windows_subsystem = "windows"` (no console); use a debug build or `RUST_LOG` via `env_logger` when you need log output (`RUST_LOG=openclip=trace` also traces the Media Foundation event loop).
 
-`.gitignore` excludes `*.mp4`, `*.h264`, `*.wav`, `*.mp3` — examples and manual tests can write scratch media into the repo root safely.
+`.gitignore` excludes `*.mp4`, `*.avi`, `*.h264`, `*.wav`, `*.mp3` — examples and manual tests can write scratch media into the repo root safely.
 
 ## Architecture
 
-The crate is a library (`src/lib.rs`) plus a thin binary (`src/main.rs`) that only builds the eframe window and instantiates `openclip::ui::App`. Examples and the integration test link against the library API, so keep pipeline/codec code out of `ui`.
+The crate is a library (`src/lib.rs`) plus a thin binary (`src/main.rs`) that only builds the eframe window and instantiates `openclip::ui::App`. Examples and the integration tests link against the library API, so keep pipeline/codec code out of `ui`.
 
 ```
-capture backend ──RawFrame──▶ encode thread ──▶ OpenH264 ──▶ MP4 muxer ──▶ file
-                                   ▲                             ▲
-cpal (mic / loopback) ──▶ mixer ───┴──▶ LAME MP3 ────────────────┘
+capture backend ──RawFrame──▶ encode thread: scale → I420/NV12 → VideoEncoder → Muxer (MP4 | AVI) ──▶ file
+                                   ▲                                                    ▲
+cpal (mic / loopback) ──▶ mixer ───┴──▶ AudioEncoder (MP3 | AAC | PCM) ─────────────────┘
 ```
+
+### `src/settings.rs` — persisted user settings
+
+`FormatSettings` is everything in the Format dialog: `Container` (Mp4/Avi), `SizeMode` (Full / Half / Preset / Percent, `resolve()` gives even output dims), `fps`, `VideoCodec` (`OpenH264` or `Mf { hevc, clsid }` — a Media Foundation transform identified by CLSID or `name:<url>`), `RateControl` (`Quality(10..=100)` → bitrate via `target_bitrate_kbps()`, or `ConstantBitrate`), keyframe interval, `Profiles`, `AudioCodec` (Mp3/Aac/Pcm), audio bitrate/channels/rate. `normalize(&available_encoders)` enforces the rules (PCM only in AVI, HEVC only in MP4, missing encoders → OpenH264, bitrate snapping) and returns user-facing notes. `Settings` (format + output dir, prefix, input toggles, mic name, `MouseFx`) is saved as JSON in `dirs::config_dir()/openclip/settings.json`; `load()` never fails. `pick_encoder()` resolves CLI-style names for the examples.
 
 ### `src/pipeline.rs` — the recording session (`Recorder`)
 
 The central orchestrator. `Recorder::start(RecordConfig, on_preview)` spawns:
 
 - a **capture backend** (`capture::start`) whose sink pushes `RawFrame`s into a bounded `sync_channel(4)`; when full, frames are dropped and counted in `Stats::frames_dropped` (never queued late — sync is preserved by timestamps, not by frame count);
-- an **encode thread** (`encode_loop`): optional half-res downscale, mouse-effects painting (on a copy, so the clean frame can be reused), BGRA/RGBA→I420, OpenH264, muxing. When no frame arrives within one frame interval it re-encodes the last frame as a **heartbeat** so static screens keep a steady cadence. The first video pts becomes the shared `audio_origin` timeline origin;
-- an **audio thread** (if `wants_audio()`): cpal streams → `Mixer` → `Mp3Encoder` → `Mp3Frame` channel consumed by the encode thread's muxer.
+- an **encode thread** (`encode_loop`): `EncodeState::new` on the first frame resolves the output size, creates the encoder via `create_video_encoder` (fallback chain, note in `Stats::note`), a layout-matching `Converter` and the `Muxer`. Per frame: scale (`downscale_half` or `Scaler`), mouse-effects painting (on a copy, so the clean frame can be reused), BGRA/RGBA→I420/NV12, encode (may return 0..n frames), mux. When no frame arrives within one frame interval it re-encodes the last frame as a **heartbeat** so static screens keep a steady cadence. The first video pts becomes the shared `audio_origin` timeline origin; `flush()` drains async encoders before `finalize`;
+- an **audio thread** (if `wants_audio()`): opens the cpal streams **and creates the audio encoder** (Media Foundation objects are thread-affine) before reporting its `AudioTrackConfig` back; then cpal → `Mixer` → `AudioEncoder` → `AudioFrame` channel consumed by the encode thread's muxer. Mono is folded down from the mixer's stereo output.
 
-**Timeline model:** every frame/chunk carries a timestamp relative to `epoch`. Pause is implemented by subtracting accumulated `paused_total_us` from timestamps (frames arriving while paused are discarded), so paused time is cut out of the file with A/V still in sync. Audio is mixed `AUDIO_LAG` (150 ms) behind wall-clock so device latency never creates gaps. `Stats` (atomics + `Mutex<Option<String>>` error/note) is the only channel back to the GUI besides `PreviewSlot`.
+**Timeline model:** every frame/chunk carries a timestamp relative to `epoch`. Pause is implemented by subtracting accumulated `paused_total_us` from timestamps (frames arriving while paused are discarded), so paused time is cut out of the file with A/V still in sync. Audio is mixed `AUDIO_LAG` (150 ms) behind wall-clock so device latency never creates gaps. `Stats` (atomics + `Mutex<Option<String>>` error / audio_note / note) is the only channel back to the GUI besides `PreviewSlot`.
 
 ### `src/capture/` — platform backends behind one interface
 
-`capture::start(CaptureConfig, epoch, FrameSink) -> CaptureHandle`. `Source` is `Monitor{id}` / `Window{id}` / `Region{monitor_id, rect}` with physical-pixel `Rect`s. Backend selection is `cfg(windows)` → `windows.rs` (Windows.Graphics.Capture via `windows-capture`, GPU-side crop for regions, native cursor) vs. `xcap_backend.rs` (xcap video recorder for monitors, screenshot polling for windows). `monitors.rs` uses `xcap` on **every** platform for enumeration, one-shot screenshots (picker backdrop, previews) and `source_origin` (needed to map global mouse coords into the frame). `FpsLimiter` is the shared wall-clock throttle.
+`capture::start(CaptureConfig, epoch, FrameSink) -> CaptureHandle`. `Source` is `Monitor{id}` / `Window{id}` / `Region{monitor_id, rect}` with physical-pixel `Rect`s. Backend selection is `cfg(windows)` → `windows.rs` (Windows.Graphics.Capture via `windows-capture`, GPU-side crop for regions, native cursor, CPU readback into `RawFrame`) vs. `xcap_backend.rs` (xcap video recorder for monitors, screenshot polling for windows). `monitors.rs` uses `xcap` on **every** platform for enumeration, one-shot screenshots (picker backdrop, previews) and `source_origin` (needed to map global mouse coords into the frame). `FpsLimiter` is the shared wall-clock throttle.
 
 ### `src/video/`
 
-- `convert.rs`: `RawFrame` (BGRA/RGBA + pts + optional mouse snapshot) and `Converter` (→ I420 via the SIMD `yuv` crate, plus half-res downscale).
-- `encoder.rs`: OpenH264 in screen-content real-time mode. Annex-B output is converted to AVCC length-prefixed samples; SPS/PPS are extracted for the `avcC` box (see `mux/avc.rs`).
-- `mouse_fx.rs`: `MouseFx` settings, `MouseSampler` (global pointer via `device_query`), and the painters for cursor sprite / click ripples / highlight halo. Effects are painted onto frames in the encode thread **and** in the live preview so the two always match. At `cursor_size == 100` the native cursor from the capture API is used; any other size hides it and draws the scalable arrow.
+- `encoder.rs`: the `VideoEncoder` trait (`encode(FrameInput, pts) -> Vec<EncodedFrame>`, `flush`, `codec_params`, `is_hevc`, `input_layout`), `EncodedFrame` (**Annex-B**, parameter sets in-band on keyframes), `CodecParams` (H264 SPS/PPS or HEVC VPS/SPS/PPS, `from_annexb` harvests them), `EncoderRequest`, `EncoderInfo` / `Vendor` (an enumerated MF encoder), `available_encoders()` / `refresh_encoders()` and `create_video_encoder()` — tries the requested MF encoder, then others of the same family (hardware first), then OpenH264, returning a note. Not `Send`: encoders live on the encode thread.
+- `openh264.rs`: OpenH264 in screen-content real-time mode (quality or CBR rate control, profile, keyframe interval).
+- `mf/` (Windows): `mod.rs` — `ComGuard`, `startup()`, `MFTEnumEx` enumeration of hardware (`HARDWARE|ASYNCMFT`) and software (`SYNCMFT`) transforms with vendor labels, dedupe, a `probe()` that drops transforms which cannot negotiate a 720p output type (Microsoft's DX12 encoders), cached list; `transform.rs` — `MftSession`, a synchronous-style wrapper that also drives the async event protocol (`METransformNeedInput` credits, `HaveOutput`, drain, `MF_E_TRANSFORM_STREAM_CHANGE` renegotiation — after which an async MFT must *not* be polled again until its next HaveOutput event); `video.rs` — `MfVideoEncoder`: output type first (subtype, bitrate, size, rate, profile), `ICodecAPI` (rate control, GOP, **B-frames = 0** because the muxers assume PTS == DTS, low latency), NV12 input type, memory-buffer `IMFSample`s, keyframe from `MFSampleExtension_CleanPoint`, parameter sets from the stream or `MF_MT_MPEG_SEQUENCE_HEADER`.
+- `convert.rs`: `RawFrame` (BGRA/RGBA + pts + optional mouse snapshot) and `Converter` (→ I420 or NV12 via the SIMD `yuv` crate, plus `downscale_half`). `scale.rs`: `Scaler` (`fast_image_resize`, bilinear ≤ 2×, box beyond).
+- `mouse_fx.rs`: `MouseFx` settings (serde), `MouseSampler` (global pointer via `device_query`), and the painters for cursor sprite / click ripples / highlight halo. `mapped(origin, (sx, sy))` takes a per-axis scale because output sizes may be non-uniform. Effects are painted onto frames in the encode thread **and** in the live preview so the two always match. At `cursor_size == 100` the native cursor from the capture API is used; any other size hides it and draws the scalable arrow.
 - `preview.rs`: downscaled `PreviewImage` for the GUI.
 
 ### `src/audio/`
 
-`capture.rs` opens cpal streams (mic, or WASAPI loopback for system audio) that push timestamped `Chunk`s into a `SharedQueue`. `mixer.rs` places chunks on the recording timeline by arrival time, fills gaps > 60 ms with silence (WASAPI loopback goes quiet when the system is silent), resamples (`resample.rs`, linear) to 48 kHz stereo and sums sources. `mp3.rs` wraps LAME and splits its output so **each MP4 sample is exactly one 1152-sample MP3 frame**.
+`capture.rs` opens cpal streams (mic, or WASAPI loopback for system audio) that push timestamped `Chunk`s into a `SharedQueue`. `mixer.rs` places chunks on the recording timeline by arrival time, fills gaps > 60 ms with silence (WASAPI loopback goes quiet when the system is silent), resamples (`resample.rs`, linear) to the master rate as stereo and sums sources. `encoder.rs` is the `AudioEncoder` trait (`AudioFrame`, `AudioCodecConfig` for the container, `create_audio_encoder` with AAC → MP3 fallback); `mp3.rs` wraps LAME and splits its output so **each container sample is exactly one 1152-sample MP3 frame**; `pcm.rs` emits 16-bit LE 20 ms chunks (AVI only); `mf_aac.rs` (Windows) drives the Media Foundation AAC encoder (16-bit PCM in, raw 1024-sample AAC-LC out, AudioSpecificConfig from `MF_MT_USER_DATA`, 2112 priming samples skipped like MP3's `CODEC_DELAY_SAMPLES`).
 
 ### `src/mux/`
 
-Streaming, non-fragmented MP4: `ftyp` | 64-bit `mdat` (samples interleaved in ~0.5 s chunks) | `moov` written at `finalize`. Per-sample durations come from real pts (video timescale 90 000), keyframe table (`stss`), `co64` offsets. `boxes.rs` is the box-writing helper layer, `avc.rs` handles Annex-B ↔ AVCC and SPS/PPS. `tests/mp4_roundtrip.rs` validates output with the independent `mp4-atom` parser — extend it when changing box layout.
+- `mp4.rs`: streaming, non-fragmented MP4: `ftyp` | 64-bit `mdat` (samples interleaved in ~0.5 s chunks) | `moov` written at `finalize`. `push_video` takes Annex-B, strips parameter sets / AUDs and length-prefixes; `VideoCodecConfig::{H264, Hevc}` selects `avc1`/`avcC` or `hvc1`/`hvcC` (`hevc.rs` parses the SPS profile_tier_level); `AudioCodecConfig` selects the `esds` object type (MP3 0x6B / AAC 0x40 + DecoderSpecificInfo); PCM is refused. Per-sample durations come from real pts (video timescale 90 000), keyframe table (`stss`), `co64` offsets.
+- `avi.rs`: OpenDML AVI writer: fixed-size `hdrl` (rewritten at finalize) with `avih`, `strh`/`strf` (`H264`/`HEVC` fourcc; MP3 `0x0055` + `MPEGLAYER3WAVEFORMAT`, AAC `0x00FF` + ASC, PCM `0x0001`), reserved `indx` super-indexes, `odml/dmlh`, `JUNK` pad; `movi` chunks (`00dc`/`01wb`), ≤ ~1 GiB `RIFF` with `AVIX` continuations, `ix00`/`ix01` standard indexes per RIFF, legacy `idx1` for the first RIFF. Video is slot based: `slot = round((pts − first) · fps)`, gaps get empty `00dc` chunks, a taken slot returns `false`.
+- `muxer.rs`: `Muxer` enum over both writers used by the pipeline. `boxes.rs` is the MP4 box-writing helper, `avc.rs` Annex-B ↔ AVCC and SPS/PPS, `hevc.rs` HEVC NAL types + SPS parser. `tests/mp4_roundtrip.rs` (independent `mp4-atom` parser, plus synthetic HEVC/AAC entries) and `tests/avi_roundtrip.rs` (hand-written RIFF walker) validate output — extend them when changing layouts.
 
 ### `src/ui/` — egui application
 
 `App` (in `mod.rs`, the largest file) owns all settings and a `State` enum: `Idle` / `Picking(Picker)` / `Recording(Recorder)`. Layout is toolbar + status strip on top, left nav (Home / General / Video / Image / About), pages in the centre. Sub-modules extend `App` via `impl App` blocks:
 
+- `format_dialog.rs`: the **Format settings** modal (`egui::Modal`, same pattern as the delete dialog): File Type / Video / Audio groups editing a draft `FormatSettings` that is normalized on every change and committed on OK (`DialogOutcome::Ok` → `App::save_settings`). Nested "…" modals for bitrate/keyframe and encoder details (with rescan). Opened from the Record tab's Settings button and the mini bar's ⚙; shown last in **both** `App::ui` branches.
 - `picker.rs`: region selector — one undecorated always-on-top viewport per monitor showing a fresh screenshot; drag a rect, Esc cancels.
 - `minibar.rs`: **compact mode** — the main viewport is resized into a small always-on-top bar (`enter_compact` / restore). Closing the bar window restores the full window rather than quitting (`intercept_close`). The bar is placed next to a picked region and the region is *docked* to the bar (`follow_bar`, `bar_anchor`, `bar_settle_until` to ignore our own position commands).
 - `region_frame.rs`: border around the selected region while compact. Child viewports can't be transparent with wgpu/DX12 on Windows, so the frame is four opaque click-through strip viewports placed a `GAP_PX` *outside* the rect (so they're never captured). DWM styling on Windows is applied once (`frame_styled`).
 - `library.rs`: file browser for the output folder (Videos / Images / Audios tabs); `theme.rs` colours and `apply_theme`; `icons.rs` Font Awesome glyphs (font in `assets/fonts`).
 
-`LivePreview` runs a separate low-fps capture (`20` fps) only while the Home → Preview tab is visible; it is stopped on compact mode and on exit. `MouseFx` is shared with the encode thread as `Arc<RwLock<MouseFx>>` so edits in the Mouse tab apply live.
+`App::new` loads `Settings` and starts the encoder scan on a background thread (`encoder_rx`, polled each frame; `wait_for_encoders` blocks briefly before recording or opening the dialog so a saved GPU codec is not downgraded). `LivePreview` runs a separate low-fps capture (`20` fps) only while the Home → Preview tab is visible; it is stopped on compact mode and on exit. `MouseFx` is shared with the encode thread as `Arc<RwLock<MouseFx>>` so edits in the Mouse tab apply live.
 
 ## Conventions and gotchas
 
 - All coordinates in `capture` are **physical pixels**; egui works in points. Convert via the monitor's scale factor (see `region_frame.rs` / `minibar.rs`) when placing viewports around a `Rect`.
-- Windows-only code lives under `#[cfg(windows)]` in `capture/windows.rs`, `build.rs` (icon embedding via `winresource`) and a few DWM calls in `ui`; keep non-Windows builds compiling (`xcap_backend.rs` path) when touching shared interfaces.
+- Windows-only code lives under `#[cfg(windows)]` in `capture/windows.rs`, `video/mf/`, `audio/mf_aac.rs`, `build.rs` (icon embedding via `winresource` and the `/EXPORT:NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` linker args for the statics in `lib.rs` — without them the NVIDIA encoder fails to activate on hybrid laptops) and a few DWM calls in `ui`; keep non-Windows builds compiling (`xcap_backend.rs` path, empty encoder lists) when touching shared interfaces.
+- Both muxers assume **presentation order == decode order** (no `ctts`, no DTS): every encoder must run without B-frames.
+- Media Foundation objects are thread-affine and `!Send`: create and use an encoder on one thread with a `ComGuard` (MTA) alive; the GUI thread is an STA, so enumeration runs on a helper thread.
+- Encoders emit Annex-B; only the MP4 writer converts to length-prefixed samples. AVI keeps parameter sets in-band.
 - If a captured window is resized mid-recording, frames of the new size are dropped rather than re-negotiating the encoder.
-- Output files are `<prefix>-YYYYMMDD-HHMMSS.mp4` in the output folder (default `~/Videos`); snapshots are PNG alongside.
+- Output files are `<prefix>-YYYYMMDD-HHMMSS.<mp4|avi>` in the output folder (default `~/Videos`); snapshots are PNG alongside.
 - `docs/` is the GitHub Pages site (`index.html` + screenshots), not developer documentation.
