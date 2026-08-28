@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
     format.video_codec = match flag("--codec") {
         Some(name) => pick_encoder(name, &encoders)
             .ok_or_else(|| anyhow::anyhow!("no encoder matches '{name}' (see `cargo run --example list_encoders`)"))?,
-        None => VideoCodec::OpenH264,
+        None => VideoCodec::Auto,
     };
     format.audio_codec = match flag("--audio").map(|s| s.as_str()) {
         Some("aac") => AudioCodec::Aac,
