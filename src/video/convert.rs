@@ -74,7 +74,7 @@ impl RawFrame {
                 let a = &rest0[..4];
                 let b = &r1[r1.len() - 4..];
                 for ch in 0..4 {
-                    dst.data.push(((a[ch] as u32 + b[ch] as u32 + 1) / 2) as u8);
+                    dst.data.push((a[ch] as u32 + b[ch] as u32).div_ceil(2) as u8);
                 }
             }
         }

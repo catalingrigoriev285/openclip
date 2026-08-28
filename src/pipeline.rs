@@ -611,9 +611,23 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
             continue;
         };
         let deadline = c.deadline(c.next);
+        // Frames that arrived while the previous slot was being encoded.
+        loop {
+            match video_rx.try_recv() {
+                Ok(mut f) => {
+                    f.pts = f.pts.saturating_sub(paused_dur());
+                    take_newest(&mut newest, f, &pool, &stats);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
         loop {
             let now = rec_now();
-            if now >= deadline || stopping {
+            if now >= deadline || stopping || disconnected {
                 break;
             }
             match video_rx.recv_timeout(deadline - now) {

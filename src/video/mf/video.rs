@@ -248,23 +248,42 @@ impl VideoEncoder for MfVideoEncoder {
             bail!("frame size {}x{} does not match encoder {}x{}", dims.0, dims.1, self.dims.0, self.dims.1);
         }
         let (w, h) = (dims.0 as usize, dims.1 as usize);
-        self.nv12.clear();
-        self.nv12.reserve(w * h * 3 / 2);
-        for row in 0..h {
-            self.nv12.extend_from_slice(&y[row * strides.0..row * strides.0 + w]);
-        }
-        for row in 0..h.div_ceil(2) {
-            self.nv12.extend_from_slice(&uv[row * strides.1..row * strides.1 + w]);
-        }
+        let uv_rows = h.div_ceil(2);
         let time = (pts.as_nanos() / 100) as i64;
-        let sample = make_sample(&self.nv12, time, self.frame_duration)?;
+        let t0 = std::time::Instant::now();
+        // Repack the planes straight into the media buffer (tightly packed NV12).
+        let sample = make_sample_with(w * h + w * uv_rows, time, self.frame_duration, |dst| {
+            let (y_dst, uv_dst) = dst.split_at_mut(w * h);
+            for (row, out) in y_dst.chunks_exact_mut(w).enumerate() {
+                out.copy_from_slice(&y[row * strides.0..row * strides.0 + w]);
+            }
+            for (row, out) in uv_dst.chunks_exact_mut(w).enumerate() {
+                out.copy_from_slice(&uv[row * strides.1..row * strides.1 + w]);
+            }
+        })?;
+        let t1 = std::time::Instant::now();
         self.frames_in += 1;
         let outputs = self.session.process(&sample)?;
+        let t2 = std::time::Instant::now();
         let mut frames = Vec::with_capacity(outputs.len());
         for s in &outputs {
             if let Some(f) = self.convert_output(s)? {
                 frames.push(f);
             }
+        }
+        let t3 = std::time::Instant::now();
+        if t3 - t0 > Duration::from_millis(8) {
+            let (wait, input, pump) = self.session.last_timing;
+            log::debug!(
+                "slow MF encode: sample {:.1} ms, process {:.1} ms (wait {:.1}, input {:.1}, pump {:.1}), output {:.1} ms, {} out",
+                (t1 - t0).as_secs_f64() * 1e3,
+                (t2 - t1).as_secs_f64() * 1e3,
+                wait as f64 / 1e3,
+                input as f64 / 1e3,
+                pump as f64 / 1e3,
+                (t3 - t2).as_secs_f64() * 1e3,
+                outputs.len()
+            );
         }
         Ok(frames)
     }

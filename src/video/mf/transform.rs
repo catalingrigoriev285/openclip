@@ -32,6 +32,9 @@ pub struct MftSession {
     /// Outstanding `METransformNeedInput` credits.
     need_input: u32,
     started: bool,
+    /// Microseconds spent in the last `process`: waiting for an input
+    /// request, in `ProcessInput`, and pulling outputs afterwards.
+    pub last_timing: (u64, u64, u64),
 }
 
 impl MftSession {
@@ -62,6 +65,7 @@ impl MftSession {
             out_buf_size: 0,
             need_input: 0,
             started: false,
+            last_timing: (0, 0, 0),
         })
     }
 
@@ -161,10 +165,16 @@ impl MftSession {
     pub fn process(&mut self, sample: &IMFSample) -> Result<Vec<IMFSample>> {
         let mut out = Vec::new();
         if self.events.is_some() {
+            let t0 = Instant::now();
             self.pump_events(&mut out, true)?;
+            let t1 = Instant::now();
             unsafe { self.mft.ProcessInput(self.in_id, sample, 0) }.context("ProcessInput")?;
             self.need_input = self.need_input.saturating_sub(1);
+            let t2 = Instant::now();
             self.pump_events(&mut out, false)?;
+            let t3 = Instant::now();
+            self.last_timing =
+                ((t1 - t0).as_micros() as u64, (t2 - t1).as_micros() as u64, (t3 - t2).as_micros() as u64);
         } else {
             unsafe { self.mft.ProcessInput(self.in_id, sample, 0) }.context("ProcessInput")?;
             while self.pull_output(&mut out)? {}
@@ -315,13 +325,24 @@ fn new_sample(capacity: u32) -> Result<IMFSample> {
 
 /// Wraps `data` in a sample with the given time/duration (100-ns units).
 pub fn make_sample(data: &[u8], time_100ns: i64, duration_100ns: i64) -> Result<IMFSample> {
+    make_sample_with(data.len(), time_100ns, duration_100ns, |dst| dst.copy_from_slice(data))
+}
+
+/// Creates a sample of `len` bytes and lets `fill` write straight into the
+/// media buffer (one copy instead of two for frame repacking).
+pub fn make_sample_with(
+    len: usize,
+    time_100ns: i64,
+    duration_100ns: i64,
+    fill: impl FnOnce(&mut [u8]),
+) -> Result<IMFSample> {
     unsafe {
-        let buffer: IMFMediaBuffer = MFCreateMemoryBuffer(data.len().max(1) as u32).context("MFCreateMemoryBuffer")?;
+        let buffer: IMFMediaBuffer = MFCreateMemoryBuffer(len.max(1) as u32).context("MFCreateMemoryBuffer")?;
         let mut ptr: *mut u8 = std::ptr::null_mut();
         buffer.Lock(&mut ptr, None, None).context("Lock")?;
-        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        fill(std::slice::from_raw_parts_mut(ptr, len));
         buffer.Unlock().context("Unlock")?;
-        buffer.SetCurrentLength(data.len() as u32)?;
+        buffer.SetCurrentLength(len as u32)?;
         let sample = MFCreateSample().context("MFCreateSample")?;
         sample.AddBuffer(&buffer)?;
         sample.SetSampleTime(time_100ns)?;
