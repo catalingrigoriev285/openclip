@@ -1,6 +1,6 @@
 [package]
 name = "openclip"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Cross-platform screen recorder with an egui GUI and no external runtime dependencies"
