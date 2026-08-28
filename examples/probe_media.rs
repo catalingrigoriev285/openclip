@@ -88,6 +88,7 @@ fn probe(path: &str) -> anyhow::Result<String> {
     // Decode everything (the reader inserts decoders automatically).
     let mut video_frames = 0u64;
     let mut audio_samples = 0u64;
+    let mut per_stream = vec![0u64; streams.len()];
     let mut last_video_ts = 0i64;
     let mut ended = 0;
     let total = streams.len();
@@ -107,11 +108,17 @@ fn probe(path: &str) -> anyhow::Result<String> {
             )
         }
         .context("ReadSample")?;
+        if std::env::var_os("PROBE_TRACE").is_some() {
+            eprintln!("  stream {index} flags {flags:#x} ts {ts} sample {}", sample.is_some());
+        }
         if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
             ended += 1;
             continue;
         }
         if let Some(s) = sample {
+            if let Some(n) = per_stream.get_mut(index as usize) {
+                *n += 1;
+            }
             let is_video = streams.get(index as usize).map(|s| s.starts_with("video")).unwrap_or(false);
             if is_video {
                 video_frames += 1;
@@ -125,7 +132,7 @@ fn probe(path: &str) -> anyhow::Result<String> {
         }
     }
     Ok(format!(
-        "{} | duration {} | decoded {video_frames} video frames (last pts {:.2}s), {audio_samples} audio sample frames",
+        "{} | duration {} | decoded {video_frames} video frames (last pts {:.2}s), {audio_samples} audio sample frames | samples per stream {per_stream:?}",
         streams.join(", "),
         duration.map(|d| format!("{d:.2}s")).unwrap_or_else(|| "?".into()),
         last_video_ts as f64 / 10_000_000.0
