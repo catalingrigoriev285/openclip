@@ -252,6 +252,13 @@ impl VideoEncoder for MfVideoEncoder {
         // Repack the planes straight into the media buffer (tightly packed NV12).
         let sample = make_sample_with(w * h + w * uv_rows, time, self.frame_duration, |dst| {
             let (y_dst, uv_dst) = dst.split_at_mut(w * h);
+            // The converter allocates tightly packed planes, which is the common
+            // case: copy each one whole instead of a row at a time.
+            if strides.0 == w && strides.1 == w {
+                y_dst.copy_from_slice(&y[..w * h]);
+                uv_dst.copy_from_slice(&uv[..w * uv_rows]);
+                return;
+            }
             for (row, out) in y_dst.chunks_exact_mut(w).enumerate() {
                 out.copy_from_slice(&y[row * strides.0..row * strides.0 + w]);
             }

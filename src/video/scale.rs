@@ -63,8 +63,13 @@ impl Scaler {
         }
         let (dw, dh) = self.dst;
         let needed = (dw * dh * 4) as usize;
-        dst.data.clear();
-        dst.data.resize(needed, 0);
+        // The resizer writes every destination byte, so only size the buffer —
+        // re-zeroing it would touch several MB per frame for nothing.
+        if dst.data.len() < needed {
+            dst.data.resize(needed, 0);
+        } else {
+            dst.data.truncate(needed);
+        }
         let src = match ImageRef::new(w, h, src_bytes, PixelType::U8x4) {
             Ok(s) => s,
             Err(e) => {

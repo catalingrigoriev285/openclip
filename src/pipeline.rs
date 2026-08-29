@@ -60,12 +60,36 @@ impl RecordConfig {
     }
 }
 
+/// Timeline origin: pts of the first encoded frame, i.e. where the output file
+/// starts. Unknown until the encode thread has seen a frame.
+#[derive(Debug)]
+pub struct Origin(AtomicU64);
+
+impl Default for Origin {
+    fn default() -> Self {
+        Self(AtomicU64::new(u64::MAX))
+    }
+}
+
+impl Origin {
+    pub fn get(&self) -> Option<Duration> {
+        match self.0.load(Ordering::SeqCst) {
+            u64::MAX => None,
+            us => Some(Duration::from_micros(us)),
+        }
+    }
+
+    fn set(&self, pts: Duration) {
+        self.0.store(pts.as_micros() as u64, Ordering::SeqCst);
+    }
+}
+
 /// Live counters, readable from the GUI.
 #[derive(Debug, Default)]
 pub struct Stats {
     pub frames_captured: AtomicU64,
     pub frames_encoded: AtomicU64,
-    /// Frames lost: capture channel full, or slots skipped because encoding fell behind.
+    /// Frames lost because the capture channel was full.
     pub frames_dropped: AtomicU64,
     /// Frames the encoder chose not to output (rate control) or the container could not place.
     pub frames_skipped: AtomicU64,
@@ -73,6 +97,12 @@ pub struct Stats {
     pub frames_repeated: AtomicU64,
     /// Captured frames replaced by a newer one before their slot came (source faster than fps).
     pub frames_superseded: AtomicU64,
+    /// Slots the encode loop never reached because it was running behind.
+    pub slots_skipped: AtomicU64,
+    /// Slots the encode loop processed; `slots_done + slots_skipped ≈ fps × elapsed`.
+    pub slots_done: AtomicU64,
+    /// Configured frame rate, so the GUI can show the per-slot time budget.
+    pub target_fps: AtomicU64,
     /// Rolling average encode time per frame, in microseconds.
     pub encode_us: AtomicU64,
     /// Rolling average of the whole per-slot work (scale + effects + convert + encode + mux).
@@ -83,10 +113,14 @@ pub struct Stats {
     pub bytes_written: AtomicU64,
     pub width: AtomicU64,
     pub height: AtomicU64,
+    /// Where the output file's timeline starts, in the recording timebase.
+    pub stream_start: Origin,
     pub error: Mutex<Option<String>>,
     pub audio_note: Mutex<Option<String>>,
     /// Encoder / container notes (e.g. a hardware encoder fell back to OpenH264).
     pub note: Mutex<Option<String>>,
+    /// The video encoder actually in use, as reported by `VideoEncoder::describe`.
+    pub encoder: Mutex<Option<String>>,
 }
 
 impl Stats {
@@ -118,6 +152,18 @@ impl Stats {
 
     pub fn note(&self) -> Option<String> {
         self.note.lock().unwrap().clone()
+    }
+
+    pub fn encoder(&self) -> Option<String> {
+        self.encoder.lock().unwrap().clone()
+    }
+
+    /// Zeroes the counters accumulated before the timeline existed (capture
+    /// warm-up), so every number the GUI shows describes the recorded file.
+    fn reset_pre_roll(&self) {
+        for c in [&self.frames_captured, &self.frames_dropped, &self.frames_superseded] {
+            c.store(0, Ordering::Relaxed);
+        }
     }
 
     fn rolling(cell: &AtomicU64, sample_us: u64) {
@@ -199,6 +245,12 @@ pub struct Recorder {
     _timer: TimerResolution,
 }
 
+/// Recorded length, given the current recording-timebase clock and the timeline
+/// origin. Extracted so the anchoring math is testable without a live session.
+fn recorded_span(now: Duration, origin: Option<Duration>) -> Duration {
+    origin.map(|o| now.saturating_sub(o)).unwrap_or_default()
+}
+
 impl Recorder {
     pub fn start(config: RecordConfig, on_preview: Option<PreviewCallback>) -> Result<Recorder> {
         let timer = TimerResolution::acquire();
@@ -209,12 +261,17 @@ impl Recorder {
         let stats = Arc::new(Stats::default());
         let preview = Arc::new(PreviewSlot::default());
         let preview_visible = Arc::new(AtomicBool::new(false));
-        // Timeline origin (first video pts) shared with the audio thread, in µs; u64::MAX = unknown.
-        let audio_origin = Arc::new(AtomicU64::new(u64::MAX));
         let pool = FramePool::new(POOL_SIZE);
 
         let (video_tx, video_rx) = mpsc::sync_channel::<RawFrame>(4);
         let (audio_tx, audio_rx) = mpsc::sync_channel::<AudioFrame>(256);
+
+        let sampler = config.mouse_fx.any_overlay().then(|| Arc::new(Mutex::new(MouseSampler::new())));
+        // Capture first: WGC/D3D initialisation and the first-frame latency now
+        // overlap opening the audio devices instead of following them, so the
+        // file starts sooner after the button press. On any error below the
+        // handle drops and its `Drop` stops the backend.
+        let capture = start_capture(&config, epoch, video_tx, stats.clone(), sampler.clone(), pool.clone())?;
 
         let (audio_thread, audio_cfg) = if config.wants_audio() {
             let (handle, cfg) = spawn_audio_thread(AudioArgs {
@@ -223,7 +280,6 @@ impl Recorder {
                 stop: stop.clone(),
                 paused: paused.clone(),
                 paused_total: paused_total_us.clone(),
-                origin: audio_origin.clone(),
                 tx: audio_tx,
                 stats: stats.clone(),
             })?;
@@ -233,14 +289,12 @@ impl Recorder {
             (None, None)
         };
 
-        let sampler = config.mouse_fx.any_overlay().then(|| Arc::new(Mutex::new(MouseSampler::new())));
         let encode_thread = spawn_encode_thread(EncodeArgs {
             config: config.clone(),
             epoch,
             video_rx,
             audio_rx,
             audio_cfg,
-            audio_origin,
             stop: stop.clone(),
             paused: paused.clone(),
             paused_total: paused_total_us.clone(),
@@ -248,11 +302,9 @@ impl Recorder {
             preview: preview.clone(),
             preview_visible: preview_visible.clone(),
             on_preview,
-            sampler: sampler.clone(),
-            pool: pool.clone(),
+            sampler,
+            pool,
         })?;
-
-        let capture = start_capture(&config, epoch, video_tx, stats.clone(), sampler, pool)?;
 
         Ok(Recorder {
             stop,
@@ -284,11 +336,20 @@ impl Recorder {
         self.preview_visible.store(visible, Ordering::Relaxed);
     }
 
-    /// Recorded time: wall time minus everything spent paused.
-    pub fn elapsed(&self) -> Duration {
+    /// Wall time since [`Recorder::start`] minus everything spent paused — the
+    /// timebase every frame and audio chunk timestamp lives in.
+    fn recording_now(&self) -> Duration {
         let paused = Duration::from_micros(self.paused_total_us.load(Ordering::Relaxed))
             + self.pause_started.map(|t| t.elapsed()).unwrap_or_default();
         self.started.elapsed().saturating_sub(paused)
+    }
+
+    /// Length of the recording **as it appears in the file**: measured from the
+    /// first captured frame, which is where the file's timeline starts — not
+    /// from the button press, which is up to half a second earlier while the
+    /// audio devices and the capture backend are still starting up.
+    pub fn elapsed(&self) -> Duration {
+        recorded_span(self.recording_now(), self.stats.stream_start.get())
     }
 
     pub fn is_paused(&self) -> bool {
@@ -481,7 +542,6 @@ struct EncodeArgs {
     video_rx: Receiver<RawFrame>,
     audio_rx: Receiver<AudioFrame>,
     audio_cfg: Option<AudioTrackConfig>,
-    audio_origin: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     paused_total: Arc<AtomicU64>,
@@ -512,7 +572,6 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         video_rx,
         audio_rx,
         mut audio_cfg,
-        audio_origin,
         stop,
         paused,
         paused_total,
@@ -592,13 +651,28 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
             // Waiting for the very first frame, which defines the timeline origin.
             match video_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(mut f) => {
+                    // The channel may hold frames captured while the audio
+                    // devices were opening. Anchor on the newest: a stale pts0
+                    // would make `catch_up` skip slots on the first iteration.
+                    while let Ok(newer) = video_rx.try_recv() {
+                        pool.recycle(std::mem::take(&mut f.data));
+                        f = newer;
+                    }
                     f.pts = f.pts.saturating_sub(paused_dur());
+                    log::info!(
+                        "timeline starts at {:.0} ms (capture latency {:.0} ms)",
+                        f.pts.as_secs_f64() * 1e3,
+                        rec_now().saturating_sub(f.pts).as_secs_f64() * 1e3
+                    );
                     let st = EncodeState::new(&config, &f, audio_cfg.take(), &stats)?;
                     stats.width.store(st.dims.0 as u64, Ordering::Relaxed);
                     stats.height.store(st.dims.1 as u64, Ordering::Relaxed);
+                    stats.target_fps.store(fps as u64, Ordering::Relaxed);
                     state = Some(st);
                     clock = Some(FrameClock::new(fps, f.pts));
-                    audio_origin.store(f.pts.as_micros() as u64, Ordering::SeqCst);
+                    // Counters so far describe the warm-up, not the file.
+                    stats.reset_pre_roll();
+                    stats.stream_start.set(f.pts);
                     newest = Some(f);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -656,7 +730,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         let now = rec_now();
         let skipped = c.catch_up(now);
         if skipped > 0 {
-            stats.frames_dropped.fetch_add(skipped, Ordering::Relaxed);
+            stats.slots_skipped.fetch_add(skipped, Ordering::Relaxed);
         }
         let have_new = newest.is_some();
         if stopping && !have_new {
@@ -720,8 +794,14 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         }
         let t3 = Instant::now();
         c.next += 1;
+        stats.slots_done.fetch_add(1, Ordering::Relaxed);
 
-        if preview_visible.load(Ordering::Relaxed) && t0.duration_since(last_preview) >= PREVIEW_INTERVAL {
+        // Skip the preview when already behind: it costs a full downscale and
+        // would push the next slot further past its deadline.
+        if preview_visible.load(Ordering::Relaxed)
+            && t0.duration_since(last_preview) >= PREVIEW_INTERVAL
+            && c.due(rec_now()) == 0
+        {
             last_preview = t0;
             let img = st.previewer.make(st.frame.as_ref().unwrap());
             *preview.image.lock().unwrap() = Some(img);
@@ -729,10 +809,12 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
                 cb();
             }
         }
+        let t4 = Instant::now();
 
         Stats::rolling(&stats.encode_us, (t2 - t1).as_micros() as u64);
         Stats::rolling(&stats.mux_us, (t3 - t2).as_micros() as u64);
-        Stats::rolling(&stats.slot_us, (t3 - t0).as_micros() as u64);
+        // Includes the preview: it runs on this thread and eats the same budget.
+        Stats::rolling(&stats.slot_us, (t4 - t0).as_micros() as u64);
         if t3 - t0 > c.interval() * 2 {
             log::warn!(
                 "slow slot {slot}: prepare {:.1} ms, encode {:.1} ms, mux {:.1} ms",
@@ -744,10 +826,11 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         if last_report.elapsed() >= Duration::from_secs(5) {
             last_report = Instant::now();
             log::info!(
-                "slot {slot}: captured {} encoded {} dropped {} repeated {} superseded {} | encode {:.1} ms, slot {:.1} ms",
+                "slot {slot}: captured {} encoded {} dropped {} slots skipped {} repeated {} superseded {} | encode {:.1} ms, slot {:.1} ms",
                 stats.frames_captured.load(Ordering::Relaxed),
                 stats.frames_encoded.load(Ordering::Relaxed),
                 stats.frames_dropped.load(Ordering::Relaxed),
+                stats.slots_skipped.load(Ordering::Relaxed),
                 stats.frames_repeated.load(Ordering::Relaxed),
                 stats.frames_superseded.load(Ordering::Relaxed),
                 stats.encode_us.load(Ordering::Relaxed) as f64 / 1e3,
@@ -835,6 +918,7 @@ impl EncodeState {
         if let Some(n) = note {
             stats.add_note(n);
         }
+        *stats.encoder.lock().unwrap() = Some(encoder.describe());
         let converter = Converter::new(scaled.0, scaled.1, encoder.input_layout())?;
         let scaler = (!half && scaled != src).then(|| Scaler::new(src, scaled));
         let video = VideoTrackConfig {
@@ -924,13 +1008,12 @@ struct AudioArgs {
     stop: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     paused_total: Arc<AtomicU64>,
-    origin: Arc<AtomicU64>,
     tx: SyncSender<AudioFrame>,
     stats: Arc<Stats>,
 }
 
 fn spawn_audio_thread(args: AudioArgs) -> Result<(JoinHandle<Result<()>>, AudioTrackConfig)> {
-    let AudioArgs { config, epoch, stop, paused, paused_total, origin, tx, stats } = args;
+    let AudioArgs { config, epoch, stop, paused, paused_total, tx, stats } = args;
     // Open devices and create the encoder on the worker thread (Media
     // Foundation objects are thread-affine), reporting back before mixing.
     let (ready_tx, ready_rx) = mpsc::channel::<Result<AudioTrackConfig>>();
@@ -981,17 +1064,15 @@ fn spawn_audio_thread(args: AudioArgs) -> Result<(JoinHandle<Result<()>>, AudioT
         let _ = ready_tx.send(Ok(track));
 
         // Wait for the first video frame to define the timeline origin.
-        let origin_us = loop {
-            let v = origin.load(Ordering::SeqCst);
-            if v != u64::MAX {
-                break v;
+        let origin = loop {
+            if let Some(o) = stats.stream_start.get() {
+                break o;
             }
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(5));
         };
-        let origin = Duration::from_micros(origin_us);
         let mut mixer = Mixer::new(rate, epoch, origin);
         for (s, gain) in &sources {
             mixer.add_source(s.queue.clone(), s.sample_rate, s.channels, *gain);
@@ -1082,6 +1163,41 @@ mod tests {
         assert_eq!(skipped, 4);
         assert_eq!(c.next, 4);
         assert_eq!(c.due(ms(170)), 1);
+    }
+
+    #[test]
+    fn elapsed_is_measured_from_the_first_frame() {
+        // Nothing captured yet: the file is empty, so the timer reads zero.
+        assert_eq!(recorded_span(ms(400), None), Duration::ZERO);
+        // 0.65 s of start-up is not in the file and must not be in the denominator.
+        assert_eq!(recorded_span(ms(5650), Some(ms(650))), ms(5000));
+        // Paused time is already removed from `now` *and* from the stored
+        // origin, so it is subtracted exactly once.
+        assert_eq!(recorded_span(ms(7000), Some(ms(650))), ms(6350));
+        // A clock that has not reached the origin never goes negative.
+        assert_eq!(recorded_span(ms(100), Some(ms(650))), Duration::ZERO);
+    }
+
+    #[test]
+    fn origin_is_unknown_until_the_first_frame() {
+        let o = Origin::default();
+        assert_eq!(o.get(), None);
+        o.set(ms(650));
+        assert_eq!(o.get(), Some(ms(650)));
+    }
+
+    #[test]
+    fn pre_roll_counters_are_cleared_but_encoded_frames_are_not() {
+        let s = Stats::default();
+        for c in [&s.frames_captured, &s.frames_dropped, &s.frames_superseded, &s.frames_encoded] {
+            c.store(7, Ordering::Relaxed);
+        }
+        s.reset_pre_roll();
+        assert_eq!(s.frames_captured.load(Ordering::Relaxed), 0);
+        assert_eq!(s.frames_dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(s.frames_superseded.load(Ordering::Relaxed), 0);
+        // Encoded frames belong to the file, not the warm-up.
+        assert_eq!(s.frames_encoded.load(Ordering::Relaxed), 7);
     }
 
     #[test]

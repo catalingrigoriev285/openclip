@@ -188,6 +188,29 @@ strings! {
     STATUS_COUNTERS => "{0}×{1}   {2} fps   {3} dropped   {4}",
         "{0}×{1}   {2} fps   {3} pierdute   {4}",
         "{0}×{1}   {2} fps   потеряно: {3}   {4}";
+    STATUS_ENCODER_BEHIND => "the encoder cannot keep up: {0} ms per frame, budget {1} ms",
+        "codificatorul nu face față: {0} ms per cadru, buget {1} ms",
+        "кодировщик не справляется: {0} мс на кадр, бюджет {1} мс";
+
+    // ----- recording counters (hover breakdown) ------------------------------
+    COUNTER_ENCODER => "Encoder", "Codificator", "Кодировщик";
+    COUNTER_SCREEN_FPS => "Screen updates", "Actualizări ale ecranului", "Обновления экрана";
+    COUNTER_FILE_FPS => "Frames in file", "Cadre în fișier", "Кадров в файле";
+    COUNTER_CAPTURED => "Captured", "Capturate", "Захвачено";
+    COUNTER_ENCODED => "Encoded", "Codificate", "Закодировано";
+    COUNTER_REPEATED => "Repeated (screen unchanged)", "Repetate (ecran neschimbat)",
+        "Повторы (экран не менялся)";
+    COUNTER_SUPERSEDED => "Superseded (newer frame arrived)", "Înlocuite (a sosit un cadru mai nou)",
+        "Заменены (пришёл более новый кадр)";
+    COUNTER_DROPPED => "Dropped (queue full)", "Pierdute (coadă plină)", "Потеряно (очередь заполнена)";
+    COUNTER_SLOTS_SKIPPED => "Slots skipped (encoder behind)", "Sloturi omise (codificator în urmă)",
+        "Пропущено слотов (кодировщик отстаёт)";
+    COUNTER_SKIPPED => "Not written", "Nescrise", "Не записано";
+    COUNTER_ENCODE_MS => "Encode time", "Timp de codificare", "Время кодирования";
+    COUNTER_MUX_MS => "Write time", "Timp de scriere", "Время записи";
+    COUNTER_SLOT_MS => "Total per frame", "Total per cadru", "Всего на кадр";
+    COUNTER_OF_BUDGET => "{0} ms of {1} ms", "{0} ms din {1} ms", "{0} мс из {1} мс";
+
     STATUS_PICKING => "Drag a rectangle on the screen to select the recording region (Esc to cancel)",
         "Trage un dreptunghi pe ecran pentru a alege regiunea înregistrată (Esc pentru anulare)",
         "Выделите прямоугольник на экране, чтобы выбрать область записи (Esc — отмена)";
@@ -514,6 +537,12 @@ strings! {
         "{0}; записан H.264 через OpenH264";
     NOTE_HW_NEEDS_WINDOWS => "{0} hardware encoding needs Windows", "codificarea hardware {0} necesită Windows",
         "аппаратное кодирование {0} требует Windows";
+    NOTE_NO_HARDWARE_ENCODER => "no hardware H.264 encoder was found; recording with the CPU",
+        "nu s-a găsit niciun codificator H.264 hardware; se înregistrează cu procesorul",
+        "аппаратный кодировщик H.264 не найден; запись выполняется процессором";
+    NOTE_SOFTWARE_TOO_SLOW => "the CPU encoder cannot keep up at {0}×{1} @ {2} fps; try Half size or a lower frame rate",
+        "codificatorul pe procesor nu face față la {0}×{1} @ {2} fps; încearcă Jumătate sau o rată mai mică",
+        "процессорный кодировщик не справляется при {0}×{1} @ {2} к/с; попробуйте половинный размер или меньшую частоту";
 
     // ----- region picker ---------------------------------------------------
     PICKER_TITLE => "Select region — drag to select, Esc to cancel",

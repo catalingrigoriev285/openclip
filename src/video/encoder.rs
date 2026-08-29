@@ -193,8 +193,13 @@ pub fn create_video_encoder(req: &EncoderRequest) -> Result<(Box<dyn VideoEncode
     if req.codec == VideoCodec::Auto {
         let resolved = VideoCodec::resolve_auto(&available_encoders());
         log::info!("Auto codec → {}", resolved.generic_label());
-        let req = EncoderRequest { codec: resolved, ..req.clone() };
-        return create_video_encoder(&req);
+        let software = resolved == VideoCodec::OpenH264;
+        let (enc, note) = create_video_encoder(&EncoderRequest { codec: resolved, ..req.clone() })?;
+        // Auto settling on OpenH264 means no hardware encoder was enumerated or
+        // survived probing. That is the difference between 30 and 20 fps at
+        // 1080p, so say it instead of silently recording on the CPU.
+        let note = note.or_else(|| software.then(|| crate::t!(NOTE_NO_HARDWARE_ENCODER).to_string()));
+        return Ok((enc, note));
     }
     let VideoCodec::Mf { hevc, clsid } = &req.codec else {
         return Ok((Box::new(super::openh264::H264Encoder::new(req)?), None));

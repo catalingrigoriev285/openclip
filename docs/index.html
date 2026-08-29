@@ -116,6 +116,12 @@
     border-left: 1px solid var(--border); color: var(--muted); font-variant-numeric: tabular-nums;
   }
   .gh-link .gh-stars svg { color: #f59e0b; }
+  .gh-link .gh-dl {
+    display: inline-flex; align-items: center; gap: 5px; padding: 0 12px 0 10px; height: 100%;
+    border-left: 1px solid var(--border); color: var(--muted); font-variant-numeric: tabular-nums;
+  }
+  .gh-link .gh-dl svg { color: var(--green); }
+  .gh-link .gh-dl[hidden] { display: none; }
   .gh-link svg { width: 16px; height: 16px; flex: none; }
 
   /* ---------- Language picker ---------- */
@@ -376,6 +382,7 @@
     .stats { grid-template-columns: 1fr 1fr; gap: 12px; }
     .gh-link .gh-main .txt { display: none; }
     .gh-link .gh-main { padding-right: 10px; }
+    .gh-link .gh-dl { display: none; }
     .cta { padding: 44px 22px; }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -416,6 +423,10 @@
         <span class="gh-stars" id="gh-stars-wrap" data-i18n-title="gh.stars" title="Stars on GitHub">
           <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
           <span id="gh-stars">Star</span>
+        </span>
+        <span class="gh-dl" id="gh-dl-wrap" data-i18n-title="gh.downloads" title="Downloads on GitHub" hidden>
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7.25 1.5a.75.75 0 0 1 1.5 0v6.44l2.22-2.22a.75.75 0 1 1 1.06 1.06l-3.5 3.5a.75.75 0 0 1-1.06 0l-3.5-3.5a.75.75 0 0 1 1.06-1.06l2.22 2.22V1.5Z"/><path d="M2.75 9.5a.75.75 0 0 1 .75.75v2.25c0 .14.11.25.25.25h8.5a.25.25 0 0 0 .25-.25V10.25a.75.75 0 0 1 1.5 0v2.25A1.75 1.75 0 0 1 12.25 14.5h-8.5A1.75 1.75 0 0 1 2 12.75V10.25a.75.75 0 0 1 .75-.75Z"/></svg>
+          <span id="gh-dl">0</span>
         </span>
       </a>
     </div>
@@ -732,6 +743,7 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
     ro: {
       "lang.label": "Schimbă limba",
       "gh.stars": "Stele pe GitHub",
+      "gh.downloads": "Descărcări de pe GitHub",
       "nav.tour": "Tur", "nav.features": "Funcții", "nav.how": "Cum funcționează",
       "nav.platforms": "Platforme", "nav.build": "Compilare",
 
@@ -743,6 +755,9 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
       "hero.note.suffix": "pe macOS și Linux se compilează din surse",
       "hero.note.latest": "Cea mai recentă versiune",
       "hero.note.assets": "vezi fișierele versiunii",
+      "hero.note.downloads.one": "descărcare",
+      "hero.note.downloads.few": "descărcări",
+      "hero.note.downloads.many": "de descărcări",
       "hero.meta1": "H.264 + MP3 în MP4",
       "hero.meta2": "Windows · macOS · Linux",
       "hero.meta3": "Zero dependențe la rulare",
@@ -848,6 +863,7 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
     ru: {
       "lang.label": "Сменить язык",
       "gh.stars": "Звёзды на GitHub",
+      "gh.downloads": "Загрузки с GitHub",
       "nav.tour": "Обзор", "nav.features": "Возможности", "nav.how": "Как это работает",
       "nav.platforms": "Платформы", "nav.build": "Сборка",
 
@@ -859,6 +875,9 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
       "hero.note.suffix": "для macOS и Linux — сборка из исходников",
       "hero.note.latest": "Последний выпуск",
       "hero.note.assets": "см. файлы выпуска",
+      "hero.note.downloads.one": "загрузка",
+      "hero.note.downloads.few": "загрузки",
+      "hero.note.downloads.many": "загрузок",
       "hero.meta1": "H.264 + MP3 в MP4",
       "hero.meta2": "Windows · macOS · Linux",
       "hero.meta3": "Ноль зависимостей при запуске",
@@ -994,6 +1013,9 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
     EN["hero.note.suffix"] = "macOS and Linux build from source";
     EN["hero.note.latest"] = "Latest";
     EN["hero.note.assets"] = "see release assets";
+    EN["hero.note.downloads.one"] = "download";
+    EN["hero.note.downloads.few"] = "downloads";
+    EN["hero.note.downloads.many"] = "downloads";
   }
 
   var current = "en";
@@ -1122,13 +1144,36 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
     } catch (_) { /* keep fallback label */ }
   })();
 
-  // Point the download button at the Windows asset of the latest GitHub release.
-  // The note is rebuilt from translated fragments, so switching language keeps it.
+  // Release info under the download button, rebuilt from translated fragments
+  // so switching language keeps it.
   var release = null;
+  var downloads = null;
+
+  // Plural form for the download count: Romanian and Russian need more than two.
+  function downloadsForm(n) {
+    if (current === 'ru') {
+      var d = n % 10, h = n % 100;
+      if (d === 1 && h !== 11) { return 'one'; }
+      if (d >= 2 && d <= 4 && (h < 12 || h > 14)) { return 'few'; }
+      return 'many';
+    }
+    if (current === 'ro') {
+      if (n === 1) { return 'one'; }
+      var r = n % 100;
+      return (n === 0 || (r >= 2 && r <= 19)) ? 'few' : 'many';
+    }
+    return n === 1 ? 'one' : 'few';
+  }
   function refreshDownloadNote() {
+    if (downloads !== null) {
+      document.getElementById('gh-dl-wrap').title =
+        downloads.toLocaleString(current) + ' · ' + tr('gh.downloads');
+    }
     if (!release) { return; }
     var note = document.getElementById('dl-note');
-    var tail = ' · ' + tr('hero.note.suffix');
+    var dl = downloads === null ? '' : ' · ' + downloads.toLocaleString(current) + ' ' +
+      tr('hero.note.downloads.' + downloadsForm(downloads));
+    var tail = dl + ' · ' + tr('hero.note.suffix');
     if (release.asset) {
       var mb = release.asset.size ? ' · ' + (release.asset.size / 1048576).toFixed(1) + ' MB' : '';
       note.textContent = (release.tag || tr('hero.note.latest')) + ' · ' + release.asset.name + mb + tail;
@@ -1136,6 +1181,31 @@ cargo run --release --example bench_encode -- 1920 1080 5">Copy</button></div>
       note.textContent = (release.tag || tr('hero.note.latest')) + ' · ' + tr('hero.note.assets') + tail;
     }
   }
+
+  // Total downloads over every release — the number the README badge shows.
+  // GitHub has no endpoint for it, so the per-asset counts are summed here.
+  (async function () {
+    try {
+      const r = await fetch('https://api.github.com/repos/catalingrigoriev285/openclip/releases?per_page=100', { headers: { Accept: 'application/vnd.github+json' } });
+      if (!r.ok) return;
+      const rels = await r.json();
+      if (!Array.isArray(rels)) return;
+      let total = 0;
+      rels.forEach(function (rel) {
+        (rel.assets || []).forEach(function (a) {
+          if (typeof a.download_count === 'number') { total += a.download_count; }
+        });
+      });
+      downloads = total;
+      document.getElementById('gh-dl').textContent =
+        total >= 1000000 ? (total / 1000000).toFixed(1).replace(/\.0$/, '') + 'M' :
+        total >= 1000 ? (total / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(total);
+      document.getElementById('gh-dl-wrap').hidden = false;
+      refreshDownloadNote();
+    } catch (_) { /* chip stays hidden */ }
+  })();
+
+  // Point the download button at the Windows asset of the latest GitHub release.
   (async function () {
     const btn = document.getElementById('dl-win');
     try {

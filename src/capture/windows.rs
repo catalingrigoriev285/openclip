@@ -229,10 +229,19 @@ where
     let fps = config.fps.max(1);
     // Windows 11 throttles delivery itself; Windows 10 delivers every vsync
     // and rejects the setting, so pick frames ourselves there.
-    let native_interval = GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false);
+    let native_interval = match GraphicsCaptureApi::is_minimum_update_interval_supported() {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("capture: minimum-update-interval probe failed ({e:?}); limiting frames ourselves");
+            false
+        }
+    };
     let interval = if native_interval {
-        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / fps as f64))
+        let floor = super::min_update_interval(fps);
+        log::info!("capture: {fps} fps throttled by WGC ({:.2} ms minimum update interval)", floor.as_secs_f64() * 1e3);
+        MinimumUpdateIntervalSettings::Custom(floor)
     } else {
+        log::info!("capture: {fps} fps throttled by PhaseLimiter (WGC minimum update interval unsupported)");
         MinimumUpdateIntervalSettings::Default
     };
     let pool = config.pool.clone().unwrap_or_else(|| FramePool::new(6));

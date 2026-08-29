@@ -141,6 +141,16 @@ pub fn start(config: CaptureConfig, epoch: Instant, sink: FrameSink) -> Result<C
     }
 }
 
+/// Floor for Windows.Graphics.Capture's minimum update interval. The value is a
+/// *minimum*, so asking for exactly `1/fps` leaves no margin: at 30 fps it
+/// truncates to 33.33330 ms while two vsyncs on a 60 Hz panel are 33.33333 ms,
+/// which makes every second-vsync update ineligible and snaps delivery to three
+/// vsyncs — 20 fps instead of 30. Same slack [`FpsLimiter`] uses, so a source
+/// running at exactly `fps` is not halved.
+pub(crate) fn min_update_interval(fps: u32) -> Duration {
+    Duration::from_secs_f64(0.85 / fps.max(1) as f64)
+}
+
 /// Simple wall-clock frame-rate limiter (minimum gap between accepted frames).
 #[allow(dead_code)]
 pub(crate) struct FpsLimiter {
@@ -221,6 +231,18 @@ mod tests {
         assert_eq!(pool.available(), 1);
         pool.take();
         assert!(pool.take().is_empty());
+    }
+
+    #[test]
+    fn min_update_interval_leaves_room_on_the_vsync_grid() {
+        let vsync = Duration::from_secs_f64(1.0 / 60.0);
+        // 30 fps must stay eligible on every second vsync, but not on every one.
+        assert!(min_update_interval(30) < vsync * 2);
+        assert!(min_update_interval(30) > vsync);
+        // 60 fps on a 60 Hz panel must not be halved to 30.
+        assert!(min_update_interval(60) < vsync);
+        // Never divides by zero.
+        assert!(min_update_interval(0) > Duration::ZERO);
     }
 
     #[test]

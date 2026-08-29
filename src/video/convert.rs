@@ -55,26 +55,36 @@ impl RawFrame {
         let s = self.stride as usize;
         let sw = self.width as usize;
         let sh = self.height as usize;
-        dst.data.clear();
-        dst.data.reserve((w * h * 4) as usize);
-        for y in 0..h as usize {
+        let dw = w as usize;
+        let needed = dw * h as usize * 4;
+        // Size the buffer once and write in place: pushing two million bytes one
+        // at a time was the most expensive step of the half-size path.
+        if dst.data.len() < needed {
+            dst.data.resize(needed, 0);
+        } else {
+            dst.data.truncate(needed);
+        }
+        for (y, drow) in dst.data.chunks_exact_mut(dw * 4).enumerate() {
             let r0 = &self.data[y * 2 * s..y * 2 * s + sw * 4];
-            let r1 = &self.data[(y * 2 + 1).min(sh - 1) * s..(y * 2 + 1).min(sh - 1) * s + sw * 4];
+            let y1 = (y * 2 + 1).min(sh - 1);
+            let r1 = &self.data[y1 * s..y1 * s + sw * 4];
             let (p0, rest0) = r0.as_chunks::<8>();
             let (p1, _) = r1.as_chunks::<8>();
+            let (out, _) = drow.as_chunks_mut::<4>();
             // Pairs of source pixels (8 bytes) → one destination pixel.
-            for (a, b) in p0.iter().zip(p1) {
+            for ((a, b), o) in p0.iter().zip(p1).zip(out.iter_mut()) {
                 for ch in 0..4 {
                     let sum = a[ch] as u32 + a[ch + 4] as u32 + b[ch] as u32 + b[ch + 4] as u32;
-                    dst.data.push(((sum + 2) / 4) as u8);
+                    o[ch] = ((sum + 2) / 4) as u8;
                 }
             }
-            if p0.len() < w as usize {
+            if p0.len() < dw {
                 // Odd source width: the last destination pixel repeats the last column.
                 let a = &rest0[..4];
                 let b = &r1[r1.len() - 4..];
+                let o = &mut out[p0.len()];
                 for ch in 0..4 {
-                    dst.data.push((a[ch] as u32 + b[ch] as u32).div_ceil(2) as u8);
+                    o[ch] = (a[ch] as u32 + b[ch] as u32).div_ceil(2) as u8;
                 }
             }
         }

@@ -28,7 +28,7 @@ use crate::capture::monitors::{
 };
 use crate::capture::{self as cap, CaptureConfig, CaptureHandle, Rect, Source};
 use crate::i18n::{self, Lang};
-use crate::pipeline::{RecordConfig, Recorder};
+use crate::pipeline::{RecordConfig, Recorder, Stats};
 use crate::settings::{FormatSettings, Settings};
 use crate::t;
 use crate::video::encoder::{available_encoders, refresh_encoders, EncoderInfo};
@@ -759,7 +759,17 @@ impl App {
                         status_capsule(ui, Tint::Red, &format!("●  {}", format_duration(elapsed)), Some(timer_w), None, None);
                     }
                     ui.add_space(4.0);
-                    ui.label(secondary(t!(STATUS_COUNTERS, w, h, format!("{fps:.1}"), dropped, human_bytes(bytes))));
+                    ui.label(secondary(t!(STATUS_COUNTERS, w, h, format!("{fps:.1}"), dropped, human_bytes(bytes))))
+                        .on_hover_ui(|ui| counters_tooltip(ui, s, elapsed));
+                    // A slot costing more than its budget is why the frame rate
+                    // is low; show it while it lasts rather than as a sticky note.
+                    let budget_us = 1_000_000 / s.target_fps.load(Ordering::Relaxed).max(1);
+                    let slot_us = s.slot_us.load(Ordering::Relaxed);
+                    if elapsed.as_secs_f64() > 2.0 && slot_us > budget_us {
+                        vdivider(ui, 16.0);
+                        let behind = t!(STATUS_ENCODER_BEHIND, format!("{:.1}", slot_us as f64 / 1e3), budget_us / 1000);
+                        ui.label(RichText::new(behind).color(ORANGE));
+                    }
                     for note in [s.note(), s.audio_note.lock().unwrap().clone()].into_iter().flatten() {
                         vdivider(ui, 16.0);
                         ui.label(RichText::new(note).color(ORANGE));
@@ -1541,6 +1551,47 @@ impl eframe::App for App {
 // ----- small widgets kept here -------------------------------------------------------
 
 /// Percent size selector used by the mouse-effect settings.
+/// Breakdown behind the one-line counters: which encoder is running, where every
+/// slot went, and what a slot costs against its budget. "Screen updates" is the
+/// only number that reveals a *capture* shortfall — repeated frames hide it from
+/// the frame rate, because a repeat is encoded and written like any other frame.
+fn counters_tooltip(ui: &mut egui::Ui, s: &Stats, elapsed: Duration) {
+    let secs = elapsed.as_secs_f64().max(0.001);
+    let get = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
+    let target = get(&s.target_fps).max(1);
+    let budget_us = 1_000_000 / target;
+    let ms = |us: u64| format!("{:.1} ms", us as f64 / 1e3);
+
+    egui::Grid::new("rec-counters").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+        let mut row = |label: String, value: String| {
+            ui.label(secondary(label));
+            ui.label(value);
+            ui.end_row();
+        };
+        if let Some(enc) = s.encoder() {
+            row(t!(COUNTER_ENCODER).to_string(), enc);
+        }
+        row(t!(COUNTER_SCREEN_FPS).to_string(), format!("{:.1} fps", get(&s.frames_captured) as f64 / secs));
+        row(
+            t!(COUNTER_FILE_FPS).to_string(),
+            format!("{:.1} / {target} fps", get(&s.frames_encoded) as f64 / secs),
+        );
+        row(t!(COUNTER_CAPTURED).to_string(), get(&s.frames_captured).to_string());
+        row(t!(COUNTER_ENCODED).to_string(), get(&s.frames_encoded).to_string());
+        row(t!(COUNTER_REPEATED).to_string(), get(&s.frames_repeated).to_string());
+        row(t!(COUNTER_SUPERSEDED).to_string(), get(&s.frames_superseded).to_string());
+        row(t!(COUNTER_DROPPED).to_string(), get(&s.frames_dropped).to_string());
+        row(t!(COUNTER_SLOTS_SKIPPED).to_string(), get(&s.slots_skipped).to_string());
+        row(t!(COUNTER_SKIPPED).to_string(), get(&s.frames_skipped).to_string());
+        row(t!(COUNTER_ENCODE_MS).to_string(), ms(get(&s.encode_us)));
+        row(t!(COUNTER_MUX_MS).to_string(), ms(get(&s.mux_us)));
+        row(
+            t!(COUNTER_SLOT_MS).to_string(),
+            t!(COUNTER_OF_BUDGET, format!("{:.1}", get(&s.slot_us) as f64 / 1e3), budget_us / 1000),
+        );
+    });
+}
+
 fn size_combo(ui: &mut egui::Ui, id: &str, value: &mut u32) {
     egui::ComboBox::from_id_salt(id).width(90.0).selected_text(format!("{value} %")).show_ui(ui, |ui| {
         for v in [50u32, 75, 100, 125, 150, 200, 300] {
