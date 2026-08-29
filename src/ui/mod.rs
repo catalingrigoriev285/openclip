@@ -180,7 +180,7 @@ impl LivePreview {
             ctx.request_repaint();
             true
         });
-        let cfg = CaptureConfig { source, fps: Self::FPS, show_cursor: native_cursor, pool: None };
+        let cfg = CaptureConfig { source, fps: Self::FPS, show_cursor: native_cursor, pool: None, live_region: None };
         match cap::start(cfg, Instant::now(), sink) {
             Ok(h) => self.handle = Some(h),
             Err(e) => self.error = Some(format!("{e:#}")),
@@ -253,8 +253,18 @@ pub struct App {
     bar_anchor: Option<egui::Pos2>,
     /// After we move the bar ourselves, ignore position changes until then.
     bar_settle_until: Option<Instant>,
-    /// Whether the region-frame strip windows have had their DWM styling applied.
+    /// Whether the region-frame overlay windows have had their DWM styling applied.
     frame_styled: bool,
+    /// Whether Windows agreed to keep those windows out of screen captures; the
+    /// centre crosshair is only shown while recording when it did.
+    frame_excluded: bool,
+    /// How many overlay windows the frame last showed; a change means one was
+    /// created and still needs styling.
+    frame_parts: usize,
+    /// Border drag in progress (move or resize of the selected region).
+    frame_drag: Option<region_frame::FrameDrag>,
+    /// Global pointer used to drive border drags; created on the first one.
+    frame_pointer: Option<region_frame::GlobalPointer>,
     /// Inner size of the mini bar window; grows once when localized labels need more room.
     bar_size: Vec2,
     /// App icon texture for the About page (decoded on first use).
@@ -326,6 +336,10 @@ impl App {
             bar_anchor: None,
             bar_settle_until: None,
             frame_styled: false,
+            frame_excluded: false,
+            frame_parts: 0,
+            frame_drag: None,
+            frame_pointer: None,
             bar_size: minibar::BAR_SIZE,
             about_icon: None,
             start_compact: cfg!(debug_assertions) && std::env::var_os("OPENCLIP_START_COMPACT").is_some(),
@@ -620,7 +634,11 @@ impl App {
             }
             State::Idle | State::Countdown { .. } => {
                 if preview_visible {
-                    self.live.ensure(self.selected_source(), &self.mouse_fx, ctx);
+                    // Restarting the backend on every mouse-move of a border
+                    // drag would thrash WGC; pick the new rect up on release.
+                    if self.frame_drag.is_none() {
+                        self.live.ensure(self.selected_source(), &self.mouse_fx, ctx);
+                    }
                     if let Some(img) = self.live.take() {
                         self.upload_preview(ctx, &img);
                     }
@@ -1513,6 +1531,10 @@ impl eframe::App for App {
             self.show_format_dialog(&ctx);
             return;
         }
+
+        // The border follows the region in the full window too, so it can be
+        // nudged before ever collapsing to the bar.
+        self.region_frame(&ctx);
 
         egui::Panel::top("toolbar")
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 10)))

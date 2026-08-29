@@ -22,7 +22,7 @@ use crate::audio::capture::{open_microphone, open_system_loopback, AudioSource};
 use crate::audio::mixer::Mixer;
 use crate::audio::{create_audio_encoder, AudioFrame};
 use crate::capture::monitors::source_origin;
-use crate::capture::{self, CaptureConfig, CaptureHandle, FramePool, Source};
+use crate::capture::{self, CaptureConfig, CaptureHandle, FramePool, LiveRect, Rect, Source};
 use crate::mux::{AudioTrackConfig, Muxer, VideoCodecConfig, VideoTrackConfig};
 use crate::settings::{FormatSettings, SizeMode};
 use crate::video::convert::even_dims;
@@ -240,6 +240,9 @@ pub struct Recorder {
     stats: Arc<Stats>,
     preview: Arc<PreviewSlot>,
     preview_visible: Arc<AtomicBool>,
+    /// Live crop rect for a [`Source::Region`] recording, so the on-screen
+    /// border can be dragged while recording. `None` for other sources.
+    region: Option<LiveRect>,
     started: Instant,
     output: PathBuf,
     _timer: TimerResolution,
@@ -267,11 +270,18 @@ impl Recorder {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<AudioFrame>(256);
 
         let sampler = config.mouse_fx.any_overlay().then(|| Arc::new(Mutex::new(MouseSampler::new())));
+        // A region recording keeps its crop rect shared so `set_region` can move
+        // it (never resize it) while the encoder runs at a fixed frame size.
+        let region = match &config.source {
+            Source::Region { rect, .. } => Some(LiveRect::new(*rect)),
+            _ => None,
+        };
         // Capture first: WGC/D3D initialisation and the first-frame latency now
         // overlap opening the audio devices instead of following them, so the
         // file starts sooner after the button press. On any error below the
         // handle drops and its `Drop` stops the backend.
-        let capture = start_capture(&config, epoch, video_tx, stats.clone(), sampler.clone(), pool.clone())?;
+        let capture =
+            start_capture(&config, epoch, video_tx, stats.clone(), sampler.clone(), pool.clone(), region.clone())?;
 
         let (audio_thread, audio_cfg) = if config.wants_audio() {
             let (handle, cfg) = spawn_audio_thread(AudioArgs {
@@ -304,6 +314,7 @@ impl Recorder {
             on_preview,
             sampler,
             pool,
+            region: region.clone(),
         })?;
 
         Ok(Recorder {
@@ -317,6 +328,7 @@ impl Recorder {
             stats,
             preview,
             preview_visible,
+            region,
             started: epoch,
             output: config.output,
             _timer: timer,
@@ -334,6 +346,17 @@ impl Recorder {
     /// Tells the encode thread whether anyone is looking at previews.
     pub fn set_preview_visible(&self, visible: bool) {
         self.preview_visible.store(visible, Ordering::Relaxed);
+    }
+
+    /// Moves the captured region of a [`Source::Region`] recording; a no-op for
+    /// other sources. `width`/`height` are ignored: the encoder, converter and
+    /// container header are all fixed to the first frame's size, so only the
+    /// crop origin may change once recording has started.
+    pub fn set_region(&self, rect: Rect) {
+        if let Some(live) = &self.region {
+            let current = live.get();
+            live.set(Rect { x: rect.x, y: rect.y, ..current });
+        }
     }
 
     /// Wall time since [`Recorder::start`] minus everything spent paused — the
@@ -433,6 +456,7 @@ fn start_capture(
     stats: Arc<Stats>,
     sampler: Option<Arc<Mutex<MouseSampler>>>,
     pool: Arc<FramePool>,
+    region: Option<LiveRect>,
 ) -> Result<CaptureHandle> {
     let sink_pool = pool.clone();
     let sink: capture::FrameSink = Box::new(move |mut frame| {
@@ -458,6 +482,7 @@ fn start_capture(
             fps: config.fps(),
             show_cursor: config.mouse_fx.native_cursor(),
             pool: Some(pool),
+            live_region: region,
         },
         epoch,
         sink,
@@ -552,6 +577,9 @@ struct EncodeArgs {
     /// Shared with the capture sink; used here only for repeated frames.
     sampler: Option<Arc<Mutex<MouseSampler>>>,
     pool: Arc<FramePool>,
+    /// Live crop rect of a region recording; used to keep mouse effects aligned
+    /// while the region is dragged.
+    region: Option<LiveRect>,
 }
 
 fn spawn_encode_thread(args: EncodeArgs) -> Result<JoinHandle<Result<()>>> {
@@ -581,6 +609,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         on_preview,
         sampler,
         pool,
+        region,
     } = args;
     // Recording-time clock: wall time since epoch minus paused time.
     let paused_dur = || Duration::from_micros(paused_total.load(Ordering::Relaxed));
@@ -592,6 +621,12 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
     // Newest captured frame waiting for its slot.
     let mut newest: Option<RawFrame> = None;
     let mut origin = source_origin(&config.source).unwrap_or((0, 0));
+    // A dragged region moves under us: resolve its monitor's corner once and add
+    // the live offset per frame instead of re-querying the monitor list.
+    let region_origin = match (&config.source, &region) {
+        (Source::Region { monitor_id, .. }, Some(_)) => source_origin(&Source::Monitor { id: *monitor_id }).ok(),
+        _ => None,
+    };
     let mut frames_since_origin = 0u32;
     let mut was_paused = false;
     let mut last_preview = Instant::now() - PREVIEW_INTERVAL;
@@ -757,7 +792,10 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         // Mouse effects: paint in place, convert, restore — no frame copy.
         let mut painted = false;
         if let Some(snap) = snap.filter(|_| sampler.is_some()) {
-            if matches!(config.source, Source::Window { .. }) {
+            if let (Some(base), Some(live)) = (region_origin, &region) {
+                let r = live.get();
+                origin = (base.0 + r.x as i32, base.1 + r.y as i32);
+            } else if matches!(config.source, Source::Window { .. }) {
                 frames_since_origin += 1;
                 if frames_since_origin >= 30 {
                     frames_since_origin = 0;

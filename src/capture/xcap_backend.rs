@@ -19,15 +19,16 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use xcap::{Monitor, Window};
 
-use super::{CaptureConfig, CaptureHandle, FpsLimiter, FrameSink, Rect, Source};
+use super::{CaptureConfig, CaptureHandle, FpsLimiter, FrameSink, LiveRect, Source};
 use crate::video::{PixelFormat, RawFrame};
 
 pub fn start(config: CaptureConfig, epoch: Instant, sink: FrameSink) -> Result<CaptureHandle> {
     let stop = Arc::new(AtomicBool::new(false));
+    let crop = config.crop();
     let thread = match &config.source {
         Source::Monitor { id } => spawn_monitor(*id, None, config.fps, epoch, stop.clone(), sink)?,
-        Source::Region { monitor_id, rect } => {
-            spawn_monitor(*monitor_id, Some(*rect), config.fps, epoch, stop.clone(), sink)?
+        Source::Region { monitor_id, .. } => {
+            spawn_monitor(*monitor_id, crop, config.fps, epoch, stop.clone(), sink)?
         }
         Source::Window { id } => spawn_window(*id, config.fps, epoch, stop.clone(), sink)?,
     };
@@ -55,7 +56,7 @@ fn find_monitor(id: u32) -> Result<Monitor> {
 
 fn spawn_monitor(
     id: u32,
-    crop: Option<Rect>,
+    crop: Option<LiveRect>,
     fps: u32,
     epoch: Instant,
     stop: Arc<AtomicBool>,
@@ -103,7 +104,7 @@ fn spawn_monitor(
                         pts: now.duration_since(epoch),
                         mouse: None,
                     };
-                    if let Some(r) = crop {
+                    if let Some(r) = crop.as_ref().map(LiveRect::get) {
                         raw = raw.crop(r.x, r.y, r.width, r.height);
                     }
                     if !sink(raw) {

@@ -15,7 +15,7 @@ pub mod windows;
 #[cfg(not(windows))]
 pub mod xcap_backend;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,42 @@ pub struct Rect {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+/// A region rect the UI can change while the capture is running (dragging the
+/// on-screen border). The four fields are packed into one atomic so a frame
+/// can never observe a half-applied drag.
+#[derive(Debug, Clone)]
+pub struct LiveRect(Arc<AtomicU64>);
+
+impl LiveRect {
+    pub fn new(rect: Rect) -> Self {
+        Self(Arc::new(AtomicU64::new(pack(rect))))
+    }
+
+    pub fn get(&self) -> Rect {
+        unpack(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn set(&self, rect: Rect) {
+        self.0.store(pack(rect), Ordering::Relaxed);
+    }
+}
+
+/// Monitor-local physical pixels never exceed `u16::MAX`, so a rect fits in one
+/// `u64`. Larger values saturate rather than wrap; the backends clamp anyway.
+fn pack(r: Rect) -> u64 {
+    let f = |v: u32| v.min(u16::MAX as u32) as u64;
+    (f(r.x) << 48) | (f(r.y) << 32) | (f(r.width) << 16) | f(r.height)
+}
+
+fn unpack(v: u64) -> Rect {
+    Rect {
+        x: (v >> 48) as u32 & 0xffff,
+        y: (v >> 32) as u32 & 0xffff,
+        width: (v >> 16) as u32 & 0xffff,
+        height: v as u32 & 0xffff,
+    }
 }
 
 /// What to record.
@@ -82,6 +118,21 @@ pub struct CaptureConfig {
     pub show_cursor: bool,
     /// Buffer pool shared with the consumer (Windows backend); `None` allocates per frame.
     pub pool: Option<Arc<FramePool>>,
+    /// For [`Source::Region`]: a rect the caller can move while capture runs.
+    /// `None` pins the crop to `source`'s rect for the whole session.
+    pub live_region: Option<LiveRect>,
+}
+
+impl CaptureConfig {
+    /// The rect the backend should crop to, as a handle it can re-read every
+    /// frame. `None` for whole-monitor and window sources.
+    pub(crate) fn crop(&self) -> Option<LiveRect> {
+        match (&self.source, &self.live_region) {
+            (Source::Region { .. }, Some(live)) => Some(live.clone()),
+            (Source::Region { rect, .. }, None) => Some(LiveRect::new(*rect)),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for CaptureConfig {
@@ -91,6 +142,7 @@ impl std::fmt::Debug for CaptureConfig {
             .field("fps", &self.fps)
             .field("show_cursor", &self.show_cursor)
             .field("pool", &self.pool.is_some())
+            .field("live_region", &self.live_region.as_ref().map(LiveRect::get))
             .finish()
     }
 }
@@ -231,6 +283,25 @@ mod tests {
         assert_eq!(pool.available(), 1);
         pool.take();
         assert!(pool.take().is_empty());
+    }
+
+    #[test]
+    fn live_rect_round_trips() {
+        let r = Rect { x: 1920, y: 12, width: 1280, height: 722 };
+        let live = LiveRect::new(r);
+        assert_eq!(live.get(), r);
+        // A clone shares the value with the backend that holds it.
+        let backend = live.clone();
+        let moved = Rect { x: 0, y: 0, width: 1280, height: 722 };
+        live.set(moved);
+        assert_eq!(backend.get(), moved);
+        // Every field keeps its own 16 bits, up to the ceiling.
+        let big = Rect { x: 65535, y: 65535, width: 65535, height: 65535 };
+        live.set(big);
+        assert_eq!(live.get(), big);
+        // Out-of-range values saturate instead of wrapping into a neighbour.
+        live.set(Rect { x: 70000, y: 1, width: 2, height: 3 });
+        assert_eq!(live.get(), Rect { x: 65535, y: 1, width: 2, height: 3 });
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub const BLUE_HOVER: Color32 = Color32::from_rgb(0x33, 0x96, 0xff);
 pub const RED: Color32 = Color32::from_rgb(0xff, 0x45, 0x3a);
 pub const RED_HOVER: Color32 = Color32::from_rgb(0xff, 0x69, 0x61);
 pub const GREEN: Color32 = Color32::from_rgb(0x30, 0xd1, 0x58);
+/// Selected-region border and knob (systemGreen).
+pub const REGION: Color32 = Color32::from_rgb(0xc3, 0xd9, 0x4e);
 pub const ORANGE: Color32 = Color32::from_rgb(0xff, 0x9f, 0x0a);
 /// Preview well behind captured frames.
 pub const PREVIEW_BG: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);

@@ -9,7 +9,7 @@ use eframe::egui::{self, Align, Layout, RichText, Sense, Vec2, ViewportCommand, 
 
 use super::format_dialog::FormatSection;
 use super::icons;
-use super::region_frame::{GAP_PX, THICKNESS_PT};
+use super::region_frame::{BAND_PT, GAP_PX};
 use super::theme::*;
 use super::widgets::*;
 use super::{format_duration, human_bytes, App, SourceKind, State};
@@ -60,7 +60,7 @@ impl App {
             .max(0.0);
         let (bw, bh) = (self.bar_size.x * ppp, self.bar_size.y * ppp + deco);
         // Clearance from the region edge: frame stroke + gap + breathing room.
-        let band = (THICKNESS_PT * scale).round() + GAP_PX as f32 + 16.0;
+        let band = (BAND_PT * scale).round() + GAP_PX as f32 + 16.0;
         let (rx, ry) = ((m.x + r.x as i32) as f32, (m.y + r.y as i32) as f32);
         let (rw, rh) = (r.width as f32, r.height as f32);
         // Usable screen area (taskbar allowance at the bottom, as in `enter_compact`).

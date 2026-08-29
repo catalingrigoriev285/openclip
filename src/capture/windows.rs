@@ -28,7 +28,7 @@ use windows_capture::settings::{
 };
 use windows_capture::window::Window;
 
-use super::{CaptureConfig, CaptureHandle, FramePool, FrameSink, PhaseLimiter, Rect, Source};
+use super::{CaptureConfig, CaptureHandle, FramePool, FrameSink, LiveRect, PhaseLimiter, Source};
 use crate::video::{PixelFormat, RawFrame};
 
 /// Everything the capture callback needs, passed through `Settings::flags`.
@@ -36,7 +36,8 @@ struct Flags {
     sink: FrameSink,
     epoch: Instant,
     stop: Arc<AtomicBool>,
-    crop: Option<Rect>,
+    /// Re-read every frame so the UI can drag the region while recording.
+    crop: Option<LiveRect>,
     fps: u32,
     /// Only when WGC cannot throttle itself (Windows 10).
     limit_ourselves: bool,
@@ -86,7 +87,7 @@ impl GraphicsCaptureApiHandler for Handler {
         }
         let pts = now.duration_since(self.flags.epoch);
         let (fw, fh) = (frame.width(), frame.height());
-        let (x0, y0, x1, y1) = match self.flags.crop {
+        let (x0, y0, x1, y1) = match self.flags.crop.as_ref().map(LiveRect::get) {
             Some(r) => {
                 let x0 = r.x.min(fw.saturating_sub(1));
                 let y0 = r.y.min(fh.saturating_sub(1));
@@ -200,11 +201,10 @@ impl Readback {
 
 pub fn start(config: CaptureConfig, epoch: Instant, sink: FrameSink) -> Result<CaptureHandle> {
     let stop = Arc::new(AtomicBool::new(false));
+    let crop = config.crop();
     match &config.source {
         Source::Monitor { id } => launch(monitor(*id)?, None, &config, epoch, stop, sink),
-        Source::Region { monitor_id, rect } => {
-            launch(monitor(*monitor_id)?, Some(*rect), &config, epoch, stop, sink)
-        }
+        Source::Region { monitor_id, .. } => launch(monitor(*monitor_id)?, crop, &config, epoch, stop, sink),
         Source::Window { id } => {
             let w = Window::from_raw_hwnd(*id as usize as *mut std::ffi::c_void);
             if !w.is_valid() {
@@ -217,7 +217,7 @@ pub fn start(config: CaptureConfig, epoch: Instant, sink: FrameSink) -> Result<C
 
 fn launch<T>(
     item: T,
-    crop: Option<Rect>,
+    crop: Option<LiveRect>,
     config: &CaptureConfig,
     epoch: Instant,
     stop: Arc<AtomicBool>,
