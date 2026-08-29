@@ -482,8 +482,9 @@ pub fn style_overlay(title: &str) -> Option<bool> {
         DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowDisplayAffinity, SetWindowLongPtrW, FindWindowW, GWL_EXSTYLE,
-        WDA_EXCLUDEFROMCAPTURE, WS_EX_NOACTIVATE,
+        GetWindowLongPtrW, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, FindWindowW, GWL_EXSTYLE,
+        GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WDA_EXCLUDEFROMCAPTURE,
+        WS_BORDER, WS_CAPTION, WS_EX_NOACTIVATE, WS_THICKFRAME,
     };
 
     const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
@@ -509,10 +510,12 @@ pub fn style_overlay(title: &str) -> Option<bool> {
             size_of_val(&DWMWA_COLOR_NONE) as u32,
         );
         // winit keeps `WS_CAPTION` on undecorated windows (it cuts the frame
-        // away in `WM_NCCALCSIZE`), so DWM still draws a drop shadow around
-        // each strip — a grey smudge along the region edge, and four of them
-        // overlapping at the corners. Turning off non-client rendering removes
-        // it; the strips paint their whole client area themselves.
+        // away in `WM_NCCALCSIZE` instead), so DWM still draws a drop shadow
+        // around each strip — a grey smudge along the region edge, doubled
+        // where two strips meet. Disabling non-client rendering *and* dropping
+        // the frame styles leaves nothing for it to hang off; the strips paint
+        // their whole client area themselves and are never snapped or resized
+        // by the user, so the styles buy nothing.
         let policy = DWMNCRP_DISABLED;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -520,10 +523,24 @@ pub fn style_overlay(title: &str) -> Option<bool> {
             &policy as *const _ as *const c_void,
             size_of_val(&policy) as u32,
         );
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let frame = (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_BORDER.0) as isize;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style & !frame);
         // Grabbing the border must not pull focus away from whatever is being
         // recorded; mouse messages still arrive.
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
+        // Styles only take effect once the frame is recalculated; the window
+        // itself must not move, resize or come forward.
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
         // Windows 10 2004+: the window stays on screen but is not captured, so
         // the border can never bleed into the recording.
         Some(SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok())

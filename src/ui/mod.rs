@@ -1107,7 +1107,9 @@ impl App {
             match &self.preview_tex {
                 Some(tex) if self.preview_dims.0 > 0 => {
                     let (w, h) = (self.preview_dims.0 as f32, self.preview_dims.1 as f32);
-                    let scale = ((avail.x - 16.0) / w).min((avail.y - 16.0) / h).min(3.0);
+                    // A window squeezed below the padding would otherwise ask
+                    // for a negative-sized image, which egui asserts on.
+                    let scale = ((avail.x - 16.0) / w).min((avail.y - 16.0) / h).clamp(0.0, 3.0);
                     let size = egui::vec2(w * scale, h * scale);
                     ui.centered_and_justified(|ui| {
                         ui.add(egui::Image::from_texture(&*tex).fit_to_exact_size(size).corner_radius(6.0));
