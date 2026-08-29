@@ -1,4 +1,18 @@
+<div align="center">
+
 # openclip
+
+[![Latest release](https://img.shields.io/github/v/release/catalingrigoriev285/openclip?style=flat-square&label=release&color=0a84ff)](https://github.com/catalingrigoriev285/openclip/releases/latest)
+[![Stars](https://img.shields.io/github/stars/catalingrigoriev285/openclip?style=flat-square&logo=github&color=ffd60a)](https://github.com/catalingrigoriev285/openclip/stargazers)
+[![Downloads](https://img.shields.io/github/downloads/catalingrigoriev285/openclip/total?style=flat-square&color=30d158)](https://github.com/catalingrigoriev285/openclip/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/catalingrigoriev285/openclip/release.yml?style=flat-square&label=build)](https://github.com/catalingrigoriev285/openclip/actions/workflows/release.yml)
+[![License](https://img.shields.io/github/license/catalingrigoriev285/openclip?style=flat-square&color=8e8e93)](LICENSE)
+
+[![Download](https://img.shields.io/badge/Download-latest%20release-0a84ff?style=for-the-badge&logo=github&logoColor=white)](https://github.com/catalingrigoriev285/openclip/releases/latest)
+
+Windows · Linux · macOS — no installer, no runtime dependencies
+
+</div>
 
 ![openclip — a self-contained screen recorder](docs/assets/945shots_so.png)
 
