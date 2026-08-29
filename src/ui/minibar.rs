@@ -12,7 +12,7 @@ use super::icons;
 use super::region_frame::{BAND_PT, GAP_PX};
 use super::theme::*;
 use super::widgets::*;
-use super::{format_duration, human_bytes, App, SourceKind, State};
+use super::{format_duration, human_bytes, App, SourceKind, State, WINDOW_SIZE};
 use crate::t;
 
 /// Initial inner size of the bar window, in points. The bar grows once (see
@@ -20,9 +20,6 @@ use crate::t;
 pub const BAR_SIZE: Vec2 = Vec2::new(900.0, 72.0);
 const MAX_BAR_WIDTH: f32 = 1400.0;
 const TOAST_TTL: Duration = Duration::from_secs(5);
-/// How long after one of our own position commands the bar is left to settle
-/// before user drags start moving the docked region.
-const BAR_SETTLE: Duration = Duration::from_millis(400);
 
 impl App {
     /// Collapses the main window into the floating bar (always on top, bottom-right).
@@ -31,7 +28,6 @@ impl App {
         self.saved_rect = outer;
         self.live.stop();
         self.compact = true;
-        self.bar_moved_by_us();
         let bar = self.bar_size;
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(400.0, 60.0)));
         ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
@@ -47,9 +43,9 @@ impl App {
     /// Parks the bar outside the selected region on the region's monitor:
     /// centred below it, else above, else to the right, else to the left. If
     /// the region leaves no room on any side, the bar goes to the bottom
-    /// centre of the screen (it will overlap; the user can drag it).
+    /// centre of the screen (it will overlap; the user can drag it). This is a
+    /// one-off placement — afterwards the bar and the region move on their own.
     pub(super) fn place_bar_near_region(&mut self, ctx: &egui::Context) {
-        self.bar_moved_by_us();
         let Some((m, r)) = self.region_monitor() else { return };
         let ppp = ctx.pixels_per_point();
         let scale = m.scale_factor.max(0.1);
@@ -85,13 +81,6 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x / ppp, y / ppp)));
     }
 
-    /// Marks that the bar's position is about to change because of our own
-    /// viewport command, so `follow_bar` resyncs instead of moving the region.
-    pub(super) fn bar_moved_by_us(&mut self) {
-        self.bar_anchor = None;
-        self.bar_settle_until = Some(Instant::now() + BAR_SETTLE);
-    }
-
     /// In compact mode the title-bar X restores the full window instead of
     /// quitting. Returns true when a close was intercepted this frame.
     pub(super) fn intercept_close(&mut self, ctx: &egui::Context) -> bool {
@@ -108,8 +97,8 @@ impl App {
         self.compact = false;
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
         ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
-        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(820.0, 600.0)));
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(880.0, 660.0)));
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(WINDOW_SIZE));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(WINDOW_SIZE));
         if let Some(r) = self.saved_rect {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(r.min));
         }
@@ -334,7 +323,6 @@ impl App {
         if overlap > 0.5 && self.bar_size.x < MAX_BAR_WIDTH {
             self.bar_size.x = (self.bar_size.x + overlap.ceil()).min(MAX_BAR_WIDTH);
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.bar_size));
-            self.bar_moved_by_us();
         }
     }
 }

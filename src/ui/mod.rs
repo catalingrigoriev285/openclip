@@ -43,6 +43,10 @@ use widgets::*;
 
 type SharedFx = Arc<RwLock<MouseFx>>;
 
+/// Size of the full window. It opens at its minimum, so the app takes as
+/// little of the screen as it can while every page still fits.
+pub const WINDOW_SIZE: Vec2 = Vec2::new(820.0, 600.0);
+
 /// Application icon shown on the About page (same artwork as the window icon).
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/android-chrome-192x192.png");
 
@@ -248,11 +252,6 @@ pub struct App {
     compact: bool,
     /// Outer rect of the full window, restored when leaving compact mode.
     saved_rect: Option<egui::Rect>,
-    /// Last known outer position of the mini bar; the region is docked to it
-    /// and follows when the user drags the bar.
-    bar_anchor: Option<egui::Pos2>,
-    /// After we move the bar ourselves, ignore position changes until then.
-    bar_settle_until: Option<Instant>,
     /// Whether the region-frame overlay windows have had their DWM styling applied.
     frame_styled: bool,
     /// Whether Windows agreed to keep those windows out of screen captures; the
@@ -348,8 +347,6 @@ impl App {
             last_file: None,
             compact: false,
             saved_rect: None,
-            bar_anchor: None,
-            bar_settle_until: None,
             frame_styled: false,
             frame_excluded: false,
             frame_parts: 0,
@@ -1537,7 +1534,6 @@ impl eframe::App for App {
         }
 
         if self.compact && !self.intercept_close(&ctx) {
-            self.follow_bar(&ctx);
             self.region_frame(&ctx);
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 0)))

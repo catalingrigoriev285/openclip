@@ -1,40 +1,41 @@
-//! Persistent on-screen border around the selected recording region, a dashed yellow-green rectangle with eight
-//! square drag handles and a crosshair in the middle. Dragging the border moves
-//! the region, dragging a handle resizes it; while recording only the move is
-//! offered, because the encoder's frame size is fixed at the first frame.
+//! Persistent on-screen border around the selected recording region, a thin
+//! yellow-green rectangle with eight white drag handles and a crosshair in the
+//! middle. Dragging the border moves the region, dragging a handle resizes it;
+//! while recording only the move is offered, because the encoder's frame size
+//! is fixed at the first frame.
 //!
-//! Child viewports cannot be transparent with the wgpu backend on Windows
-//! (the DX12 swapchain only offers an opaque alpha mode), so the frame is
-//! built from four opaque strip windows placed just *outside* the region, with
-//! the dashes and handles painted on a matte band. Region capture crops to the
-//! exact rect, so the strips are never part of the recording; the crosshair
-//! sits *inside* the region and relies on `WDA_EXCLUDEFROMCAPTURE` instead.
-
-use std::time::{Duration, Instant};
+//! Child viewports cannot be transparent with the wgpu backend on Windows (the
+//! DX12 swapchain only offers an opaque alpha mode), so the frame is built from
+//! four strip windows placed just *outside* the region and each strip *is* the
+//! line: filled edge to edge with the border colour, so an opaque window has no
+//! matte band to give away. Region capture crops to the exact rect, so the
+//! strips are never part of the recording; the crosshair sits *inside* the
+//! region and relies on `WDA_EXCLUDEFROMCAPTURE` instead.
 
 use device_query::{DeviceQuery, DeviceState};
 use eframe::egui::{
-    self, Color32, CursorIcon, Pos2, Shape, Stroke, StrokeKind, Vec2, ViewportBuilder, ViewportCommand, ViewportId,
+    self, Color32, CursorIcon, Pos2, Stroke, Vec2, ViewportBuilder, ViewportCommand, ViewportId,
 };
 
-use super::theme::{mix, BG, ORANGE, RED, REGION};
+use super::theme::{BG, ORANGE, RED, REGION};
 use super::{App, SourceKind, State};
 use crate::capture::monitors::MonitorInfo;
 use crate::capture::Rect;
 
-/// Width of the chrome band around the region, in points (scaled to physical
-/// pixels per monitor). Wide enough to carry the handles.
-pub(super) const BAND_PT: f32 = 9.0;
-/// Physical-pixel gap between the region edge and the band, so DPI rounding
+/// Thickness of the border line around the region, in points (scaled to
+/// physical pixels per monitor). The strip window *is* the line, so this is
+/// both how thick the border looks and how wide the grab area is.
+pub(super) const BAND_PT: f32 = 5.0;
+/// Physical-pixel gap between the region edge and the line, so DPI rounding
 /// can never push a strip into the captured rect.
 pub(super) const GAP_PX: i32 = 2;
-/// Side of a drawn drag handle, in points.
-const HANDLE_PT: f32 = 7.0;
+/// Length of a drag handle along its strip, in points; across it the handle
+/// spans the full line thickness.
+const HANDLE_PT: f32 = 16.0;
+/// Colour of the drag handles, against the coloured line.
+const HANDLE_COLOR: Color32 = Color32::WHITE;
 /// Side of the centre crosshair window, in points.
 const CROSS_PT: f32 = 22.0;
-/// Dash pattern of the border, in points.
-const DASH_PT: f32 = 6.0;
-const DASH_GAP_PT: f32 = 4.0;
 /// Smallest region a resize may produce; matches the picker's threshold, and is
 /// even so the encoder-friendly rounding below never has to shrink past it.
 const MIN_REGION_PX: i32 = 16;
@@ -153,56 +154,6 @@ impl App {
         }
     }
 
-    /// Keeps the region docked to the mini bar: when the user drags the bar,
-    /// the region (and its frame) move by the same amount, clamped to the
-    /// region's monitor. Resizing is never involved, so this also works while
-    /// recording.
-    pub(super) fn follow_bar(&mut self, ctx: &egui::Context) {
-        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
-        // Right after we repositioned the bar ourselves, just track where the
-        // OS actually put it; keep repainting so the resync happens even when
-        // nothing else triggers a frame.
-        if let Some(until) = self.bar_settle_until {
-            if Instant::now() < until {
-                self.bar_anchor = Some(outer.min);
-                ctx.request_repaint_after(Duration::from_millis(50));
-                return;
-            }
-            self.bar_settle_until = None;
-        }
-        let Some(anchor) = self.bar_anchor else {
-            self.bar_anchor = Some(outer.min);
-            return;
-        };
-        if outer.min == anchor {
-            return;
-        }
-        self.bar_anchor = Some(outer.min);
-        if self.source_kind != SourceKind::Region {
-            return;
-        }
-        // A border drag is already moving the region; the bar must not fight it.
-        if self.frame_drag.is_some() {
-            return;
-        }
-        let delta = (outer.min - anchor) * ctx.pixels_per_point();
-        let Some((m, r)) = self.region_monitor() else { return };
-        let mon = (m.width, m.height);
-        let moved = dragged_rect(r, Grab::Move, (delta.x.round() as i32, delta.y.round() as i32), mon);
-        self.apply_region(moved);
-    }
-
-    /// Moves the mini bar by `delta` physical pixels, so it keeps its place
-    /// beside a region the user is dragging by its border.
-    fn shift_bar(&mut self, ctx: &egui::Context, delta: (i32, i32)) {
-        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
-        let ppp = ctx.pixels_per_point();
-        let pos = outer.min + Vec2::new(delta.0 as f32 / ppp, delta.1 as f32 / ppp);
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
-        // Our own command; `follow_bar` must not read it back as a user drag.
-        self.bar_moved_by_us();
-    }
-
     /// Shows (or, by not showing, closes) the border viewports and drives the
     /// drag they start.
     pub(super) fn region_frame(&mut self, ctx: &egui::Context) {
@@ -303,14 +254,7 @@ impl App {
             return;
         }
         let delta = (pos.0 - drag.start_pointer.0, pos.1 - drag.start_pointer.1);
-        let next = dragged_rect(drag.start_rect, drag.grab, delta, mon);
-        // The bar is docked to the region, so it travels with it — the same
-        // relationship `follow_bar` maintains in the other direction.
-        let shift = (next.x as i32 - rect.x as i32, next.y as i32 - rect.y as i32);
-        self.apply_region(next);
-        if shift != (0, 0) {
-            self.shift_bar(ctx, shift);
-        }
+        self.apply_region(dragged_rect(drag.start_rect, drag.grab, delta, mon));
         // The strips only repaint when something asks them to; a drag has to.
         ctx.request_repaint();
     }
@@ -324,36 +268,27 @@ fn part_title(part: Part) -> String {
 
 fn paint(ui: &mut egui::Ui, part: Part, area: egui::Rect, color: Color32, handles: bool) {
     let p = ui.painter();
-    // The band is opaque (child viewports cannot be transparent), so the gaps
-    // between the dashes are a dark tint of the border colour rather than black.
-    let matte = mix(BG, color, 0.45);
-    p.rect_filled(area, 0.0, matte);
     if part == Part::Centre {
+        // The one solid shape of the frame; its arms are cut out in the app's
+        // background colour so it reads as a target rather than a blob.
         let c = area.center();
         let arm = area.width() * 0.30;
         let gap = area.width() * 0.13;
-        let stroke = Stroke::new(2.0, color);
+        let stroke = Stroke::new(2.0, BG);
+        p.rect_filled(area, 0.0, color);
         p.line_segment([Pos2::new(c.x - gap - arm, c.y), Pos2::new(c.x - gap, c.y)], stroke);
         p.line_segment([Pos2::new(c.x + gap, c.y), Pos2::new(c.x + gap + arm, c.y)], stroke);
         p.line_segment([Pos2::new(c.x, c.y - gap - arm), Pos2::new(c.x, c.y - gap)], stroke);
         p.line_segment([Pos2::new(c.x, c.y + gap), Pos2::new(c.x, c.y + gap + arm)], stroke);
         return;
     }
-    let t = band_thickness(part, area);
-    let line = if part.horizontal() {
-        [Pos2::new(area.left(), area.center().y), Pos2::new(area.right(), area.center().y)]
-    } else {
-        [Pos2::new(area.center().x, area.top()), Pos2::new(area.center().x, area.bottom())]
-    };
-    let stroke = Stroke::new((t * 0.22).clamp(1.0, 2.0), color);
-    p.extend(Shape::dashed_line(&line, stroke, DASH_PT, DASH_GAP_PT));
+    // The strip is the line: filled edge to edge, so the opaque window shows
+    // nothing but the border itself.
+    p.rect_filled(area, 0.0, color);
     if handles {
-        let side = t * (HANDLE_PT / BAND_PT);
+        let size = handle_size(part, area);
         for c in handle_centres(part, area) {
-            let h = egui::Rect::from_center_size(c, Vec2::splat(side));
-            p.rect_filled(h, 0.0, color);
-            // A hairline of matte keeps the square readable on top of the dashes.
-            p.rect_stroke(h, 0.0, Stroke::new(1.0, matte), StrokeKind::Outside);
+            p.rect_filled(egui::Rect::from_center_size(c, size), 0.0, HANDLE_COLOR);
         }
     }
 }
@@ -363,16 +298,27 @@ fn band_thickness(part: Part, area: egui::Rect) -> f32 {
     if part.horizontal() { area.height() } else { area.width() }
 }
 
+/// Length of a handle along its strip, in the viewport's own points.
+fn handle_len(part: Part, area: egui::Rect) -> f32 {
+    band_thickness(part, area) * (HANDLE_PT / BAND_PT)
+}
+
+/// A handle spans the line across and [`HANDLE_PT`] along it.
+fn handle_size(part: Part, area: egui::Rect) -> Vec2 {
+    let (t, len) = (band_thickness(part, area), handle_len(part, area));
+    if part.horizontal() { Vec2::new(len, t) } else { Vec2::new(t, len) }
+}
+
 /// Centres of the handles this strip owns. The horizontal strips span the full
 /// outer width, so they carry the corners as well as the N/S midpoints.
 fn handle_centres(part: Part, area: egui::Rect) -> Vec<Pos2> {
-    let t = band_thickness(part, area);
+    let len = handle_len(part, area);
     if part.horizontal() {
         let y = area.center().y;
         vec![
-            Pos2::new(area.left() + t / 2.0, y),
+            Pos2::new(area.left() + len / 2.0, y),
             Pos2::new(area.center().x, y),
-            Pos2::new(area.right() - t / 2.0, y),
+            Pos2::new(area.right() - len / 2.0, y),
         ]
     } else {
         vec![Pos2::new(area.center().x, area.center().y)]
@@ -387,16 +333,15 @@ fn grab_at(part: Part, area: egui::Rect, q: Pos2, handles: bool) -> Grab {
     if !handles || part == Part::Centre {
         return Grab::Move;
     }
-    let t = band_thickness(part, area);
-    // A little more generous than the drawn square, which is easy to miss.
-    let reach = (t * 0.8).max(4.0);
+    // Exactly the drawn handle, which is already a generous target.
+    let reach = (handle_len(part, area) / 2.0).max(4.0);
     if part.horizontal() {
         let (top, bottom) = (part == Part::Top, part == Part::Bottom);
         let near = |x: f32| (q.x - x).abs() <= reach;
-        if near(area.left() + t / 2.0) {
+        if near(area.left() + reach) {
             return Grab::Resize { left: true, right: false, top, bottom };
         }
-        if near(area.right() - t / 2.0) {
+        if near(area.right() - reach) {
             return Grab::Resize { left: false, right: true, top, bottom };
         }
         if near(area.center().x) {
@@ -647,20 +592,21 @@ mod tests {
 
     #[test]
     fn grab_at_maps_handles_then_falls_back_to_move() {
-        // A 900-point-wide top strip, 9 points thick.
-        let area = egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(900.0, 9.0));
-        let g = |x: f32| grab_at(Part::Top, area, Pos2::new(x, 4.5), true);
-        assert_eq!(g(4.5), resize(true, false, true, false));
-        assert_eq!(g(895.5), resize(false, true, true, false));
+        // A 900-point-wide top strip, one line thick.
+        let mid = BAND_PT / 2.0;
+        let area = egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(900.0, BAND_PT));
+        let g = |x: f32| grab_at(Part::Top, area, Pos2::new(x, mid), true);
+        assert_eq!(g(0.0), resize(true, false, true, false));
+        assert_eq!(g(900.0), resize(false, true, true, false));
         assert_eq!(g(450.0), resize(false, false, true, false));
         assert_eq!(g(200.0), Grab::Move);
-        // Handles off (recording): the whole band moves.
-        assert_eq!(grab_at(Part::Top, area, Pos2::new(4.5, 4.5), false), Grab::Move);
+        // Handles off (recording): the whole line moves.
+        assert_eq!(grab_at(Part::Top, area, Pos2::new(0.0, mid), false), Grab::Move);
         // The vertical strips carry a single midpoint handle.
-        let side = egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(9.0, 600.0));
-        assert_eq!(grab_at(Part::Left, side, Pos2::new(4.5, 300.0), true), resize(true, false, false, false));
-        assert_eq!(grab_at(Part::Left, side, Pos2::new(4.5, 100.0), true), Grab::Move);
-        assert_eq!(grab_at(Part::Centre, side, Pos2::new(4.5, 300.0), true), Grab::Move);
+        let side = egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(BAND_PT, 600.0));
+        assert_eq!(grab_at(Part::Left, side, Pos2::new(mid, 300.0), true), resize(true, false, false, false));
+        assert_eq!(grab_at(Part::Left, side, Pos2::new(mid, 100.0), true), Grab::Move);
+        assert_eq!(grab_at(Part::Centre, side, Pos2::new(mid, 300.0), true), Grab::Move);
     }
 
     #[test]
