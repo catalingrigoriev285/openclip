@@ -521,6 +521,12 @@ strings! {
     BAR_PICK_SOURCE => "Pick a source", "Alege o sursă", "Выберите источник";
 
     // ----- runtime status notes ---------------------------------------------
+    NOTE_CAPTURE_BORDER_UNSUPPORTED => "this Windows version cannot hide the capture border",
+        "această versiune de Windows nu poate ascunde chenarul de captură",
+        "эта версия Windows не может скрыть рамку захвата";
+    NOTE_CAPTURE_CURSOR_UNSUPPORTED => "this Windows version cannot hide the cursor in the capture",
+        "această versiune de Windows nu poate ascunde cursorul în captură",
+        "эта версия Windows не может скрыть курсор в записи";
     NOTE_SYSTEM_AUDIO_UNAVAILABLE => "system audio unavailable: {0}", "sunetul de sistem nu este disponibil: {0}",
         "системный звук недоступен: {0}";
     NOTE_MIC_UNAVAILABLE => "microphone unavailable: {0}", "microfonul nu este disponibil: {0}",

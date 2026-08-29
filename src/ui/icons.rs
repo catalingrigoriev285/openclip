@@ -38,5 +38,6 @@ pub const HOME: &str = "\u{f015}"; // house
 pub const GEAR: &str = "\u{f013}";
 pub const FILM: &str = "\u{f008}";
 pub const IMAGE: &str = "\u{f03e}";
+pub const MUSIC: &str = "\u{f001}"; // music
 pub const INFO: &str = "\u{f05a}"; // circle-info
 pub const MOUSE: &str = "\u{f8cc}"; // computer-mouse

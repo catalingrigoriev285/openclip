@@ -154,11 +154,25 @@ pub type FrameSink = Box<dyn FnMut(RawFrame) -> bool + Send>;
 pub struct CaptureHandle {
     stop: Arc<AtomicBool>,
     stopper: Option<Box<dyn FnOnce() -> Result<()> + Send>>,
+    /// Set when the backend had to settle for less than it was asked for (an OS
+    /// too old for a capture setting); the caller surfaces it once.
+    note: Option<String>,
 }
 
 impl CaptureHandle {
     pub(crate) fn new(stop: Arc<AtomicBool>, stopper: Box<dyn FnOnce() -> Result<()> + Send>) -> Self {
-        Self { stop, stopper: Some(stopper) }
+        Self { stop, stopper: Some(stopper), note: None }
+    }
+
+    /// Attaches a note about the capture the backend actually got.
+    pub(crate) fn with_note(mut self, note: Option<String>) -> Self {
+        self.note = note;
+        self
+    }
+
+    /// Takes that note, leaving none behind.
+    pub fn take_note(&mut self) -> Option<String> {
+        self.note.take()
     }
 
     /// Signals the backend to stop and waits for its thread to finish.

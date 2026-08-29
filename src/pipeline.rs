@@ -459,6 +459,7 @@ fn start_capture(
     region: Option<LiveRect>,
 ) -> Result<CaptureHandle> {
     let sink_pool = pool.clone();
+    let note_stats = stats.clone();
     let sink: capture::FrameSink = Box::new(move |mut frame| {
         stats.frames_captured.fetch_add(1, Ordering::Relaxed);
         // Sample the pointer right when the frame arrives so effects line up
@@ -476,7 +477,7 @@ fn start_capture(
             Err(TrySendError::Disconnected(_)) => false,
         }
     });
-    capture::start(
+    let mut handle = capture::start(
         CaptureConfig {
             source: config.source.clone(),
             fps: config.fps(),
@@ -487,7 +488,13 @@ fn start_capture(
         epoch,
         sink,
     )
-    .context("starting screen capture")
+    .context("starting screen capture")?;
+    // Whatever the backend could not honour (an OS without the capture-border
+    // or cursor setting) shows up next to the encoder notes.
+    if let Some(n) = handle.take_note() {
+        note_stats.add_note(n);
+    }
+    Ok(handle)
 }
 
 /// Fixed-cadence timeline: slot `k` is presented at `pts0 + k / fps`

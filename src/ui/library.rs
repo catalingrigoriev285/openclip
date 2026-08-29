@@ -44,6 +44,9 @@ pub struct Entry {
     pub name: String,
     pub size: u64,
     pub modified: SystemTime,
+    /// When the file was made; falls back to [`Entry::modified`] on the
+    /// platforms and filesystems that do not record it.
+    pub created: SystemTime,
 }
 
 pub struct Library {
@@ -124,10 +127,12 @@ fn scan(dir: &Path, tab: LibraryTab) -> Vec<Entry> {
             if !meta.is_file() {
                 return None;
             }
+            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             Some(Entry {
                 name: path.file_name()?.to_string_lossy().into_owned(),
                 size: meta.len(),
-                modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                modified,
+                created: meta.created().unwrap_or(modified),
                 path,
             })
         })

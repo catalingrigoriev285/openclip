@@ -9,13 +9,14 @@ mod minibar;
 pub mod picker;
 pub mod region_frame;
 mod theme;
+mod thumbs;
 mod updater;
 mod widgets;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{
     self, Align, Align2, Color32, ColorImage, CornerRadius, FontId, Layout, Margin, PointerButton,
@@ -38,6 +39,7 @@ use crate::video::preview::{make_preview, PreviewImage};
 use format_dialog::{DialogOutcome, FormatDialog, FormatSection};
 use library::{open_with_default, reveal_in_folder, Library, LibraryTab};
 use picker::{Picker, PickerOutcome};
+use thumbs::Thumbs;
 use theme::*;
 use widgets::*;
 
@@ -49,6 +51,12 @@ pub const WINDOW_SIZE: Vec2 = Vec2::new(820.0, 600.0);
 
 /// Application icon shown on the About page (same artwork as the window icon).
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/android-chrome-192x192.png");
+
+/// Height of one library row: the poster tile plus a little air.
+const ROW_H: f32 = 70.0;
+/// Poster tile in a library row, 16:9 so landscape recordings fill it.
+const THUMB_W: f32 = 96.0;
+const THUMB_H: f32 = 54.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
@@ -242,6 +250,8 @@ pub struct App {
     state: State,
     live: LivePreview,
     library: Library,
+    /// Poster frames and durations for the files the library lists.
+    thumbs: Thumbs,
     preview_tex: Option<TextureHandle>,
     preview_dims: (u32, u32),
     message: Option<(String, bool)>, // (text, is_error)
@@ -339,6 +349,7 @@ impl App {
             state: State::Idle,
             live: LivePreview::new(),
             library,
+            thumbs: Thumbs::new(),
             preview_tex: None,
             preview_dims: (0, 0),
             message: None,
@@ -930,13 +941,16 @@ impl App {
             });
         });
 
-        // File list.
+        // File list: a poster frame on the left, then name and details.
         let list_h = (ui.available_height() - 60.0).max(80.0);
         let mut clicked: Option<usize> = None;
         let mut activated: Option<usize> = None;
+        self.thumbs.retain(&self.library.entries);
         let entries = &self.library.entries;
+        let thumbs = &mut self.thumbs;
         let selected_idx = self.library.selected;
-        let empty_label = self.library.tab.empty_label();
+        let tab = self.library.tab;
+        let empty_label = tab.empty_label();
         Card::show(ui, |card| {
             card.flush(|ui| {
                 ui.set_min_height(list_h);
@@ -950,32 +964,48 @@ impl App {
                     }
                     for (i, e) in entries.iter().enumerate() {
                         let selected = selected_idx == Some(i);
-                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
+                        let (rect, resp) =
+                            ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click());
+                        // The probe runs on a background thread; until it
+                        // answers the row shows a placeholder tile.
+                        let (texture, duration) =
+                            thumbs.get(e).map(|t| (t.texture.clone(), t.duration)).unwrap_or((None, None));
                         let p = ui.painter();
                         if i > 0 {
                             p.hline((rect.left() + PAD)..=rect.right(), rect.top(), Stroke::new(1.0, SEPARATOR));
                         }
-                        let pill = rect.shrink2(Vec2::new(6.0, 2.0));
+                        let pill = rect.shrink2(Vec2::new(6.0, 3.0));
                         if selected {
-                            p.rect_filled(pill, CornerRadius::same(8), BLUE);
+                            p.rect_filled(pill, CornerRadius::same(10), BLUE);
                         } else if resp.hovered() {
-                            p.rect_filled(pill, CornerRadius::same(8), FILL_HOVER);
+                            p.rect_filled(pill, CornerRadius::same(10), FILL_HOVER);
                         }
-                        let (name_color, size_color) = if selected { (Color32::WHITE, Color32::WHITE) } else { (LABEL, LABEL_2) };
-                        let name_rect = egui::Rect::from_min_max(rect.min + Vec2::new(PAD, 0.0), rect.max - Vec2::new(96.0, 0.0));
-                        p.with_clip_rect(name_rect).text(
-                            name_rect.left_center(),
+                        let well = egui::Rect::from_min_size(
+                            egui::pos2(rect.left() + PAD, rect.center().y - THUMB_H / 2.0),
+                            Vec2::new(THUMB_W, THUMB_H),
+                        );
+                        paint_thumb(p, well, texture.as_ref(), tab);
+                        let (name_color, meta_color) =
+                            if selected { (Color32::WHITE, Color32::WHITE) } else { (LABEL, LABEL_2) };
+                        let text_left = well.right() + 12.0;
+                        let text_rect = egui::Rect::from_min_max(
+                            egui::pos2(text_left, rect.top()),
+                            egui::pos2(rect.right() - PAD, rect.bottom()),
+                        );
+                        let clip = p.with_clip_rect(text_rect);
+                        clip.text(
+                            egui::pos2(text_left, rect.center().y - 9.0),
                             Align2::LEFT_CENTER,
                             &e.name,
                             FontId::proportional(13.0),
                             name_color,
                         );
-                        p.text(
-                            rect.right_center() - Vec2::new(PAD, 0.0),
-                            Align2::RIGHT_CENTER,
-                            human_bytes(e.size),
-                            FontId::proportional(12.0),
-                            size_color,
+                        clip.text(
+                            egui::pos2(text_left, rect.center().y + 10.0),
+                            Align2::LEFT_CENTER,
+                            entry_details(e, duration),
+                            FontId::proportional(11.0),
+                            meta_color,
                         );
                         if resp.double_clicked() {
                             activated = Some(i);
@@ -1508,6 +1538,9 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_encoders();
         self.poll_update(&ctx);
+        if self.thumbs.poll(&ctx) {
+            ctx.request_repaint();
+        }
         self.tick_countdown(&ctx);
         self.poll_preview(&ctx);
         self.track_message();
@@ -1660,7 +1693,101 @@ fn timestamp() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Civil date from days since epoch (Howard Hinnant's algorithm), UTC.
+    let (y, m, d, hh, mm, ss) = civil(secs);
+    format!("{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}")
+}
+
+pub(super) fn format_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+}
+
+/// Draws the poster tile: the frame itself when one has been decoded, a tinted
+/// icon for the file kind while it is being read (or when it cannot be).
+fn paint_thumb(p: &egui::Painter, well: egui::Rect, texture: Option<&TextureHandle>, tab: LibraryTab) {
+    p.rect_filled(well, CornerRadius::same(6), PREVIEW_BG);
+    let Some(texture) = texture else {
+        let icon = match tab {
+            LibraryTab::Videos => icons::FILM,
+            LibraryTab::Images => icons::IMAGE,
+            LibraryTab::Audios => icons::MUSIC,
+        };
+        p.text(well.center(), Align2::CENTER_CENTER, icon, FontId::proportional(18.0), LABEL_3);
+        return;
+    };
+    // Letterbox rather than crop, so the tile shows the whole frame.
+    let size = texture.size_vec2();
+    let scale = (well.width() / size.x).min(well.height() / size.y);
+    let fitted = egui::Rect::from_center_size(well.center(), size * scale);
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    p.add(
+        egui::epaint::RectShape::filled(fitted, CornerRadius::same(6), Color32::WHITE)
+            .with_texture(texture.id(), uv),
+    );
+}
+
+/// The second line of a library row: size, when the file was made and, for
+/// anything with a running time, how long it is.
+fn entry_details(entry: &library::Entry, duration: Option<Duration>) -> String {
+    let mut s = human_bytes(entry.size);
+    s.push_str("  ·  ");
+    s.push_str(&local_datetime(entry.created));
+    if let Some(d) = duration {
+        s.push_str("  ·  ");
+        s.push_str(&short_duration(d));
+    }
+    s
+}
+
+/// `M:SS`, widening to `H:MM:SS` for recordings past the hour.
+pub(super) fn short_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+/// `YYYY-MM-DD HH:MM` in the local time zone. Digits only: no month name
+/// needs translating, and the order is the same in every language.
+fn local_datetime(t: SystemTime) -> String {
+    let Ok(since_epoch) = t.duration_since(std::time::UNIX_EPOCH) else { return String::new() };
+    let local = since_epoch.as_secs() as i64 + local_offset_secs();
+    if local < 0 {
+        return String::new();
+    }
+    let (y, m, d, hh, mm, _) = civil(local as u64);
+    format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}")
+}
+
+/// Seconds to add to UTC to get local time. Read once: a session does not
+/// outlive a time-zone change often enough to be worth re-reading per row.
+fn local_offset_secs() -> i64 {
+    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *OFFSET.get_or_init(|| {
+        #[cfg(windows)]
+        {
+            use windows::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION};
+            const DAYLIGHT: u32 = 2; // TIME_ZONE_ID_DAYLIGHT
+            let mut tz = TIME_ZONE_INFORMATION::default();
+            // SAFETY: plain Win32 call filling in a stack struct.
+            let id = unsafe { GetTimeZoneInformation(&mut tz) };
+            if id == TIME_ZONE_ID_INVALID {
+                return 0;
+            }
+            // Bias is "UTC = local + bias" in minutes, so the sign flips.
+            let bias = tz.Bias + if id == DAYLIGHT { tz.DaylightBias } else { tz.StandardBias };
+            -(bias as i64) * 60
+        }
+        #[cfg(not(windows))]
+        0
+    })
+}
+
+/// Civil date and clock time from seconds since the Unix epoch (Howard
+/// Hinnant's algorithm).
+fn civil(secs: u64) -> (i64, i64, i64, u64, u64, u64) {
     let days = (secs / 86400) as i64;
     let rem = secs % 86400;
     let z = days + 719_468;
@@ -1673,12 +1800,7 @@ fn timestamp() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, (rem % 3600) / 60, rem % 60)
-}
-
-pub(super) fn format_duration(d: Duration) -> String {
-    let s = d.as_secs();
-    format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+    (y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60)
 }
 
 pub(super) fn human_bytes(b: u64) -> String {

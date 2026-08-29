@@ -470,15 +470,16 @@ fn correct_placement(ctx: &egui::Context, id: ViewportId, p: PhysRect) {
 // ----- platform styling ---------------------------------------------------------
 
 /// Squares off the DWM rounded corners/border of the overlay window with the
-/// given title and asks Windows to keep it out of screen captures. Returns
-/// `None` if no such window exists (yet), else whether the capture exclusion
-/// took effect.
+/// given title, drops the drop shadow it would otherwise cast, and asks Windows
+/// to keep it out of screen captures. Returns `None` if no such window exists
+/// (yet), else whether the capture exclusion took effect.
 #[cfg(windows)]
 pub fn style_overlay(title: &str) -> Option<bool> {
     use std::ffi::c_void;
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+        DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongPtrW, SetWindowDisplayAffinity, SetWindowLongPtrW, FindWindowW, GWL_EXSTYLE,
@@ -506,6 +507,18 @@ pub fn style_overlay(title: &str) -> Option<bool> {
             DWMWA_BORDER_COLOR,
             &DWMWA_COLOR_NONE as *const _ as *const c_void,
             size_of_val(&DWMWA_COLOR_NONE) as u32,
+        );
+        // winit keeps `WS_CAPTION` on undecorated windows (it cuts the frame
+        // away in `WM_NCCALCSIZE`), so DWM still draws a drop shadow around
+        // each strip — a grey smudge along the region edge, and four of them
+        // overlapping at the corners. Turning off non-client rendering removes
+        // it; the strips paint their whole client area themselves.
+        let policy = DWMNCRP_DISABLED;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const _ as *const c_void,
+            size_of_val(&policy) as u32,
         );
         // Grabbing the border must not pull focus away from whatever is being
         // recorded; mouse messages still arrive.

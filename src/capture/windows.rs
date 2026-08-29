@@ -246,15 +246,23 @@ where
     };
     let pool = config.pool.clone().unwrap_or_else(|| FramePool::new(6));
     let flags = Flags { sink, epoch, stop: stop.clone(), crop, fps, limit_ourselves: !native_interval, pool };
-    let cursor = if config.show_cursor {
-        CursorCaptureSettings::WithCursor
-    } else {
-        CursorCaptureSettings::WithoutCursor
-    };
+    // Both of these are rejected outright — the session never starts — when the
+    // OS lacks the property behind them, so ask only for what it supports.
+    let border_ok = supported("border", GraphicsCaptureApi::is_border_settings_supported());
+    let cursor_ok = supported("cursor", GraphicsCaptureApi::is_cursor_settings_supported());
+    let mut notes = Vec::new();
+    if !border_ok {
+        notes.push(crate::t!(NOTE_CAPTURE_BORDER_UNSUPPORTED).to_string());
+    }
+    // The system default captures the cursor, which is what `show_cursor` asks
+    // for anyway — only hiding it cannot be honoured.
+    if !cursor_ok && !config.show_cursor {
+        notes.push(crate::t!(NOTE_CAPTURE_CURSOR_UNSUPPORTED).to_string());
+    }
     let settings = Settings::new(
         item,
-        cursor,
-        DrawBorderSettings::WithoutBorder,
+        cursor_setting(config.show_cursor, cursor_ok),
+        border_setting(border_ok),
         SecondaryWindowSettings::Default,
         interval,
         DirtyRegionSettings::Default,
@@ -262,7 +270,7 @@ where
         flags,
     );
     let control = Handler::start_free_threaded(settings)
-        .map_err(|e| anyhow!("failed to start Windows.Graphics.Capture: {e:?}"))?;
+        .map_err(|e| anyhow!("failed to start Windows.Graphics.Capture: {e}"))?;
 
     let control = Arc::new(Mutex::new(Some(control)));
     let stopper = {
@@ -271,12 +279,51 @@ where
             stop.store(true, Ordering::SeqCst);
             let ctl = control.lock().unwrap().take();
             if let Some(ctl) = ctl {
-                ctl.stop().map_err(|e| anyhow!("stopping capture: {e:?}"))?;
+                ctl.stop().map_err(|e| anyhow!("stopping capture: {e}"))?;
             }
             Ok(())
         })
     };
-    Ok(CaptureHandle::new(stop, stopper))
+    Ok(CaptureHandle::new(stop, stopper).with_note((!notes.is_empty()).then(|| notes.join("; "))))
+}
+
+/// Whether an optional capture setting can be changed on this OS. A failed
+/// probe counts as unsupported: asking for a setting the session rejects makes
+/// it refuse to start at all, so the safe answer is the system default.
+/// `OPENCLIP_LEGACY_WGC` forces every answer to `false` — the Windows 10 path,
+/// which has no `IsBorderRequired` (and no `IsCursorCaptureEnabled` before 2004).
+fn supported(what: &str, probe: Result<bool, windows_capture::graphics_capture_api::Error>) -> bool {
+    if std::env::var_os("OPENCLIP_LEGACY_WGC").is_some() {
+        log::info!("capture: OPENCLIP_LEGACY_WGC set; treating the {what} setting as unsupported");
+        return false;
+    }
+    match probe {
+        Ok(true) => true,
+        Ok(false) => {
+            log::info!("capture: this Windows version cannot change the {what} setting; using the system default");
+            false
+        }
+        Err(e) => {
+            log::warn!("capture: {what}-setting probe failed ({e}); using the system default");
+            false
+        }
+    }
+}
+
+/// Hide the capture border where the OS allows it (Windows 11); elsewhere the
+/// system default, which draws the yellow frame around the captured item.
+fn border_setting(supported: bool) -> DrawBorderSettings {
+    if supported { DrawBorderSettings::WithoutBorder } else { DrawBorderSettings::Default }
+}
+
+/// Follow `show_cursor` where the OS allows it; elsewhere the system default,
+/// which includes the cursor.
+fn cursor_setting(show_cursor: bool, supported: bool) -> CursorCaptureSettings {
+    match (supported, show_cursor) {
+        (false, _) => CursorCaptureSettings::Default,
+        (true, true) => CursorCaptureSettings::WithCursor,
+        (true, false) => CursorCaptureSettings::WithoutCursor,
+    }
 }
 
 fn monitor(id: u32) -> Result<Monitor> {
@@ -284,4 +331,21 @@ fn monitor(id: u32) -> Result<Monitor> {
     // Validate the handle by asking for its size.
     m.width().map_err(|e| anyhow!("monitor {id}: {e:?}")).context("monitor not found")?;
     Ok(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_settings_fall_back_to_the_system_default() {
+        // Windows 11: exactly what was asked for.
+        assert_eq!(border_setting(true), DrawBorderSettings::WithoutBorder);
+        assert_eq!(cursor_setting(true, true), CursorCaptureSettings::WithCursor);
+        assert_eq!(cursor_setting(false, true), CursorCaptureSettings::WithoutCursor);
+        // Windows 10: the session refuses to start unless both are `Default`.
+        assert_eq!(border_setting(false), DrawBorderSettings::Default);
+        assert_eq!(cursor_setting(true, false), CursorCaptureSettings::Default);
+        assert_eq!(cursor_setting(false, false), CursorCaptureSettings::Default);
+    }
 }
