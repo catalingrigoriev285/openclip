@@ -273,6 +273,13 @@ pub struct App {
     start_compact: bool,
 }
 
+/// `x,y,w,h` in monitor-local physical pixels, for `OPENCLIP_START_REGION`.
+fn parse_region(spec: &str) -> Option<Rect> {
+    let n: Vec<u32> = spec.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
+    let [x, y, width, height] = n[..] else { return None };
+    (width >= 16 && height >= 16).then_some(Rect { x, y, width: width & !1, height: height & !1 })
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
@@ -293,14 +300,22 @@ impl App {
                 let _ = tx.send(available_encoders());
             })
             .ok();
+        // Debug aid: `OPENCLIP_START_REGION=x,y,w,h` opens with that region already
+        // selected on the first monitor, so the border can be screenshotted
+        // without driving the picker.
+        let start_region = cfg!(debug_assertions)
+            .then(|| std::env::var("OPENCLIP_START_REGION").ok())
+            .flatten()
+            .and_then(|s| parse_region(&s))
+            .and_then(|r| Some((monitors.first()?.id, r)));
         let mut app = Self {
             monitors,
             windows,
             mics,
-            source_kind: SourceKind::Monitor,
+            source_kind: if start_region.is_some() { SourceKind::Region } else { SourceKind::Monitor },
             monitor_idx: 0,
             window_idx: 0,
-            region: None,
+            region: start_region,
             format: settings.format,
             format_dialog: FormatDialog::new(),
             encoders: Vec::new(),
@@ -1532,8 +1547,8 @@ impl eframe::App for App {
             return;
         }
 
-        // The border follows the region in the full window too, so it can be
-        // nudged before ever collapsing to the bar.
+        // Not compact: closes the border viewports (and drops any drag state) if
+        // the mini bar was just dismissed.
         self.region_frame(&ctx);
 
         egui::Panel::top("toolbar")

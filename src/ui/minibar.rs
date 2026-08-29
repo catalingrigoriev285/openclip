@@ -87,7 +87,7 @@ impl App {
 
     /// Marks that the bar's position is about to change because of our own
     /// viewport command, so `follow_bar` resyncs instead of moving the region.
-    fn bar_moved_by_us(&mut self) {
+    pub(super) fn bar_moved_by_us(&mut self) {
         self.bar_anchor = None;
         self.bar_settle_until = Some(Instant::now() + BAR_SETTLE);
     }

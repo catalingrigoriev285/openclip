@@ -17,7 +17,7 @@ use eframe::egui::{
     self, Color32, CursorIcon, Pos2, Shape, Stroke, StrokeKind, Vec2, ViewportBuilder, ViewportCommand, ViewportId,
 };
 
-use super::theme::{BG, ORANGE, RED, REGION};
+use super::theme::{mix, BG, ORANGE, RED, REGION};
 use super::{App, SourceKind, State};
 use crate::capture::monitors::MonitorInfo;
 use crate::capture::Rect;
@@ -121,10 +121,12 @@ impl App {
         self.monitors.iter().find(|m| m.id == id).map(|m| (m, rect))
     }
 
-    /// The frame is shown whenever a region is selected — in the full window as
-    /// well as the mini bar — but never while the picker overlay is open.
+    /// The frame belongs to the mini bar: it is shown while compact for a region
+    /// source, and closing the bar hides it along with the bar. Never while the
+    /// picker overlay is open.
     fn region_frame_visible(&self) -> bool {
-        self.source_kind == SourceKind::Region
+        self.compact
+            && self.source_kind == SourceKind::Region
             && !matches!(self.state, State::Picking(_))
             && self.region_monitor().is_some()
     }
@@ -188,6 +190,17 @@ impl App {
         let mon = (m.width, m.height);
         let moved = dragged_rect(r, Grab::Move, (delta.x.round() as i32, delta.y.round() as i32), mon);
         self.apply_region(moved);
+    }
+
+    /// Moves the mini bar by `delta` physical pixels, so it keeps its place
+    /// beside a region the user is dragging by its border.
+    fn shift_bar(&mut self, ctx: &egui::Context, delta: (i32, i32)) {
+        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
+        let ppp = ctx.pixels_per_point();
+        let pos = outer.min + Vec2::new(delta.0 as f32 / ppp, delta.1 as f32 / ppp);
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+        // Our own command; `follow_bar` must not read it back as a user drag.
+        self.bar_moved_by_us();
     }
 
     /// Shows (or, by not showing, closes) the border viewports and drives the
@@ -291,7 +304,13 @@ impl App {
         }
         let delta = (pos.0 - drag.start_pointer.0, pos.1 - drag.start_pointer.1);
         let next = dragged_rect(drag.start_rect, drag.grab, delta, mon);
+        // The bar is docked to the region, so it travels with it — the same
+        // relationship `follow_bar` maintains in the other direction.
+        let shift = (next.x as i32 - rect.x as i32, next.y as i32 - rect.y as i32);
         self.apply_region(next);
+        if shift != (0, 0) {
+            self.shift_bar(ctx, shift);
+        }
         // The strips only repaint when something asks them to; a drag has to.
         ctx.request_repaint();
     }
@@ -305,9 +324,10 @@ fn part_title(part: Part) -> String {
 
 fn paint(ui: &mut egui::Ui, part: Part, area: egui::Rect, color: Color32, handles: bool) {
     let p = ui.painter();
-    // The band is opaque (child viewports cannot be transparent), so it is a
-    // matte the dashes and handles sit on.
-    p.rect_filled(area, 0.0, BG);
+    // The band is opaque (child viewports cannot be transparent), so the gaps
+    // between the dashes are a dark tint of the border colour rather than black.
+    let matte = mix(BG, color, 0.45);
+    p.rect_filled(area, 0.0, matte);
     if part == Part::Centre {
         let c = area.center();
         let arm = area.width() * 0.30;
@@ -333,7 +353,7 @@ fn paint(ui: &mut egui::Ui, part: Part, area: egui::Rect, color: Color32, handle
             let h = egui::Rect::from_center_size(c, Vec2::splat(side));
             p.rect_filled(h, 0.0, color);
             // A hairline of matte keeps the square readable on top of the dashes.
-            p.rect_stroke(h, 0.0, Stroke::new(1.0, BG), StrokeKind::Outside);
+            p.rect_stroke(h, 0.0, Stroke::new(1.0, matte), StrokeKind::Outside);
         }
     }
 }
