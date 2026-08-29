@@ -10,6 +10,7 @@ pub mod picker;
 pub mod region_frame;
 mod theme;
 mod updater;
+mod widgets;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -18,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Align2, Color32, ColorImage, CornerRadius, FontId, Layout, Margin, PointerButton,
-    RichText, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2,
+    RichText, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
 };
 
 use crate::audio::capture::list_input_devices;
@@ -34,12 +35,16 @@ use crate::video::encoder::{available_encoders, refresh_encoders, EncoderInfo};
 use crate::video::mouse_fx::{MouseFx, MouseSampler, ARROW, CLICK_DURATION};
 use crate::video::preview::{make_preview, PreviewImage};
 
-use format_dialog::{DialogOutcome, FormatDialog};
+use format_dialog::{DialogOutcome, FormatDialog, FormatSection};
 use library::{open_with_default, reveal_in_folder, Library, LibraryTab};
 use picker::{Picker, PickerOutcome};
 use theme::*;
+use widgets::*;
 
 type SharedFx = Arc<RwLock<MouseFx>>;
+
+/// Application icon shown on the About page (same artwork as the window icon).
+const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/android-chrome-192x192.png");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
@@ -88,6 +93,14 @@ impl HomeTab {
 enum VideoTab {
     Record,
     Mouse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneralTab {
+    Output,
+    Recording,
+    Appearance,
+    Sources,
 }
 
 enum State {
@@ -221,6 +234,7 @@ pub struct App {
     tab: Tab,
     home_tab: HomeTab,
     video_tab: VideoTab,
+    general_tab: GeneralTab,
     state: State,
     live: LivePreview,
     library: Library,
@@ -241,12 +255,18 @@ pub struct App {
     bar_settle_until: Option<Instant>,
     /// Whether the region-frame strip windows have had their DWM styling applied.
     frame_styled: bool,
+    /// Inner size of the mini bar window; grows once when localized labels need more room.
+    bar_size: Vec2,
+    /// App icon texture for the About page (decoded on first use).
+    about_icon: Option<TextureHandle>,
+    /// Debug aid: `OPENCLIP_START_COMPACT=1` opens straight into the mini bar.
+    start_compact: bool,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
-        icons::install(&cc.egui_ctx);
+        install_fonts(&cc.egui_ctx);
         let monitors = list_monitors().unwrap_or_default();
         let windows = list_windows().unwrap_or_default();
         let mics = list_input_devices();
@@ -291,6 +311,7 @@ impl App {
             tab: Tab::Home,
             home_tab: HomeTab::Videos,
             video_tab: VideoTab::Record,
+            general_tab: GeneralTab::Output,
             state: State::Idle,
             live: LivePreview::new(),
             library,
@@ -305,6 +326,9 @@ impl App {
             bar_anchor: None,
             bar_settle_until: None,
             frame_styled: false,
+            bar_size: minibar::BAR_SIZE,
+            about_icon: None,
+            start_compact: cfg!(debug_assertions) && std::env::var_os("OPENCLIP_START_COMPACT").is_some(),
         };
         if app.check_updates {
             app.start_update_check(&cc.egui_ctx);
@@ -350,15 +374,15 @@ impl App {
         }
     }
 
-    pub(super) fn open_format_dialog(&mut self) {
+    pub(super) fn open_format_dialog(&mut self, section: FormatSection) {
         self.wait_for_encoders(Duration::from_millis(1500));
-        self.format_dialog.open(&self.format, &self.encoders);
+        self.format_dialog.open(&self.format, &self.encoders, section);
     }
 
     /// Runs the Format dialog (both layouts call this last, like the delete dialog).
     fn show_format_dialog(&mut self, ctx: &egui::Context) {
         let recording = self.is_recording();
-        match self.format_dialog.show(ctx, &self.encoders, self.source_size(), recording) {
+        match self.format_dialog.show(ctx, &self.encoders, self.source_size(), recording, self.compact) {
             DialogOutcome::Ok(f) => {
                 self.format = f;
                 self.save_settings();
@@ -610,28 +634,29 @@ impl App {
 
     // ----- toolbar -----------------------------------------------------------
 
+    // ----- header ------------------------------------------------------------
+
     fn toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let recording = self.is_recording();
         let paused = matches!(&self.state, State::Recording(r) if r.is_paused());
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-
             ui.add_enabled_ui(!recording, |ui| {
-                for (kind, icon, label) in [
-                    (SourceKind::Region, icons::REGION, t!(MODE_REGION)),
-                    (SourceKind::Monitor, icons::MONITOR, t!(MODE_MONITOR)),
-                    (SourceKind::Window, icons::WINDOW, t!(MODE_WINDOW)),
-                ] {
-                    if mode_button(ui, icon, label, self.source_kind == kind).clicked() {
-                        self.select_mode(kind);
-                    }
+                let mut kind = self.source_kind;
+                let items = [
+                    (SourceKind::Region, Some(icons::REGION), t!(MODE_REGION)),
+                    (SourceKind::Monitor, Some(icons::MONITOR), t!(MODE_MONITOR)),
+                    (SourceKind::Window, Some(icons::WINDOW), t!(MODE_WINDOW)),
+                ];
+                if segmented(ui, "mode", &items, &mut kind) {
+                    self.select_mode(kind);
                 }
-                ui.add_space(6.0);
-                toggle_button(ui, icons::SPEAKER, t!(SYSTEM_AUDIO), &mut self.system_audio);
-                toggle_button(ui, icons::MIC, t!(MICROPHONE), &mut self.mic_enabled);
+                ui.add_space(12.0);
+                icon_toggle(ui, icons::SPEAKER, t!(SYSTEM_AUDIO), &mut self.system_audio);
+                icon_toggle(ui, icons::MIC, t!(MICROPHONE), &mut self.mic_enabled);
                 let mut show_cursor = self.mouse_fx.read().unwrap().show_cursor;
                 let before = show_cursor;
-                toggle_button(ui, icons::CURSOR, t!(SHOW_CURSOR), &mut show_cursor);
+                icon_toggle(ui, icons::CURSOR, t!(SHOW_CURSOR), &mut show_cursor);
                 if show_cursor != before {
                     self.mouse_fx.write().unwrap().show_cursor = show_cursor;
                 }
@@ -645,6 +670,7 @@ impl App {
                 if icon_button(ui, icons::MINIMIZE, t!(TIP_MINIBAR)).clicked() {
                     self.enter_compact(ctx);
                 }
+                ui.add_space(8.0);
                 let can_record = self.selected_source().is_some();
                 match rec_button(ui, self.rec_mode(), can_record) {
                     RecClick::Start => self.start_recording(ctx),
@@ -675,12 +701,12 @@ impl App {
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                egui::Frame::window(ui.style()).fill(TOOLBAR_BG).inner_margin(Margin::symmetric(40, 24)).show(ui, |ui| {
+                sheet_frame().corner_radius(CornerRadius::same(20)).inner_margin(Margin::symmetric(44, 28)).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(t!(COUNTDOWN_TITLE)).color(TEXT_DIM).size(16.0));
-                        ui.label(RichText::new(left.max(1).to_string()).color(REC_RED).size(96.0).strong());
-                        ui.add_space(6.0);
-                        if ui.button(t!(COUNTDOWN_CANCEL)).clicked() {
+                        ui.label(secondary(t!(COUNTDOWN_TITLE)).size(15.0));
+                        ui.label(RichText::new(left.max(1).to_string()).font(semibold(96.0)).color(LABEL));
+                        ui.add_space(8.0);
+                        if tinted_button(ui, t!(COUNTDOWN_CANCEL)).clicked() {
                             cancel = true;
                         }
                     });
@@ -716,7 +742,7 @@ impl App {
 
     fn status_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
+            ui.add_space(4.0);
             match &self.state {
                 State::Recording(rec) => {
                     let s = rec.stats();
@@ -726,20 +752,17 @@ impl App {
                     let bytes = s.bytes_written.load(Ordering::Relaxed);
                     let (w, h) = (s.width.load(Ordering::Relaxed), s.height.load(Ordering::Relaxed));
                     let fps = if elapsed.as_secs_f64() > 0.5 { encoded as f64 / elapsed.as_secs_f64() } else { 0.0 };
+                    let timer_w = capsule_width_for(ui, "‖  00:00:00");
                     if rec.is_paused() {
-                        ui.label(RichText::new("‖").color(WARN_YELLOW).size(16.0));
-                        ui.label(
-                            RichText::new(t!(STATUS_PAUSED, format_duration(elapsed))).strong().color(WARN_YELLOW),
-                        );
+                        status_capsule(ui, Tint::Orange, &format!("‖  {}", format_duration(elapsed)), Some(timer_w), None, None);
                     } else {
-                        ui.label(RichText::new("●").color(REC_RED).size(16.0));
-                        ui.label(RichText::new(t!(STATUS_REC, format_duration(elapsed))).strong().color(TEXT_BRIGHT));
+                        status_capsule(ui, Tint::Red, &format!("●  {}", format_duration(elapsed)), Some(timer_w), None, None);
                     }
-                    ui.separator();
-                    ui.label(t!(STATUS_COUNTERS, w, h, format!("{fps:.1}"), dropped, human_bytes(bytes)));
+                    ui.add_space(4.0);
+                    ui.label(secondary(t!(STATUS_COUNTERS, w, h, format!("{fps:.1}"), dropped, human_bytes(bytes))));
                     for note in [s.note(), s.audio_note.lock().unwrap().clone()].into_iter().flatten() {
-                        ui.separator();
-                        ui.label(RichText::new(note).color(WARN_YELLOW));
+                        vdivider(ui, 16.0);
+                        ui.label(RichText::new(note).color(ORANGE));
                     }
                     if s.error().is_some() || rec.is_finished() {
                         self.stop_recording();
@@ -748,27 +771,27 @@ impl App {
                     }
                 }
                 State::Picking(_) => {
-                    ui.label(RichText::new(icons::REGION).color(ACCENT));
-                    ui.label(t!(STATUS_PICKING));
+                    status_capsule(ui, Tint::Blue, &format!("{}  {}", icons::REGION, t!(MODE_REGION)), None, None, None);
+                    ui.label(secondary(t!(STATUS_PICKING)));
                 }
                 State::Countdown { .. } => {
                     let left = self.countdown_remaining().unwrap_or(0).max(1);
-                    ui.label(RichText::new("●").color(WARN_YELLOW).size(16.0));
-                    ui.label(RichText::new(t!(COUNTDOWN_STATUS, left)).strong().color(WARN_YELLOW));
-                    ui.label(RichText::new(t!(COUNTDOWN_ESC)).color(TEXT_DIM));
+                    status_capsule(ui, Tint::Orange, &t!(BAR_STARTING_IN, left), None, None, None);
+                    ui.label(secondary(t!(COUNTDOWN_ESC)));
                     ctx.request_repaint_after(Duration::from_millis(100));
                 }
                 State::Idle => {
-                    ui.label(RichText::new(icons::PLAY).color(ACCENT));
-                    let text = if self.selected_source().is_some() {
-                        t!(STATUS_READY, self.source_label())
+                    let ready = self.selected_source().is_some();
+                    if ready {
+                        status_capsule(ui, Tint::Green, t!(BAR_READY), None, None, None);
+                        ui.label(secondary(self.source_label()));
                     } else {
-                        t!(STATUS_NO_SOURCE).to_string()
-                    };
-                    ui.label(text);
+                        status_capsule(ui, Tint::Gray, t!(BAR_PICK_SOURCE), None, None, None);
+                        ui.label(secondary(t!(STATUS_NO_SOURCE)));
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(6.0);
-                        if ui.small_button(t!(STATUS_CHANGE)).on_hover_text(t!(STATUS_CHANGE_TIP)).clicked() {
+                        ui.add_space(4.0);
+                        if tinted_button_small(ui, t!(STATUS_CHANGE)).on_hover_text(t!(STATUS_CHANGE_TIP)).clicked() {
                             self.show_preview_tab();
                         }
                         self.update_chip(ui);
@@ -781,15 +804,16 @@ impl App {
     // ----- navigation + pages --------------------------------------------------
 
     fn nav(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(10.0);
-        for (tab, icon, label) in [
-            (Tab::Home, icons::HOME, t!(NAV_HOME)),
-            (Tab::General, icons::GEAR, t!(NAV_GENERAL)),
-            (Tab::Video, icons::FILM, t!(NAV_VIDEO)),
-            (Tab::Image, icons::IMAGE, t!(NAV_IMAGE)),
-            (Tab::About, icons::INFO, t!(NAV_ABOUT)),
+        ui.add_space(12.0);
+        ui.spacing_mut().item_spacing.y = 8.0;
+        for (tab, icon, tint, label) in [
+            (Tab::Home, icons::HOME, BLUE, t!(NAV_HOME)),
+            (Tab::General, icons::GEAR, LABEL_2, t!(NAV_GENERAL)),
+            (Tab::Video, icons::FILM, ORANGE, t!(NAV_VIDEO)),
+            (Tab::Image, icons::IMAGE, GREEN, t!(NAV_IMAGE)),
+            (Tab::About, icons::INFO, BLUE, t!(NAV_ABOUT)),
         ] {
-            if nav_entry(ui, icon, label, self.tab == tab).clicked() {
+            if nav_entry(ui, icon, tint, label, self.tab == tab).clicked() {
                 self.tab = tab;
             }
         }
@@ -798,10 +822,19 @@ impl App {
     fn page(&mut self, ui: &mut egui::Ui) {
         match self.tab {
             Tab::Home => self.page_home(ui),
-            Tab::General => self.page_general(ui),
-            Tab::Video => self.page_video(ui),
-            Tab::Image => self.page_image(ui),
-            Tab::About => self.page_about(ui),
+            _ => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.set_max_width(ui.available_width().min(760.0));
+                    match self.tab {
+                        Tab::Home => {}
+                        Tab::General => self.page_general(ui),
+                        Tab::Video => self.page_video(ui),
+                        Tab::Image => self.page_image(ui),
+                        Tab::About => self.page_about(ui),
+                    }
+                    ui.add_space(12.0);
+                });
+            }
         }
     }
 
@@ -809,13 +842,14 @@ impl App {
 
     fn page_home(&mut self, ui: &mut egui::Ui) {
         let mut home_tab = self.home_tab;
-        tab_strip(
+        segmented(
             ui,
+            "home",
             &[
-                (HomeTab::Videos, t!(TAB_VIDEOS)),
-                (HomeTab::Images, t!(TAB_IMAGES)),
-                (HomeTab::Audios, t!(TAB_AUDIOS)),
-                (HomeTab::Preview, t!(TAB_PREVIEW)),
+                (HomeTab::Videos, None, t!(TAB_VIDEOS)),
+                (HomeTab::Images, None, t!(TAB_IMAGES)),
+                (HomeTab::Audios, None, t!(TAB_AUDIOS)),
+                (HomeTab::Preview, None, t!(TAB_PREVIEW)),
             ],
             &mut home_tab,
         );
@@ -825,12 +859,11 @@ impl App {
                 self.library.set_tab(lib, &self.output_dir);
             }
         }
-        ui.add_space(4.0);
+        ui.add_space(8.0);
         match self.home_tab {
             HomeTab::Preview => {
                 let recording = self.is_recording();
                 self.source_row(ui, recording);
-                ui.add_space(6.0);
                 self.preview_panel(ui);
             }
             _ => self.library_panel(ui),
@@ -841,70 +874,78 @@ impl App {
         self.library.refresh(&self.output_dir, false);
         // Folder row.
         ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            ui.label(RichText::new(self.output_dir.display().to_string()).color(TEXT_DIM).small())
-                .on_hover_text(t!(OUTPUT_FOLDER_TIP));
+            ui.add_space(PAD);
+            let w = (ui.available_width() - 96.0).max(60.0);
+            ui.allocate_ui_with_layout(Vec2::new(w, 34.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.add(egui::Label::new(secondary(self.output_dir.display().to_string())).truncate())
+                    .on_hover_text(t!(OUTPUT_FOLDER_TIP));
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button(icons::REFRESH).on_hover_text(t!(REFRESH_LIST)).clicked() {
+                if icon_button(ui, icons::REFRESH, t!(REFRESH_LIST)).clicked() {
                     self.library.refresh(&self.output_dir, true);
                 }
-                if ui.small_button(icons::FOLDER).on_hover_text(t!(OPEN_FOLDER)).clicked() {
+                if icon_button(ui, icons::FOLDER, t!(OPEN_FOLDER)).clicked() {
                     open_folder(&self.output_dir);
                 }
             });
         });
-        ui.painter().hline(
-            ui.available_rect_before_wrap().x_range(),
-            ui.cursor().top() + 2.0,
-            Stroke::new(1.0, SEPARATOR),
-        );
-        ui.add_space(6.0);
 
         // File list.
-        let list_h = (ui.available_height() - 48.0).max(80.0);
+        let list_h = (ui.available_height() - 60.0).max(80.0);
         let mut clicked: Option<usize> = None;
         let mut activated: Option<usize> = None;
-        egui::Frame::new().fill(PREVIEW_BG).corner_radius(CornerRadius::same(3)).show(ui, |ui| {
-            ui.set_min_height(list_h);
-            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
-                if self.library.entries.is_empty() {
-                    ui.add_space(12.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(self.library.tab.empty_label()).color(TEXT_DIM));
-                    });
-                }
-                for (i, e) in self.library.entries.iter().enumerate() {
-                    let selected = self.library.selected == Some(i);
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
-                    let p = ui.painter();
-                    if selected {
-                        p.rect_filled(rect, CornerRadius::ZERO, ACCENT.gamma_multiply(0.55));
-                    } else if resp.hovered() {
-                        p.rect_filled(rect, CornerRadius::ZERO, BUTTON_HOVER);
+        let entries = &self.library.entries;
+        let selected_idx = self.library.selected;
+        let empty_label = self.library.tab.empty_label();
+        Card::show(ui, |card| {
+            card.flush(|ui| {
+                ui.set_min_height(list_h);
+                egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                    ui.add_space(4.0);
+                    if entries.is_empty() {
+                        ui.add_space(24.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(secondary(empty_label));
+                        });
                     }
-                    let color = if selected { TEXT_BRIGHT } else { TEXT_NORMAL };
-                    let name_rect = egui::Rect::from_min_max(rect.min + Vec2::new(8.0, 0.0), rect.max - Vec2::new(90.0, 0.0));
-                    p.with_clip_rect(name_rect).text(
-                        name_rect.left_center(),
-                        Align2::LEFT_CENTER,
-                        &e.name,
-                        FontId::proportional(14.0),
-                        color,
-                    );
-                    p.text(
-                        rect.right_center() - Vec2::new(8.0, 0.0),
-                        Align2::RIGHT_CENTER,
-                        human_bytes(e.size),
-                        FontId::proportional(13.0),
-                        color,
-                    );
-                    if resp.double_clicked() {
-                        activated = Some(i);
-                    } else if resp.clicked() {
-                        clicked = Some(i);
+                    for (i, e) in entries.iter().enumerate() {
+                        let selected = selected_idx == Some(i);
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
+                        let p = ui.painter();
+                        if i > 0 {
+                            p.hline((rect.left() + PAD)..=rect.right(), rect.top(), Stroke::new(1.0, SEPARATOR));
+                        }
+                        let pill = rect.shrink2(Vec2::new(6.0, 2.0));
+                        if selected {
+                            p.rect_filled(pill, CornerRadius::same(8), BLUE);
+                        } else if resp.hovered() {
+                            p.rect_filled(pill, CornerRadius::same(8), FILL_HOVER);
+                        }
+                        let (name_color, size_color) = if selected { (Color32::WHITE, Color32::WHITE) } else { (LABEL, LABEL_2) };
+                        let name_rect = egui::Rect::from_min_max(rect.min + Vec2::new(PAD, 0.0), rect.max - Vec2::new(96.0, 0.0));
+                        p.with_clip_rect(name_rect).text(
+                            name_rect.left_center(),
+                            Align2::LEFT_CENTER,
+                            &e.name,
+                            FontId::proportional(13.0),
+                            name_color,
+                        );
+                        p.text(
+                            rect.right_center() - Vec2::new(PAD, 0.0),
+                            Align2::RIGHT_CENTER,
+                            human_bytes(e.size),
+                            FontId::proportional(12.0),
+                            size_color,
+                        );
+                        if resp.double_clicked() {
+                            activated = Some(i);
+                        } else if resp.clicked() {
+                            clicked = Some(i);
+                        }
+                        resp.on_hover_text(e.path.display().to_string());
                     }
-                    resp.on_hover_text(e.path.display().to_string());
-                }
+                    ui.add_space(4.0);
+                });
             });
         });
         if let Some(i) = clicked {
@@ -918,83 +959,88 @@ impl App {
         }
 
         // Actions.
-        ui.add_space(6.0);
         let selected = self.library.selected_entry().map(|e| e.path.clone());
         ui.horizontal(|ui| {
-            let w = (ui.available_width() - 16.0) / 3.0;
             let has = selected.is_some();
-            if ui.add_enabled(has, egui::Button::new(format!("{}  {}", icons::PLAY, t!(PLAY))).min_size(Vec2::new(w, 30.0))).clicked()
-                && let Some(p) = &selected
-            {
-                open_with_default(p);
-            }
-            if ui.add_enabled(has, egui::Button::new(format!("{}  {}", icons::FOLDER, t!(FOLDER))).min_size(Vec2::new(w, 30.0))).clicked()
-                && let Some(p) = &selected
-            {
-                reveal_in_folder(p);
-            }
-            if ui.add_enabled(has, egui::Button::new(format!("{}  {}", icons::TRASH, t!(DELETE))).min_size(Vec2::new(w, 30.0))).clicked() {
-                self.library.confirm_delete = selected.clone();
-            }
+            ui.add_enabled_ui(has, |ui| {
+                if tinted_button(ui, &format!("{}  {}", icons::PLAY, t!(PLAY))).clicked()
+                    && let Some(p) = &selected
+                {
+                    open_with_default(p);
+                }
+                if tinted_button(ui, &format!("{}  {}", icons::FOLDER, t!(FOLDER))).clicked()
+                    && let Some(p) = &selected
+                {
+                    reveal_in_folder(p);
+                }
+                if destructive_tinted_button(ui, &format!("{}  {}", icons::TRASH, t!(DELETE))).clicked() {
+                    self.library.confirm_delete = selected.clone();
+                }
+            });
         });
     }
 
     fn source_row(&mut self, ui: &mut egui::Ui, recording: bool) {
         ui.add_enabled_ui(!recording, |ui| {
-            ui.horizontal(|ui| {
-                let combo_w = (ui.available_width() - 120.0).max(160.0);
-                match self.source_kind {
-                    SourceKind::Monitor => {
-                        ui.label(t!(MODE_MONITOR));
-                        let label = self
-                            .monitors
-                            .get(self.monitor_idx)
-                            .map(|m| m.label())
-                            .unwrap_or_else(|| t!(NO_MONITORS).into());
-                        egui::ComboBox::from_id_salt("monitor").width(combo_w).selected_text(label).show_ui(ui, |ui| {
-                            for (i, m) in self.monitors.iter().enumerate() {
-                                ui.selectable_value(&mut self.monitor_idx, i, m.label());
-                            }
-                        });
+            Card::show(ui, |card| {
+                let label = match self.source_kind {
+                    SourceKind::Monitor => t!(MODE_MONITOR),
+                    SourceKind::Window => t!(MODE_WINDOW),
+                    SourceKind::Region => t!(MODE_REGION),
+                };
+                card.row(label, |ui| {
+                    if icon_button(ui, icons::REFRESH, t!(REFRESH_SOURCES_TIP)).clicked() {
+                        self.refresh_sources();
                     }
-                    SourceKind::Window => {
-                        ui.label(t!(MODE_WINDOW));
-                        let label = self
-                            .windows
-                            .get(self.window_idx)
-                            .map(|w| w.label())
-                            .unwrap_or_else(|| t!(NO_WINDOWS).into());
-                        egui::ComboBox::from_id_salt("window").width(combo_w).selected_text(label).show_ui(ui, |ui| {
-                            for (i, w) in self.windows.iter().enumerate() {
-                                ui.selectable_value(&mut self.window_idx, i, w.label());
+                    let combo_w = (ui.available_width() - 40.0).clamp(160.0, 360.0);
+                    match self.source_kind {
+                        SourceKind::Monitor => {
+                            let label = self
+                                .monitors
+                                .get(self.monitor_idx)
+                                .map(|m| m.label())
+                                .unwrap_or_else(|| t!(NO_MONITORS).into());
+                            egui::ComboBox::from_id_salt("monitor").width(combo_w).selected_text(label).show_ui(ui, |ui| {
+                                for (i, m) in self.monitors.iter().enumerate() {
+                                    ui.selectable_value(&mut self.monitor_idx, i, m.label());
+                                }
+                            });
+                        }
+                        SourceKind::Window => {
+                            let label = self
+                                .windows
+                                .get(self.window_idx)
+                                .map(|w| w.label())
+                                .unwrap_or_else(|| t!(NO_WINDOWS).into());
+                            egui::ComboBox::from_id_salt("window").width(combo_w).selected_text(label).show_ui(ui, |ui| {
+                                for (i, w) in self.windows.iter().enumerate() {
+                                    ui.selectable_value(&mut self.window_idx, i, w.label());
+                                }
+                            });
+                        }
+                        SourceKind::Region => {
+                            if tinted_button_small(ui, t!(SELECT_REGION)).clicked() {
+                                self.open_picker();
                             }
-                        });
-                    }
-                    SourceKind::Region => {
-                        ui.label(self.source_label());
-                        if ui.button(t!(SELECT_REGION)).clicked() {
-                            self.open_picker();
+                            ui.add(egui::Label::new(secondary(self.source_label())).truncate());
                         }
                     }
-                }
-                if ui.button(icons::REFRESH).on_hover_text(t!(REFRESH_SOURCES_TIP)).clicked() {
-                    self.refresh_sources();
-                }
+                });
             });
         });
     }
 
     fn preview_panel(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_size();
-        egui::Frame::new().fill(PREVIEW_BG).corner_radius(CornerRadius::same(4)).show(ui, |ui| {
+        egui::Frame::new().fill(PREVIEW_BG).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
             ui.set_min_size(avail);
             match &self.preview_tex {
                 Some(tex) if self.preview_dims.0 > 0 => {
                     let (w, h) = (self.preview_dims.0 as f32, self.preview_dims.1 as f32);
-                    let scale = ((avail.x - 8.0) / w).min((avail.y - 8.0) / h).min(3.0);
+                    let scale = ((avail.x - 16.0) / w).min((avail.y - 16.0) / h).min(3.0);
                     let size = egui::vec2(w * scale, h * scale);
                     ui.centered_and_justified(|ui| {
-                        ui.add(egui::Image::from_texture(&*tex).fit_to_exact_size(size));
+                        ui.add(egui::Image::from_texture(&*tex).fit_to_exact_size(size).corner_radius(6.0));
                     });
                 }
                 _ => {
@@ -1004,7 +1050,7 @@ impl App {
                             (None, None) => t!(PREVIEW_PICK_SOURCE).into(),
                             (None, Some(_)) => t!(PREVIEW_STARTING).into(),
                         };
-                        ui.label(RichText::new(text).color(TEXT_DIM).size(16.0));
+                        ui.label(secondary(text).size(15.0));
                     });
                 }
             }
@@ -1014,80 +1060,97 @@ impl App {
     // ----- settings pages ---------------------------------------------------------
 
     fn page_general(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, t!(SECTION_OUTPUT));
-        settings_row(ui, t!(ROW_SAVE_TO), |ui| {
-            ui.label(RichText::new(self.output_dir.display().to_string()).color(TEXT_BRIGHT));
-        });
-        settings_row(ui, "", |ui| {
-            if ui.button(t!(CHOOSE_FOLDER)).clicked()
-                && let Some(dir) = rfd::FileDialog::new().set_directory(&self.output_dir).pick_folder()
-            {
-                self.output_dir = dir;
-                self.library.refresh(&self.output_dir, true);
-                self.save_settings();
-            }
-            if ui.button(t!(OPEN)).clicked() {
-                open_folder(&self.output_dir);
-            }
-        });
-        settings_row(ui, t!(ROW_FILE_PREFIX), |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.file_prefix).desired_width(160.0));
-            ui.label(
-                RichText::new(format!(
-                    "→ {}-YYYYMMDD-HHMMSS.{}",
-                    self.file_prefix.trim(),
-                    self.format.container.extension()
-                ))
-                .color(TEXT_DIM)
-                .small(),
-            );
-        });
-        ui.add_space(14.0);
-        section_title(ui, t!(SECTION_RECORDING));
-        let before = (self.countdown_enabled, self.countdown_secs);
-        settings_row(ui, t!(ROW_COUNTDOWN), |ui| {
-            ui.checkbox(&mut self.countdown_enabled, t!(COUNTDOWN_CHECKBOX));
-        });
-        settings_row(ui, "", |ui| {
-            ui.add_enabled_ui(self.countdown_enabled, |ui| {
-                ui.add(egui::DragValue::new(&mut self.countdown_secs).range(1..=10).suffix(" s"));
-                ui.label(RichText::new(t!(COUNTDOWN_NOTE)).color(TEXT_DIM).small());
-            });
-        });
-        if before != (self.countdown_enabled, self.countdown_secs) {
-            self.save_settings();
-        }
-        ui.add_space(14.0);
-        section_title(ui, t!(SECTION_UPDATES));
-        self.general_update_rows(ui);
-        ui.add_space(14.0);
-        section_title(ui, t!(SECTION_APPEARANCE));
-        settings_row(ui, t!(LANGUAGE), |ui| {
-            let mut lang = self.language;
-            egui::ComboBox::from_id_salt("language")
-                .width(180.0)
-                .selected_text(lang.native_name())
-                .show_ui(ui, |ui| {
-                    for l in Lang::ALL {
-                        ui.selectable_value(&mut lang, l, l.native_name());
-                    }
+        let mut tab = self.general_tab;
+        segmented(
+            ui,
+            "general",
+            &[
+                (GeneralTab::Output, None, t!(SECTION_OUTPUT)),
+                (GeneralTab::Recording, None, t!(SECTION_RECORDING)),
+                (GeneralTab::Appearance, None, t!(SECTION_APPEARANCE)),
+                (GeneralTab::Sources, None, t!(SECTION_SOURCES)),
+            ],
+            &mut tab,
+        );
+        self.general_tab = tab;
+        ui.add_space(4.0);
+        match tab {
+            GeneralTab::Output => {
+                section_header(ui, t!(SECTION_OUTPUT));
+                Card::show(ui, |card| {
+                    card.row(t!(ROW_SAVE_TO), |ui| {
+                        if tinted_button_small(ui, t!(OPEN)).clicked() {
+                            open_folder(&self.output_dir);
+                        }
+                        if tinted_button_small(ui, t!(CHOOSE_FOLDER)).clicked()
+                            && let Some(dir) = rfd::FileDialog::new().set_directory(&self.output_dir).pick_folder()
+                        {
+                            self.output_dir = dir;
+                            self.library.refresh(&self.output_dir, true);
+                            self.save_settings();
+                        }
+                        ui.add_space(4.0);
+                        ui.add(egui::Label::new(secondary(self.output_dir.display().to_string())).truncate());
+                    });
+                    card.row(t!(ROW_FILE_PREFIX), |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.file_prefix).desired_width(180.0));
+                    });
                 });
-            ui.label(RichText::new(t!(LANGUAGE_HINT)).color(TEXT_DIM).small());
-            if lang != self.language {
-                self.set_language(lang);
+                footnote(
+                    ui,
+                    &format!("→ {}-YYYYMMDD-HHMMSS.{}", self.file_prefix.trim(), self.format.container.extension()),
+                );
             }
-        });
-        ui.add_space(14.0);
-        section_title(ui, t!(SECTION_SOURCES));
-        settings_row(ui, t!(ROW_DEVICES), |ui| {
-            if ui.button(t!(REFRESH_DEVICES)).clicked() {
-                self.refresh_sources();
+            GeneralTab::Recording => {
+                section_header(ui, t!(SECTION_RECORDING));
+                let before = (self.countdown_enabled, self.countdown_secs);
+                Card::show(ui, |card| {
+                    switch_row(card, t!(COUNTDOWN_CHECKBOX), &mut self.countdown_enabled);
+                    card.row(t!(ROW_COUNTDOWN), |ui| {
+                        ui.add_enabled_ui(self.countdown_enabled, |ui| {
+                            ui.add(egui::DragValue::new(&mut self.countdown_secs).range(1..=10).suffix(" s"));
+                        });
+                    });
+                });
+                footnote(ui, t!(COUNTDOWN_NOTE));
+                if before != (self.countdown_enabled, self.countdown_secs) {
+                    self.save_settings();
+                }
             }
-        });
-        settings_row(ui, t!(ROW_SETTINGS_FILE), |ui| {
-            let path = Settings::path().map(|p| p.display().to_string()).unwrap_or_else(|| t!(NONE_PAREN).into());
-            ui.label(RichText::new(path).color(TEXT_DIM).small());
-        });
+            GeneralTab::Appearance => {
+                section_header(ui, t!(SECTION_APPEARANCE));
+                Card::show(ui, |card| {
+                    card.row(t!(LANGUAGE), |ui| {
+                        let mut lang = self.language;
+                        egui::ComboBox::from_id_salt("language")
+                            .width(180.0)
+                            .selected_text(lang.native_name())
+                            .show_ui(ui, |ui| {
+                                for l in Lang::ALL {
+                                    ui.selectable_value(&mut lang, l, l.native_name());
+                                }
+                            });
+                        if lang != self.language {
+                            self.set_language(lang);
+                        }
+                    });
+                });
+                footnote(ui, t!(LANGUAGE_HINT));
+            }
+            GeneralTab::Sources => {
+                section_header(ui, t!(SECTION_SOURCES));
+                Card::show(ui, |card| {
+                    card.row(t!(ROW_DEVICES), |ui| {
+                        if tinted_button_small(ui, t!(REFRESH_DEVICES)).clicked() {
+                            self.refresh_sources();
+                        }
+                    });
+                    let path =
+                        Settings::path().map(|p| p.display().to_string()).unwrap_or_else(|| t!(NONE_PAREN).into());
+                    card.text_row(t!(ROW_SETTINGS_FILE), &path);
+                });
+            }
+        }
     }
 
     /// Switches the interface language and persists the choice.
@@ -1099,9 +1162,9 @@ impl App {
 
     fn page_video(&mut self, ui: &mut egui::Ui) {
         let mut vt = self.video_tab;
-        tab_strip(ui, &[(VideoTab::Record, t!(TAB_RECORD)), (VideoTab::Mouse, t!(TAB_MOUSE))], &mut vt);
+        segmented(ui, "video", &[(VideoTab::Record, None, t!(TAB_RECORD)), (VideoTab::Mouse, None, t!(TAB_MOUSE))], &mut vt);
         self.video_tab = vt;
-        ui.add_space(6.0);
+        ui.add_space(4.0);
         match self.video_tab {
             VideoTab::Record => self.video_record_tab(ui),
             VideoTab::Mouse => self.video_mouse_tab(ui),
@@ -1109,61 +1172,51 @@ impl App {
     }
 
     fn video_record_tab(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, t!(TAB_RECORD));
-        let current = self.mouse_fx.read().unwrap().clone();
-        let mut fx = current.clone();
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.checkbox(&mut fx.show_cursor, t!(CHK_SHOW_CURSOR));
-                ui.checkbox(&mut fx.click_effect, t!(CHK_CLICK_EFFECTS));
-                ui.checkbox(&mut fx.highlight, t!(CHK_HIGHLIGHT));
-            });
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                if ui.add(egui::Button::new(t!(SETTINGS)).min_size(Vec2::new(150.0, 26.0))).clicked() {
-                    self.video_tab = VideoTab::Mouse;
-                }
-            });
-        });
-        if fx != current {
-            *self.mouse_fx.write().unwrap() = fx;
-        }
-        ui.add_space(6.0);
         let recording = self.is_recording();
+        section_header(ui, t!(BOX_AUDIO));
         ui.add_enabled_ui(!recording, |ui| {
-            settings_row(ui, t!(SYSTEM_AUDIO), |ui| {
-                ui.checkbox(&mut self.system_audio, t!(CHK_SYSTEM_AUDIO));
-            });
-            settings_row(ui, t!(MICROPHONE), |ui| {
-                ui.checkbox(&mut self.mic_enabled, t!(CHK_MICROPHONE));
-            });
-            settings_row(ui, t!(ROW_DEVICE), |ui| {
-                ui.add_enabled_ui(self.mic_enabled && !self.mics.is_empty(), |ui| {
-                    let label = self.mics.get(self.mic_idx).cloned().unwrap_or_else(|| t!(NO_INPUT_DEVICES).into());
-                    let w = ui.available_width().min(360.0);
-                    egui::ComboBox::from_id_salt("mic").width(w).selected_text(label).show_ui(ui, |ui| {
-                        for (i, m) in self.mics.iter().enumerate() {
-                            ui.selectable_value(&mut self.mic_idx, i, m);
-                        }
+            Card::show(ui, |card| {
+                switch_row(card, t!(CHK_SYSTEM_AUDIO), &mut self.system_audio);
+                switch_row(card, t!(CHK_MICROPHONE), &mut self.mic_enabled);
+                card.row(t!(ROW_DEVICE), |ui| {
+                    ui.add_enabled_ui(self.mic_enabled && !self.mics.is_empty(), |ui| {
+                        let label = self.mics.get(self.mic_idx).cloned().unwrap_or_else(|| t!(NO_INPUT_DEVICES).into());
+                        let w = (ui.available_width() - 8.0).clamp(160.0, 360.0);
+                        egui::ComboBox::from_id_salt("mic").width(w).selected_text(label).show_ui(ui, |ui| {
+                            for (i, m) in self.mics.iter().enumerate() {
+                                ui.selectable_value(&mut self.mic_idx, i, m);
+                            }
+                        });
                     });
                 });
             });
         });
-        ui.add_space(14.0);
-        section_title(ui, &t!(SECTION_FORMAT, self.format.container.label()));
+
+        section_header(ui, &t!(SECTION_FORMAT, self.format.container.label()));
         let (video_title, video_detail) = self.format.video_summary(&self.encoders, self.source_size());
-        format_box(ui, t!(BOX_VIDEO), &video_title, &video_detail);
         let (audio_title, audio_detail) = self.format.audio_summary(self.audio_sources_label());
-        format_box(ui, t!(BOX_AUDIO), &audio_title, &audio_detail);
-        ui.horizontal(|ui| {
-            ui.add_space(134.0);
-            let button = egui::Button::new(t!(SETTINGS)).min_size(Vec2::new(150.0, 26.0));
-            if ui.add_enabled(!recording, button).on_hover_text(t!(FORMAT_SETTINGS_TIP)).clicked() {
-                self.open_format_dialog();
-            }
-            if self.encoder_rx.is_some() {
-                ui.label(RichText::new(t!(SCANNING_ENCODERS)).color(TEXT_DIM).small());
-            }
+        let mut open: Option<FormatSection> = None;
+        ui.add_enabled_ui(!recording, |ui| {
+            Card::show(ui, |card| {
+                if card.nav_row(t!(BOX_VIDEO), &format!("{video_title} · {video_detail}")).clicked() {
+                    open = Some(FormatSection::Video);
+                }
+                if card.nav_row(t!(BOX_AUDIO), &format!("{audio_title} · {audio_detail}")).clicked() {
+                    open = Some(FormatSection::Audio);
+                }
+            });
         });
+        if let Some(section) = open
+            && !recording
+        {
+            self.open_format_dialog(section);
+        }
+        let note = if self.encoder_rx.is_some() {
+            format!("{} · {}", t!(FORMAT_SETTINGS_TIP), t!(SCANNING_ENCODERS))
+        } else {
+            t!(FORMAT_SETTINGS_TIP).to_string()
+        };
+        footnote(ui, &note);
     }
 
     pub(super) fn audio_sources_label(&self) -> &'static str {
@@ -1176,46 +1229,61 @@ impl App {
     }
 
     fn video_mouse_tab(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, t!(SECTION_MOUSE_FX));
         let current = self.mouse_fx.read().unwrap().clone();
         let mut fx = current.clone();
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
-                ui.set_width(350.0);
-                ui.checkbox(&mut fx.show_cursor, t!(CHK_SHOW_CURSOR));
-                ui.add_enabled_ui(fx.show_cursor, |ui| {
-                    settings_row(ui, t!(ROW_SIZE_INDENT), |ui| {
-                        size_combo(ui, "cursor_size", &mut fx.cursor_size);
-                        if fx.cursor_size != 100 {
-                            ui.label(RichText::new(t!(APP_DRAWN)).color(TEXT_DIM).small());
-                        }
+                ui.set_width(400.0);
+                section_header(ui, t!(SECTION_MOUSE_FX));
+                Card::show(ui, |card| {
+                    switch_row(card, t!(CHK_SHOW_CURSOR), &mut fx.show_cursor);
+                    card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
+                        ui.add_enabled_ui(fx.show_cursor, |ui| {
+                            size_combo(ui, "cursor_size", &mut fx.cursor_size);
+                            if fx.cursor_size != 100 {
+                                ui.label(secondary(t!(APP_DRAWN)).small());
+                            }
+                        });
                     });
                 });
-                ui.add_space(6.0);
-                ui.checkbox(&mut fx.click_effect, t!(CHK_CLICK_EFFECT));
-                ui.add_enabled_ui(fx.click_effect, |ui| {
-                    settings_row(ui, t!(ROW_SIZE_INDENT), |ui| size_combo(ui, "click_size", &mut fx.click_size));
-                    settings_row(ui, t!(ROW_LEFT_CLICK_COLOR), |ui| color_swatch(ui, &mut fx.left_color));
-                    settings_row(ui, t!(ROW_RIGHT_CLICK_COLOR), |ui| color_swatch(ui, &mut fx.right_color));
+                Card::show(ui, |card| {
+                    switch_row(card, t!(CHK_CLICK_EFFECT), &mut fx.click_effect);
+                    card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
+                        ui.add_enabled_ui(fx.click_effect, |ui| size_combo(ui, "click_size", &mut fx.click_size));
+                    });
+                    card.row(t!(ROW_LEFT_CLICK_COLOR).trim(), |ui| {
+                        ui.add_enabled_ui(fx.click_effect, |ui| color_swatch(ui, &mut fx.left_color));
+                    });
+                    card.row(t!(ROW_RIGHT_CLICK_COLOR).trim(), |ui| {
+                        ui.add_enabled_ui(fx.click_effect, |ui| color_swatch(ui, &mut fx.right_color));
+                    });
                 });
-                ui.add_space(6.0);
-                ui.checkbox(&mut fx.highlight, t!(CHK_HIGHLIGHT));
-                ui.add_enabled_ui(fx.highlight, |ui| {
-                    settings_row(ui, t!(ROW_SIZE_INDENT), |ui| size_combo(ui, "highlight_size", &mut fx.highlight_size));
-                    settings_row(ui, t!(ROW_HIGHLIGHT_COLOR), |ui| color_swatch(ui, &mut fx.highlight_color));
-                    settings_row(ui, t!(ROW_OPACITY), |ui| {
-                        ui.add(egui::DragValue::new(&mut fx.highlight_opacity).range(0..=100).suffix(" %"));
-                        ui.add(egui::Slider::new(&mut fx.highlight_opacity, 0..=100).show_value(false));
+                Card::show(ui, |card| {
+                    switch_row(card, t!(CHK_HIGHLIGHT), &mut fx.highlight);
+                    card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
+                        ui.add_enabled_ui(fx.highlight, |ui| size_combo(ui, "highlight_size", &mut fx.highlight_size));
+                    });
+                    card.row(t!(ROW_HIGHLIGHT_COLOR).trim(), |ui| {
+                        ui.add_enabled_ui(fx.highlight, |ui| color_swatch(ui, &mut fx.highlight_color));
+                    });
+                    card.row(t!(ROW_OPACITY).trim(), |ui| {
+                        ui.add_enabled_ui(fx.highlight, |ui| {
+                            ui.add(egui::DragValue::new(&mut fx.highlight_opacity).range(0..=100).suffix(" %"));
+                            ui.add(egui::Slider::new(&mut fx.highlight_opacity, 0..=100).show_value(false));
+                        });
                     });
                 });
             });
-            ui.add_space(12.0);
+            ui.add_space(16.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(t!(TAB_PREVIEW)).color(TEXT_NORMAL));
-                ui.add_space(4.0);
-                self.fx_preview(ui, &fx);
-                ui.add_space(6.0);
-                ui.label(RichText::new(t!(FX_PREVIEW_HINT)).color(TEXT_DIM).small());
+                ui.set_width(224.0);
+                section_header(ui, t!(TAB_PREVIEW));
+                Card::show(ui, |card| {
+                    card.custom(|ui| {
+                        self.fx_preview(ui, &fx);
+                        ui.label(secondary(t!(FX_PREVIEW_HINT)).small());
+                    });
+                });
             });
         });
         if fx != current {
@@ -1238,7 +1306,6 @@ impl App {
                 p.rect_filled(r, CornerRadius::ZERO, c);
             }
         }
-        p.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, SEPARATOR), StrokeKind::Inside);
         let center = rect.center();
         if resp.clicked_by(PointerButton::Primary) {
             self.fx_demo_clicks.push((Instant::now(), false));
@@ -1287,75 +1354,105 @@ impl App {
     }
 
     fn page_image(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, t!(SECTION_SNAPSHOT));
-        format_box(ui, t!(BOX_IMAGE), "PNG", t!(SNAPSHOT_DETAIL));
-        ui.add_space(10.0);
-        settings_row(ui, t!(ROW_CAPTURE), |ui| {
-            if ui.button(format!("{}  {}", icons::CAMERA, t!(TAKE_SNAPSHOT_NOW))).clicked() {
-                self.take_snapshot();
-            }
-        });
-        settings_row(ui, t!(ROW_SOURCE), |ui| {
-            ui.label(RichText::new(self.source_label()).color(TEXT_DIM));
+        section_header(ui, t!(SECTION_SNAPSHOT));
+        Card::show(ui, |card| {
+            card.text_row(t!(BOX_IMAGE), &format!("PNG · {}", t!(SNAPSHOT_DETAIL)));
+            card.row(t!(ROW_CAPTURE), |ui| {
+                if tinted_button_small(ui, &format!("{}  {}", icons::CAMERA, t!(TAKE_SNAPSHOT_NOW))).clicked() {
+                    self.take_snapshot();
+                }
+            });
+            card.text_row(t!(ROW_SOURCE), &self.source_label());
         });
     }
 
     fn page_about(&mut self, ui: &mut egui::Ui) {
-        section_title(ui, "openclip");
-        ui.label(t!(ABOUT_VERSION, env!("CARGO_PKG_VERSION")));
-        ui.add_space(4.0);
-        self.update_check_row(ui);
+        ui.add_space(12.0);
+        let icon = self.about_icon(ui.ctx());
+        ui.vertical_centered(|ui| {
+            if let Some(tex) = icon {
+                ui.add(egui::Image::from_texture(&tex).fit_to_exact_size(Vec2::splat(72.0)).corner_radius(16.0));
+            }
+            ui.add_space(8.0);
+            ui.label(heading("openclip"));
+            ui.label(secondary(t!(ABOUT_VERSION, env!("CARGO_PKG_VERSION"))));
+        });
+        ui.add_space(16.0);
+        section_header(ui, t!(SECTION_UPDATES));
+        self.about_update_rows(ui);
         ui.add_space(6.0);
-        ui.label(t!(ABOUT_TAGLINE));
-        ui.label(t!(ABOUT_VIDEO));
-        ui.label(t!(ABOUT_AUDIO));
-        ui.add_space(6.0);
-        ui.label(RichText::new(t!(ABOUT_LICENSE)).color(TEXT_DIM));
-        ui.add_space(6.0);
-        ui.hyperlink_to("github.com/catalingrigoriev285/openclip", "https://github.com/catalingrigoriev285/openclip");
+        Card::show(ui, |card| {
+            card.custom(|ui| {
+                ui.label(RichText::new(t!(ABOUT_TAGLINE)).color(LABEL));
+                ui.label(secondary(t!(ABOUT_VIDEO)));
+                ui.label(secondary(t!(ABOUT_AUDIO)));
+            });
+            card.custom(|ui| {
+                ui.label(secondary(t!(ABOUT_LICENSE)).small());
+            });
+            card.row_inline("", |ui| {
+                ui.hyperlink_to("github.com/catalingrigoriev285/openclip", "https://github.com/catalingrigoriev285/openclip");
+            });
+        });
+    }
+
+    /// The app icon as a texture (About page), decoded once.
+    fn about_icon(&mut self, ctx: &egui::Context) -> Option<TextureHandle> {
+        if self.about_icon.is_none() {
+            let icon = eframe::icon_data::from_png_bytes(APP_ICON_PNG).ok()?;
+            let image = ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+            self.about_icon = Some(ctx.load_texture("about-icon", image, TextureOptions::LINEAR));
+        }
+        self.about_icon.clone()
     }
 
     fn footer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            match &self.message {
-                Some((msg, is_err)) => {
-                    let color = if *is_err { ERR_RED } else { OK_GREEN };
-                    ui.label(RichText::new(msg).color(color).small());
-                    if !*is_err
-                        && let Some(path) = self.last_file.clone()
-                        && ui.small_button(t!(OPEN_FOLDER)).clicked()
-                    {
-                        reveal_in_folder(&path);
+            ui.add_space(4.0);
+            let w = (ui.available_width() - 80.0).max(60.0);
+            ui.allocate_ui_with_layout(Vec2::new(w, 26.0), Layout::left_to_right(Align::Center), |ui| {
+                match &self.message {
+                    Some((msg, is_err)) => {
+                        let color = if *is_err { RED } else { GREEN };
+                        if !*is_err
+                            && let Some(path) = self.last_file.clone()
+                            && tinted_button_small(ui, t!(OPEN_FOLDER)).clicked()
+                        {
+                            reveal_in_folder(&path);
+                        }
+                        ui.add(egui::Label::new(RichText::new(msg).color(color).small()).truncate());
+                    }
+                    None => {
+                        ui.label(secondary(t!(FOOTER_IDLE)).small());
                     }
                 }
-                None => {
-                    ui.label(RichText::new(t!(FOOTER_IDLE)).color(TEXT_DIM));
-                }
-            }
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(4.0);
+                ui.label(secondary(format!("v{}", env!("CARGO_PKG_VERSION"))).small());
+            });
         });
     }
 
     fn delete_dialog(&mut self, ctx: &egui::Context) {
         let Some(path) = self.library.confirm_delete.clone() else { return };
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("confirm-delete")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::new("confirm-delete")).frame(sheet_frame()).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.heading(t!(DELETE_TITLE));
+            ui.label(heading(t!(DELETE_TITLE)));
             ui.add_space(6.0);
-            ui.label(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-            ui.label(RichText::new(t!(DELETE_BODY)).color(TEXT_DIM));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                let del = egui::Button::new(RichText::new(t!(DELETE)).color(TEXT_BRIGHT)).fill(REC_RED);
-                if ui.add(del).clicked() {
+            ui.label(RichText::new(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).color(LABEL));
+            ui.label(secondary(t!(DELETE_BODY)));
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if destructive_button(ui, t!(DELETE)).clicked() {
                     match self.library.delete(&path, &self.output_dir) {
                         Ok(()) => self.message = Some((t!(MSG_DELETED, path.display()), false)),
                         Err(e) => self.message = Some((t!(MSG_DELETE_FAILED, e), true)),
                     }
                     close = true;
                 }
-                if ui.button(t!(CANCEL)).clicked() {
+                if gray_button(ui, t!(CANCEL)).clicked() {
                     close = true;
                 }
             });
@@ -1374,6 +1471,9 @@ impl eframe::App for App {
         self.tick_countdown(&ctx);
         self.poll_preview(&ctx);
         self.track_message();
+        if std::mem::take(&mut self.start_compact) {
+            self.enter_compact(&ctx);
+        }
 
         if let State::Picking(picker) = &mut self.state {
             match picker.show(&ctx) {
@@ -1397,7 +1497,7 @@ impl eframe::App for App {
             self.follow_bar(&ctx);
             self.region_frame(&ctx);
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(8, 6)))
+                .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 0)))
                 .show(ui, |ui| self.minibar(ui, &ctx));
             self.delete_dialog(&ctx);
             self.show_format_dialog(&ctx);
@@ -1405,21 +1505,21 @@ impl eframe::App for App {
         }
 
         egui::Panel::top("toolbar")
-            .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(4, 6)))
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 10)))
             .show(ui, |ui| self.toolbar(ui, &ctx));
         egui::Panel::top("status")
-            .frame(egui::Frame::new().fill(STATUS_BG).inner_margin(Margin::symmetric(4, 5)))
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 6)))
             .show(ui, |ui| self.status_strip(ui, &ctx));
         egui::Panel::bottom("footer")
-            .frame(egui::Frame::new().fill(TOOLBAR_BG).inner_margin(Margin::symmetric(4, 5)))
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 5)))
             .show(ui, |ui| self.footer(ui));
         egui::Panel::left("nav")
             .resizable(false)
-            .exact_size(160.0)
-            .frame(egui::Frame::new().fill(NAV_BG))
+            .exact_size(200.0)
+            .frame(egui::Frame::new().fill(BG))
             .show(ui, |ui| self.nav(ui));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(PAGE_BG).inner_margin(Margin::same(14)))
+            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(20)))
             .show(ui, |ui| self.page(ui));
 
         self.countdown_overlay(&ctx);
@@ -1438,196 +1538,7 @@ impl eframe::App for App {
     }
 }
 
-// ----- widgets -------------------------------------------------------------------
-
-/// Horizontal tab strip (Videos | Images | …). Returns true when the selection changed.
-fn tab_strip<T: PartialEq + Copy>(ui: &mut egui::Ui, items: &[(T, &str)], selected: &mut T) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.add_space(4.0);
-        for (value, label) in items {
-            let is_sel = *selected == *value;
-            let text = RichText::new(*label).size(15.0);
-            let text = if is_sel { text.strong().color(TEXT_BRIGHT) } else { text.color(TEXT_NORMAL) };
-            if ui.selectable_label(is_sel, text).clicked() && !is_sel {
-                *selected = *value;
-                changed = true;
-            }
-            ui.add_space(4.0);
-        }
-    });
-    let rect = ui.available_rect_before_wrap();
-    ui.painter().hline(rect.x_range(), rect.top() + 1.0, Stroke::new(1.0, SEPARATOR));
-    ui.add_space(4.0);
-    changed
-}
-
-/// Large recording-mode button (icon over label), highlighted when selected.
-fn mode_button(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> egui::Response {
-    let size = Vec2::new(84.0, 54.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let fill = if selected {
-        ACCENT
-    } else if resp.hovered() {
-        BUTTON_HOVER
-    } else {
-        BUTTON_BG
-    };
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(3), fill);
-    let text_color = if ui.is_enabled() { TEXT_BRIGHT } else { TEXT_DIM };
-    p.text(rect.center() - Vec2::new(0.0, 8.0), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), text_color);
-    p.text(rect.center() + Vec2::new(0.0, 14.0), Align2::CENTER_CENTER, label, FontId::proportional(12.0), text_color);
-    resp.on_hover_text(t!(MODE_TIP, label))
-}
-
-/// Square toggle with an icon; a small ✕ marks the "off" state.
-pub(super) fn toggle_button(ui: &mut egui::Ui, icon: &str, tip: &str, value: &mut bool) {
-    let size = Vec2::new(50.0, 54.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    if resp.clicked() {
-        *value = !*value;
-    }
-    let fill = if resp.hovered() { BUTTON_HOVER } else { BUTTON_BG };
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(3), fill);
-    let color = if *value { TEXT_BRIGHT } else { TEXT_DIM };
-    p.text(rect.center() - Vec2::new(0.0, 6.0), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), color);
-    if *value {
-        p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, t!(ON), FontId::proportional(11.0), OK_GREEN);
-    } else {
-        p.text(rect.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, icons::XMARK, FontId::proportional(11.0), ERR_RED);
-    }
-    resp.on_hover_text(format!("{tip}: {}", if *value { t!(ON) } else { t!(OFF) }));
-}
-
-pub(super) fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(40.0, 44.0), Sense::click());
-    let fill = if resp.hovered() { BUTTON_HOVER } else { Color32::TRANSPARENT };
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(3), fill);
-    p.text(rect.center(), Align2::CENTER_CENTER, icon, FontId::proportional(22.0), TEXT_BRIGHT);
-    resp.on_hover_text(tip)
-}
-
-/// Pause / resume button next to REC; only active while recording. Returns true on click.
-pub(super) fn pause_button(ui: &mut egui::Ui, recording: bool, paused: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(44.0, 44.0), Sense::click());
-    let p = ui.painter();
-    let fill = if resp.hovered() && recording { BUTTON_HOVER } else { Color32::TRANSPARENT };
-    p.rect_filled(rect, CornerRadius::same(3), fill);
-    let color = if !recording {
-        TEXT_DIM
-    } else if paused {
-        WARN_YELLOW
-    } else {
-        TEXT_BRIGHT
-    };
-    let c = rect.center();
-    if paused {
-        // Play triangle.
-        p.add(egui::Shape::convex_polygon(
-            vec![c + Vec2::new(-7.0, -10.0), c + Vec2::new(10.0, 0.0), c + Vec2::new(-7.0, 10.0)],
-            color,
-            Stroke::NONE,
-        ));
-    } else {
-        p.rect_filled(egui::Rect::from_center_size(c + Vec2::new(-5.0, 0.0), Vec2::new(5.0, 20.0)), CornerRadius::same(1), color);
-        p.rect_filled(egui::Rect::from_center_size(c + Vec2::new(5.0, 0.0), Vec2::new(5.0, 20.0)), CornerRadius::same(1), color);
-    }
-    let resp = resp.on_hover_text(if paused { t!(TIP_RESUME) } else { t!(TIP_PAUSE) });
-    recording && resp.clicked()
-}
-
-pub(super) enum RecClick {
-    None,
-    Start,
-    Stop,
-    Cancel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RecMode {
-    Idle,
-    /// Seconds left before recording starts.
-    Countdown(u32),
-    Recording,
-}
-
-/// The big round REC button; shows a stop square while recording and the
-/// remaining seconds during the countdown (click cancels).
-pub(super) fn rec_button(ui: &mut egui::Ui, mode: RecMode, enabled: bool) -> RecClick {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(60.0, 60.0), Sense::click());
-    let center = rect.center();
-    let p = ui.painter();
-    let active = mode != RecMode::Idle;
-    let color = if !enabled && !active { TEXT_DIM } else { REC_RED };
-    let hovered = resp.hovered() && (enabled || active);
-    match mode {
-        RecMode::Recording => {
-            p.circle_filled(center, 27.0, if hovered { REC_RED_HOVER } else { REC_RED });
-            p.rect_filled(egui::Rect::from_center_size(center, Vec2::splat(18.0)), CornerRadius::same(2), TEXT_BRIGHT);
-        }
-        RecMode::Countdown(left) => {
-            p.circle_stroke(center, 27.0, Stroke::new(3.0, WARN_YELLOW));
-            p.text(center, Align2::CENTER_CENTER, left.max(1).to_string(), FontId::proportional(26.0), WARN_YELLOW);
-        }
-        RecMode::Idle => {
-            p.circle_stroke(center, 27.0, Stroke::new(3.0, color));
-            if hovered {
-                p.circle_filled(center, 24.0, Color32::from_rgba_unmultiplied(230, 40, 40, 40));
-            }
-            p.text(center, Align2::CENTER_CENTER, "REC", FontId::proportional(17.0), color);
-        }
-    }
-    let resp = resp.on_hover_text(match mode {
-        RecMode::Recording => t!(TIP_REC_STOP),
-        RecMode::Countdown(_) => t!(TIP_REC_CANCEL),
-        RecMode::Idle => t!(TIP_REC_START),
-    });
-    if !resp.clicked() {
-        RecClick::None
-    } else {
-        match mode {
-            RecMode::Recording => RecClick::Stop,
-            RecMode::Countdown(_) => RecClick::Cancel,
-            RecMode::Idle if enabled => RecClick::Start,
-            RecMode::Idle => RecClick::None,
-        }
-    }
-}
-
-fn nav_entry(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> egui::Response {
-    let width = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 44.0), Sense::click());
-    let p = ui.painter();
-    if selected {
-        p.rect_filled(rect, CornerRadius::ZERO, NAV_SELECTED);
-        p.rect_filled(egui::Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height())), CornerRadius::ZERO, ACCENT);
-    } else if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::ZERO, BUTTON_HOVER);
-    }
-    let color = if selected { TEXT_BRIGHT } else { TEXT_NORMAL };
-    p.text(rect.left_center() + Vec2::new(22.0, 0.0), Align2::LEFT_CENTER, icon, FontId::proportional(18.0), color);
-    p.text(rect.left_center() + Vec2::new(54.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(15.0), color);
-    resp
-}
-
-fn section_title(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).strong().size(16.0).color(TEXT_BRIGHT));
-    let rect = ui.available_rect_before_wrap();
-    let y = rect.top() + 2.0;
-    ui.painter().hline(rect.left()..=rect.right(), y, Stroke::new(1.0, SEPARATOR));
-    ui.add_space(10.0);
-}
-
-fn settings_row(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.add_sized(Vec2::new(130.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
-        add(ui);
-    });
-    ui.add_space(4.0);
-}
+// ----- small widgets kept here -------------------------------------------------------
 
 /// Percent size selector used by the mouse-effect settings.
 fn size_combo(ui: &mut egui::Ui, id: &str, value: &mut u32) {
@@ -1641,24 +1552,9 @@ fn size_combo(ui: &mut egui::Ui, id: &str, value: &mut u32) {
 /// Wide colour swatch that opens egui's colour picker.
 fn color_swatch(ui: &mut egui::Ui, rgb: &mut [u8; 3]) {
     let mut c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-    ui.spacing_mut().interact_size = Vec2::new(64.0, 22.0);
+    ui.spacing_mut().interact_size = Vec2::new(64.0, 26.0);
     egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque);
     *rgb = [c.r(), c.g(), c.b()];
-}
-
-/// Dark "format summary" box like the Video/Audio boxes in classic recorders.
-fn format_box(ui: &mut egui::Ui, label: &str, title: &str, detail: &str) {
-    ui.horizontal(|ui| {
-        ui.add_sized(Vec2::new(130.0, 24.0), egui::Label::new(RichText::new(label).color(TEXT_NORMAL)));
-        let width = ui.available_width().min(520.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::hover());
-        let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::same(3), BUTTON_BG);
-        p.rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0, SEPARATOR), StrokeKind::Inside);
-        p.text(rect.min + Vec2::new(12.0, 12.0), Align2::LEFT_TOP, title, FontId::proportional(14.0), TEXT_BRIGHT);
-        p.text(rect.min + Vec2::new(12.0, 34.0), Align2::LEFT_TOP, detail, FontId::proportional(13.0), TEXT_DIM);
-    });
-    ui.add_space(4.0);
 }
 
 // ----- helpers -------------------------------------------------------------------

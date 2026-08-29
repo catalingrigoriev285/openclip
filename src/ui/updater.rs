@@ -11,7 +11,8 @@ use std::time::Duration;
 use eframe::egui::{self, RichText};
 
 use super::theme::*;
-use super::{App, State, human_bytes, icons, settings_row};
+use super::widgets::*;
+use super::{App, State, human_bytes, icons};
 use crate::i18n::{self, key};
 use crate::t;
 use crate::update::{self, Progress, Release};
@@ -153,8 +154,8 @@ impl App {
             return;
         }
         let Some(rel) = self.update.release() else { return };
-        let text = format!("{} {}", icons::DOWNLOAD, t!(UPDATE_CHIP, version_label(rel)));
-        if ui.small_button(RichText::new(text).color(ACCENT)).on_hover_text(t!(UPDATE_CHIP_TIP)).clicked() {
+        let text = format!("{}  {}", icons::DOWNLOAD, t!(UPDATE_CHIP, version_label(rel)));
+        if capsule_button(ui, Tint::Blue, &text, t!(UPDATE_CHIP_TIP)).clicked() {
             self.update_modal = true;
         }
     }
@@ -164,35 +165,36 @@ impl App {
         let mut check = false;
         let mut open = false;
         ui.horizontal(|ui| {
-            let button = egui::Button::new(format!("{} {}", icons::REFRESH, t!(UPDATE_CHECK_BUTTON)));
-            if ui.add_enabled(!self.update.busy(), button).clicked() {
-                check = true;
-            }
+            ui.add_enabled_ui(!self.update.busy(), |ui| {
+                if tinted_button_small(ui, &format!("{}  {}", icons::REFRESH, t!(UPDATE_CHECK_BUTTON))).clicked() {
+                    check = true;
+                }
+            });
             match &self.update {
                 UpdateState::Idle => {}
                 UpdateState::Checking(_) => {
                     ui.spinner();
-                    ui.label(RichText::new(t!(UPDATE_CHECKING)).color(TEXT_DIM));
+                    ui.label(RichText::new(t!(UPDATE_CHECKING)).color(LABEL_2));
                 }
                 UpdateState::UpToDate => {
-                    ui.label(RichText::new(format!("{} {}", icons::CHECK, t!(UPDATE_UP_TO_DATE))).color(OK_GREEN));
+                    ui.label(RichText::new(format!("{} {}", icons::CHECK, t!(UPDATE_UP_TO_DATE))).color(GREEN));
                 }
                 UpdateState::Available(rel) | UpdateState::Downloading { rel, .. } => {
-                    ui.label(RichText::new(t!(UPDATE_AVAILABLE, version_label(rel))).color(ACCENT));
-                    open = ui.small_button(t!(UPDATE_DETAILS)).clicked();
+                    ui.label(RichText::new(t!(UPDATE_AVAILABLE, version_label(rel))).color(BLUE));
+                    open = tinted_button_small(ui, t!(UPDATE_DETAILS)).clicked();
                 }
                 UpdateState::Installed { rel, .. } => {
-                    ui.label(RichText::new(t!(UPDATE_INSTALLED_SHORT, version_label(rel))).color(OK_GREEN));
-                    open = ui.small_button(t!(UPDATE_DETAILS)).clicked();
+                    ui.label(RichText::new(t!(UPDATE_INSTALLED_SHORT, version_label(rel))).color(GREEN));
+                    open = tinted_button_small(ui, t!(UPDATE_DETAILS)).clicked();
                 }
                 UpdateState::Failed { rel, error } => {
                     let text = match rel {
                         Some(_) => t!(UPDATE_FAILED, error),
                         None => t!(UPDATE_CHECK_FAILED, error),
                     };
-                    ui.label(RichText::new(text).color(WARN_YELLOW));
+                    ui.label(RichText::new(text).color(ORANGE));
                     if rel.is_some() {
-                        open = ui.small_button(t!(UPDATE_DETAILS)).clicked();
+                        open = tinted_button_small(ui, t!(UPDATE_DETAILS)).clicked();
                     }
                 }
             }
@@ -206,22 +208,17 @@ impl App {
         }
     }
 
-    /// General → Updates: the start-up toggle (saved on change) and the check row.
-    pub(super) fn general_update_rows(&mut self, ui: &mut egui::Ui) {
+    /// About → Updates: the start-up toggle (saved on change) and the check row.
+    pub(super) fn about_update_rows(&mut self, ui: &mut egui::Ui) {
         let before = self.check_updates;
-        settings_row(ui, t!(ROW_UPDATES), |ui| {
-            ui.checkbox(&mut self.check_updates, t!(UPDATES_CHECKBOX));
+        Card::show(ui, |card| {
+            switch_row(card, t!(UPDATES_CHECKBOX), &mut self.check_updates);
+            card.row_inline("", |ui| self.update_check_row(ui));
         });
-        settings_row(ui, "", |ui| {
-            ui.label(RichText::new(t!(UPDATES_NOTE)).color(TEXT_DIM).small());
-        });
+        footnote(ui, t!(UPDATES_NOTE));
         if before != self.check_updates {
             self.save_settings();
         }
-        ui.horizontal(|ui| {
-            ui.add_space(130.0 + ui.spacing().item_spacing.x);
-            self.update_check_row(ui);
-        });
     }
 
     /// The update modal; shown last in the full layout like the other dialogs.
@@ -246,27 +243,25 @@ impl App {
         let local = update::local_version();
         let mut close = false;
         let mut action = Action::None;
-        let modal = egui::Modal::new(egui::Id::new("update")).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::new("update")).frame(sheet_frame()).show(ctx, |ui| {
             ui.set_width(460.0);
-            ui.heading(t!(UPDATE_TITLE));
+            ui.label(heading(t!(UPDATE_TITLE)));
             ui.add_space(4.0);
-            ui.label(
-                RichText::new(t!(UPDATE_VERSIONS, version_label(&rel), format!("v{local}"))).color(TEXT_BRIGHT).strong(),
-            );
+            ui.label(RichText::new(t!(UPDATE_VERSIONS, version_label(&rel), format!("v{local}"))).color(LABEL));
             ui.add_space(8.0);
-            ui.label(RichText::new(t!(UPDATE_NOTES)).color(TEXT_DIM));
+            ui.label(RichText::new(t!(UPDATE_NOTES)).color(LABEL_2));
             egui::Frame::new()
-                .fill(NAV_BG)
-                .inner_margin(egui::Margin::same(8))
-                .corner_radius(egui::CornerRadius::same(3))
+                .fill(FILL)
+                .inner_margin(egui::Margin::same(12))
+                .corner_radius(egui::CornerRadius::same(10))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                         let body = rel.body.trim();
                         if body.is_empty() {
-                            ui.label(RichText::new(t!(UPDATE_NO_NOTES)).color(TEXT_DIM));
+                            ui.label(RichText::new(t!(UPDATE_NO_NOTES)).color(LABEL_2));
                         } else {
-                            ui.label(RichText::new(body).color(TEXT_NORMAL));
+                            ui.label(RichText::new(body).color(LABEL));
                         }
                     });
                 });
@@ -282,19 +277,20 @@ impl App {
                         } else {
                             key::UPDATE_MANUAL_ONLY
                         };
-                        ui.label(RichText::new(i18n::t(why)).color(WARN_YELLOW));
+                        ui.label(RichText::new(i18n::t(why)).color(ORANGE));
                         ui.add_space(6.0);
                     }
                     ui.horizontal(|ui| {
-                        let label = format!("{} {}", icons::DOWNLOAD, t!(UPDATE_DOWNLOAD_INSTALL));
-                        let install = egui::Button::new(RichText::new(label).color(TEXT_BRIGHT)).fill(ACCENT);
-                        if ui.add_enabled(can_install, install).clicked() {
-                            action = Action::Download;
-                        }
-                        if ui.button(t!(UPDATE_OPEN_PAGE)).clicked() {
+                        let label = format!("{}  {}", icons::DOWNLOAD, t!(UPDATE_DOWNLOAD_INSTALL));
+                        ui.add_enabled_ui(can_install, |ui| {
+                            if primary_button(ui, &label).clicked() {
+                                action = Action::Download;
+                            }
+                        });
+                        if tinted_button(ui, t!(UPDATE_OPEN_PAGE)).clicked() {
                             action = Action::OpenPage;
                         }
-                        if ui.button(t!(UPDATE_LATER)).clicked() {
+                        if gray_button(ui, t!(UPDATE_LATER)).clicked() {
                             close = true;
                         }
                     });
@@ -308,39 +304,44 @@ impl App {
                     } else {
                         t!(UPDATE_DOWNLOADING, human_bytes(done), human_bytes(total))
                     };
-                    ui.add(egui::ProgressBar::new(fraction).text(text).animate(true));
+                    ui.add(egui::ProgressBar::new(fraction).text(text).animate(true).corner_radius(6.0));
                     ui.add_space(8.0);
-                    if ui.button(t!(CANCEL)).clicked() {
+                    if gray_button(ui, t!(CANCEL)).clicked() {
                         action = Action::Cancel;
                     }
                 }
                 UpdateState::Installed { .. } => {
-                    ui.label(RichText::new(t!(UPDATE_INSTALLED, version_label(&rel))).color(OK_GREEN));
+                    ui.label(RichText::new(t!(UPDATE_INSTALLED, version_label(&rel))).color(GREEN));
                     if !idle {
-                        ui.label(RichText::new(t!(UPDATE_LOCKED_RECORDING)).color(WARN_YELLOW));
+                        ui.label(RichText::new(t!(UPDATE_LOCKED_RECORDING)).color(ORANGE));
                     }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        let restart = egui::Button::new(RichText::new(t!(UPDATE_RESTART_NOW)).color(TEXT_BRIGHT)).fill(ACCENT);
-                        if ui.add_enabled(idle, restart).clicked() {
-                            action = Action::Restart;
-                        }
-                        if ui.button(t!(UPDATE_LATER)).clicked() {
+                        ui.add_enabled_ui(idle, |ui| {
+                            if primary_button(ui, t!(UPDATE_RESTART_NOW)).clicked() {
+                                action = Action::Restart;
+                            }
+                        });
+                        if gray_button(ui, t!(UPDATE_LATER)).clicked() {
                             close = true;
                         }
                     });
                 }
                 UpdateState::Failed { error, .. } => {
-                    ui.label(RichText::new(t!(UPDATE_FAILED, error)).color(ERR_RED));
+                    ui.label(RichText::new(t!(UPDATE_FAILED, error)).color(RED));
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if rel.asset.is_some() && ui.add_enabled(idle, egui::Button::new(t!(UPDATE_RETRY))).clicked() {
-                            action = Action::Retry;
+                        if rel.asset.is_some() {
+                            ui.add_enabled_ui(idle, |ui| {
+                                if primary_button(ui, t!(UPDATE_RETRY)).clicked() {
+                                    action = Action::Retry;
+                                }
+                            });
                         }
-                        if ui.button(t!(UPDATE_OPEN_PAGE)).clicked() {
+                        if tinted_button(ui, t!(UPDATE_OPEN_PAGE)).clicked() {
                             action = Action::OpenPage;
                         }
-                        if ui.button(t!(OK)).clicked() {
+                        if gray_button(ui, t!(OK)).clicked() {
                             close = true;
                         }
                     });

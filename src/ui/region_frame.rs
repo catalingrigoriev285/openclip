@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
 
-use super::theme::{ACCENT, REC_RED, WARN_YELLOW};
+use super::theme::{BLUE, ORANGE, RED};
 use super::{App, SourceKind, State};
 use crate::capture::monitors::MonitorInfo;
 use crate::capture::Rect;
@@ -60,9 +60,9 @@ impl App {
 
     fn frame_color(&self) -> Color32 {
         match &self.state {
-            State::Recording(r) if r.is_paused() => WARN_YELLOW,
-            State::Recording(_) => REC_RED,
-            _ => ACCENT,
+            State::Recording(r) if r.is_paused() => ORANGE,
+            State::Recording(_) => RED,
+            _ => BLUE,
         }
     }
 

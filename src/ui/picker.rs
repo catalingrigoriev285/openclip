@@ -10,6 +10,7 @@ use eframe::egui::{
 
 use crate::capture::monitors::{screenshot_monitor, MonitorInfo};
 use crate::capture::Rect;
+use super::theme::{BLUE, CARD};
 use crate::video::preview::make_preview;
 
 pub enum PickerOutcome {
@@ -125,14 +126,14 @@ impl Picker {
                     );
                     painter.image(tex.id(), sel, uv, Color32::WHITE);
                 }
-                painter.rect_stroke(sel, 0.0, Stroke::new(2.0, Color32::from_rgb(255, 80, 80)), egui::StrokeKind::Outside);
+                painter.rect_stroke(sel, 0.0, Stroke::new(2.0, BLUE), egui::StrokeKind::Outside);
                 let phys = to_physical(sel, full, ppp, &self.views[i].info);
                 let label = format!("{}×{}", phys.width, phys.height);
                 let pos = Pos2::new(sel.min.x, (sel.min.y - 22.0).max(full.min.y));
                 painter.rect_filled(
                     egui::Rect::from_min_size(pos, egui::vec2(label.len() as f32 * 8.0 + 12.0, 20.0)),
-                    3.0,
-                    Color32::from_black_alpha(200),
+                    8.0,
+                    CARD,
                 );
                 painter.text(
                     pos + egui::vec2(6.0, 2.0),

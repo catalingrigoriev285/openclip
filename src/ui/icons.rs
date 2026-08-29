@@ -1,25 +1,10 @@
-//! Font Awesome 6 Free (Solid) icons, embedded and registered as a fallback
-//! font so the codepoints below can be used inside any egui text.
+//! Font Awesome 6 Free (Solid) icons. The font is registered as a glyph
+//! fallback for every family by [`super::theme::install_fonts`], so the
+//! codepoints below can be used inside any egui text.
 //!
 //! Font: SIL OFL 1.1 — see `assets/fonts/FONT-AWESOME-LICENSE.txt`.
 
-use std::sync::Arc;
-
-use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
-
-const FA_SOLID: &[u8] = include_bytes!("../../assets/fonts/fa-solid-900.ttf");
-
-/// Registers the icon font as a fallback for both default families and as
-/// the named family `"fa"`.
-pub fn install(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert("fa-solid".to_owned(), Arc::new(FontData::from_static(FA_SOLID)));
-    for family in [FontFamily::Proportional, FontFamily::Monospace] {
-        fonts.families.entry(family).or_default().push("fa-solid".to_owned());
-    }
-    fonts.families.insert(FontFamily::Name("fa".into()), vec!["fa-solid".to_owned()]);
-    ctx.set_fonts(fonts);
-}
+pub(super) const FA_SOLID: &[u8] = include_bytes!("../../assets/fonts/fa-solid-900.ttf");
 
 // Recording modes
 pub const REGION: &str = "\u{f5cb}"; // vector-square
@@ -44,6 +29,8 @@ pub const TRASH: &str = "\u{f2ed}"; // trash-can
 pub const CHECK: &str = "\u{f00c}";
 pub const XMARK: &str = "\u{f00d}";
 pub const CARET_DOWN: &str = "\u{f0d7}";
+pub const CHEVRON_RIGHT: &str = "\u{f054}";
+pub const CIRCLE: &str = "\u{f111}";
 pub const RECORD: &str = "\u{f192}"; // circle-dot
 
 // Navigation

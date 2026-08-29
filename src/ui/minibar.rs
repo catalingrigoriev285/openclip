@@ -1,20 +1,24 @@
-//! Compact floating recorder bar (Camtasia-style): recording area, recorded
-//! inputs and pause / rec. Closing the bar window (title-bar X) does not quit
-//! the app — it restores the full window instead.
+//! Compact floating recorder bar: one flat strip with the source picker, the
+//! input toggles, the format button, a status capsule and pause / REC.
+//! Closing the bar window (title-bar X) does not quit the app — it restores
+//! the full window instead.
 
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Align, Align2, CornerRadius, FontId, Layout, RichText, Sense, Stroke, Vec2, ViewportCommand, WindowLevel};
+use eframe::egui::{self, Align, Layout, RichText, Sense, Vec2, ViewportCommand, WindowLevel};
 
+use super::format_dialog::FormatSection;
 use super::icons;
 use super::region_frame::{GAP_PX, THICKNESS_PT};
 use super::theme::*;
-use super::{format_duration, human_bytes, icon_button, pause_button, rec_button, App, RecClick, SourceKind, State};
+use super::widgets::*;
+use super::{format_duration, human_bytes, App, SourceKind, State};
 use crate::t;
 
-/// Inner size of the bar window, in points.
-pub const BAR_SIZE: Vec2 = Vec2::new(800.0, 104.0);
-const GROUP_H: f32 = 86.0;
+/// Initial inner size of the bar window, in points. The bar grows once (see
+/// `App::bar_size`) when localized labels need more room than this.
+pub const BAR_SIZE: Vec2 = Vec2::new(900.0, 72.0);
+const MAX_BAR_WIDTH: f32 = 1400.0;
 const TOAST_TTL: Duration = Duration::from_secs(5);
 /// How long after one of our own position commands the bar is left to settle
 /// before user drags start moving the docked region.
@@ -28,13 +32,14 @@ impl App {
         self.live.stop();
         self.compact = true;
         self.bar_moved_by_us();
-        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(400.0, 80.0)));
+        let bar = self.bar_size;
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(400.0, 60.0)));
         ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(BAR_SIZE));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(bar));
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::AlwaysOnTop));
         if let Some(mon) = monitor {
             // Bottom-right corner, above the taskbar.
-            let pos = egui::pos2((mon.x - BAR_SIZE.x - 24.0).max(0.0), (mon.y - BAR_SIZE.y - 110.0).max(0.0));
+            let pos = egui::pos2((mon.x - bar.x - 24.0).max(0.0), (mon.y - bar.y - 110.0).max(0.0));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         }
     }
@@ -53,7 +58,7 @@ impl App {
             .input(|i| Some((i.viewport().outer_rect?.height() - i.viewport().inner_rect?.height()) * ppp))
             .unwrap_or(32.0 * ppp)
             .max(0.0);
-        let (bw, bh) = (BAR_SIZE.x * ppp, BAR_SIZE.y * ppp + deco);
+        let (bw, bh) = (self.bar_size.x * ppp, self.bar_size.y * ppp + deco);
         // Clearance from the region edge: frame stroke + gap + breathing room.
         let band = (THICKNESS_PT * scale).round() + GAP_PX as f32 + 16.0;
         let (rx, ry) = ((m.x + r.x as i32) as f32, (m.y + r.y as i32) as f32);
@@ -103,8 +108,8 @@ impl App {
         self.compact = false;
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::Normal));
         ctx.send_viewport_cmd(ViewportCommand::Resizable(true));
-        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(760.0, 600.0)));
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(800.0, 640.0)));
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(820.0, 600.0)));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(880.0, 660.0)));
         if let Some(r) = self.saved_rect {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(r.min));
         }
@@ -139,100 +144,133 @@ impl App {
         let recording = self.is_recording();
         let paused = matches!(&self.state, State::Recording(r) if r.is_paused());
 
-        ui.horizontal(|ui| {
-            // ----- Recording Area -----
-            group_box(ui, t!(BAR_RECORDING_AREA), 262.0, |ui| {
-                ui.add_enabled_ui(!recording, |ui| {
-                    ui.horizontal(|ui| {
-                        let (icon, label) = match self.source_kind {
-                            SourceKind::Region => (icons::REGION, t!(MODE_REGION)),
-                            SourceKind::Monitor => (icons::MONITOR, t!(MODE_MONITOR)),
-                            SourceKind::Window => (icons::WINDOW, t!(MODE_WINDOW)),
-                        };
-                        let mut picked: Option<SourceKind> = None;
-                        ui.menu_button(RichText::new(format!("{icon}  {label}  {}", icons::CARET_DOWN)).size(14.0), |ui| {
-                            for (kind, icon, label) in [
-                                (SourceKind::Region, icons::REGION, t!(MODE_REGION)),
-                                (SourceKind::Monitor, icons::MONITOR, t!(MODE_MONITOR)),
-                                (SourceKind::Window, icons::WINDOW, t!(MODE_WINDOW)),
-                            ] {
-                                if ui.button(format!("{icon}  {label}")).clicked() {
-                                    picked = Some(kind);
-                                    ui.close();
+        // Where the left-to-right content ends and the right cluster begins;
+        // used to grow the window when the two would collide.
+        let mut left_end = full.left();
+        let mut right_start = full.right();
+
+        ui.allocate_ui_with_layout(ui.available_size(), Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+
+            // ----- source -----
+            ui.add_enabled_ui(!recording, |ui| {
+                let (icon, label) = match self.source_kind {
+                    SourceKind::Region => (icons::REGION, t!(MODE_REGION)),
+                    SourceKind::Monitor => (icons::MONITOR, t!(MODE_MONITOR)),
+                    SourceKind::Window => (icons::WINDOW, t!(MODE_WINDOW)),
+                };
+                let mut picked: Option<SourceKind> = None;
+                ui.style_mut().spacing.button_padding = Vec2::new(12.0, 7.0);
+                ui.menu_button(RichText::new(format!("{icon}  {label}  {}", icons::CARET_DOWN)), |ui| {
+                    ui.style_mut().spacing.button_padding = Vec2::new(10.0, 6.0);
+                    for (kind, icon, label) in [
+                        (SourceKind::Region, icons::REGION, t!(MODE_REGION)),
+                        (SourceKind::Monitor, icons::MONITOR, t!(MODE_MONITOR)),
+                        (SourceKind::Window, icons::WINDOW, t!(MODE_WINDOW)),
+                    ] {
+                        if ui.button(format!("{icon}  {label}")).clicked() {
+                            picked = Some(kind);
+                            ui.close();
+                        }
+                    }
+                });
+                if let Some(kind) = picked {
+                    self.source_kind = kind;
+                    if kind == SourceKind::Region && self.region.is_none() {
+                        self.open_picker();
+                    }
+                }
+                // Concrete target.
+                match self.source_kind {
+                    SourceKind::Monitor if self.monitors.len() > 1 => {
+                        let label = self.monitors.get(self.monitor_idx).map(|m| m.name.clone()).unwrap_or_default();
+                        egui::ComboBox::from_id_salt("mini-monitor").width(130.0).selected_text(truncate(&label, 14)).show_ui(
+                            ui,
+                            |ui| {
+                                for (i, m) in self.monitors.iter().enumerate() {
+                                    ui.selectable_value(&mut self.monitor_idx, i, m.label());
                                 }
-                            }
-                        });
-                        if let Some(kind) = picked {
-                            self.source_kind = kind;
-                            if kind == SourceKind::Region && self.region.is_none() {
-                                self.open_picker();
-                            }
-                        }
-                        // Concrete target.
-                        match self.source_kind {
-                            SourceKind::Monitor if self.monitors.len() > 1 => {
-                                let label = self.monitors.get(self.monitor_idx).map(|m| m.name.clone()).unwrap_or_default();
-                                egui::ComboBox::from_id_salt("mini-monitor").width(96.0).selected_text(label).show_ui(ui, |ui| {
-                                    for (i, m) in self.monitors.iter().enumerate() {
-                                        ui.selectable_value(&mut self.monitor_idx, i, m.label());
-                                    }
-                                });
-                            }
-                            SourceKind::Window => {
-                                let label =
-                                    self.windows.get(self.window_idx).map(|w| w.title.clone()).unwrap_or_else(|| t!(BAR_PICK).into());
-                                egui::ComboBox::from_id_salt("mini-window").width(96.0).selected_text(truncate(&label, 12)).show_ui(ui, |ui| {
-                                    for (i, w) in self.windows.iter().enumerate() {
-                                        ui.selectable_value(&mut self.window_idx, i, w.label());
-                                    }
-                                });
-                            }
-                            SourceKind::Region
-                                if ui.small_button(t!(BAR_SELECT)).on_hover_text(t!(BAR_DRAG_NEW_REGION)).clicked() =>
-                            {
-                                self.open_picker();
-                            }
-                            _ => {}
-                        }
-                    });
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(t!(BAR_DIMENSIONS)).color(TEXT_DIM).small());
-                    ui.label(RichText::new(self.source_dimensions()).color(TEXT_BRIGHT).small());
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button(icons::REFRESH).on_hover_text(t!(BAR_REFRESH_TIP)).clicked() {
-                            self.refresh_sources();
-                        }
-                    });
-                });
+                            },
+                        );
+                    }
+                    SourceKind::Window => {
+                        let label =
+                            self.windows.get(self.window_idx).map(|w| w.title.clone()).unwrap_or_else(|| t!(BAR_PICK).into());
+                        egui::ComboBox::from_id_salt("mini-window").width(130.0).selected_text(truncate(&label, 14)).show_ui(
+                            ui,
+                            |ui| {
+                                for (i, w) in self.windows.iter().enumerate() {
+                                    ui.selectable_value(&mut self.window_idx, i, w.label());
+                                }
+                            },
+                        );
+                    }
+                    SourceKind::Region
+                        if tinted_button_small(ui, t!(BAR_SELECT)).on_hover_text(t!(BAR_DRAG_NEW_REGION)).clicked() =>
+                    {
+                        self.open_picker();
+                    }
+                    _ => {}
+                }
+                ui.label(secondary(self.source_dimensions()));
+                if icon_button(ui, icons::REFRESH, t!(BAR_REFRESH_TIP)).clicked() {
+                    self.refresh_sources();
+                }
             });
 
-            // ----- Recorded inputs -----
-            group_box(ui, t!(BAR_INPUTS), 350.0, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(!recording, |ui| {
-                        input_toggle(ui, icons::MIC, t!(MICROPHONE), &mut self.mic_enabled, self.mics.get(self.mic_idx).cloned());
-                        input_toggle(ui, icons::SPEAKER, t!(SYSTEM_AUDIO), &mut self.system_audio, None);
-                        let mut show_cursor = self.mouse_fx.read().unwrap().show_cursor;
-                        let before = show_cursor;
-                        input_toggle(ui, icons::CURSOR, t!(CURSOR), &mut show_cursor, None);
-                        if show_cursor != before {
-                            self.mouse_fx.write().unwrap().show_cursor = show_cursor;
-                        }
-                        let (title, _) = self.format.video_summary(&self.encoders, self.source_size());
-                        let tip = t!(BAR_FORMAT_TIP, self.format.container.label(), title);
-                        if icon_button(ui, icons::GEAR, &tip).clicked() {
-                            self.open_format_dialog();
-                        }
-                    });
-                });
-            });
+            vdivider(ui, 28.0);
 
-            // ----- Controls -----
+            // ----- inputs -----
+            ui.add_enabled_ui(!recording, |ui| {
+                let mic_name = match self.mics.get(self.mic_idx) {
+                    Some(dev) => format!("{} ({dev})", t!(MICROPHONE)),
+                    None => t!(MICROPHONE).to_string(),
+                };
+                icon_toggle(ui, icons::MIC, &mic_name, &mut self.mic_enabled);
+                icon_toggle(ui, icons::SPEAKER, t!(SYSTEM_AUDIO), &mut self.system_audio);
+                let mut show_cursor = self.mouse_fx.read().unwrap().show_cursor;
+                let before = show_cursor;
+                icon_toggle(ui, icons::CURSOR, t!(CURSOR), &mut show_cursor);
+                if show_cursor != before {
+                    self.mouse_fx.write().unwrap().show_cursor = show_cursor;
+                }
+                vdivider(ui, 28.0);
+                // ⚙ opens a small menu: Video format… / Audio format… (separate dialogs).
+                let (title, _) = self.format.video_summary(&self.encoders, self.source_size());
+                let tip = t!(BAR_FORMAT_TIP, self.format.container.label(), title);
+                let mut section: Option<FormatSection> = None;
+                {
+                    let v = &mut ui.style_mut().visuals.widgets;
+                    v.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                    v.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                    v.hovered.weak_bg_fill = FILL_HOVER;
+                    v.open.weak_bg_fill = FILL_HOVER;
+                    ui.style_mut().spacing.button_padding = Vec2::new(9.0, 9.0);
+                }
+                ui.menu_button(RichText::new(icons::GEAR).size(15.0), |ui| {
+                    ui.style_mut().spacing.button_padding = Vec2::new(10.0, 6.0);
+                    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                    if ui.button(format!("{}  {}", icons::FILM, t!(BOX_VIDEO))).clicked() {
+                        section = Some(FormatSection::Video);
+                        ui.close();
+                    }
+                    if ui.button(format!("{}  {}", icons::SPEAKER, t!(BOX_AUDIO))).clicked() {
+                        section = Some(FormatSection::Audio);
+                        ui.close();
+                    }
+                })
+                .response
+                .on_hover_text(tip);
+                if let Some(section) = section {
+                    self.open_format_dialog(section);
+                }
+            });
+            left_end = ui.min_rect().right();
+
+            // ----- status + controls -----
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(4.0);
                 let can_record = self.selected_source().is_some();
-                match rec_button(ui, self.rec_mode(), can_record) {
+                match rec_button_sized(ui, self.rec_mode(), can_record, 52.0) {
                     RecClick::Start => self.start_recording(ctx),
                     RecClick::Stop => self.stop_recording(),
                     RecClick::Cancel => self.cancel_countdown(),
@@ -241,98 +279,64 @@ impl App {
                 if pause_button(ui, recording, paused) {
                     self.toggle_pause();
                 }
-                // Status column (fixed width so the timer never wraps).
-                ui.allocate_ui_with_layout(Vec2::new(104.0, GROUP_H), Layout::top_down(Align::Min), |ui| {
-                    ui.set_width(104.0);
-                    ui.add_space(14.0);
-                    match &self.state {
-                        State::Recording(rec) => {
-                            let s = rec.stats();
-                            let elapsed = rec.elapsed();
-                            let bytes = s.bytes_written.load(std::sync::atomic::Ordering::Relaxed);
-                            if paused {
-                                ui.label(RichText::new(format!("‖ {}", format_duration(elapsed))).strong().color(WARN_YELLOW).size(15.0));
-                            } else {
-                                ui.label(RichText::new(format!("● {}", format_duration(elapsed))).strong().color(REC_RED).size(15.0));
-                            }
-                            ui.label(RichText::new(human_bytes(bytes)).color(TEXT_DIM).small());
-                            if s.error().is_some() || rec.is_finished() {
-                                self.stop_recording();
-                            } else {
-                                ctx.request_repaint_after(Duration::from_millis(250));
-                            }
-                        }
-                        State::Picking(_) => {
-                            ui.label(RichText::new(t!(SELECT_REGION)).color(ACCENT).small());
-                        }
-                        State::Countdown { started } => {
-                            let left = (self.countdown_secs as f32 - started.elapsed().as_secs_f32()).ceil().max(1.0);
-                            ui.label(RichText::new(t!(BAR_STARTING_IN, left)).strong().color(WARN_YELLOW).size(15.0));
-                            ui.label(RichText::new(t!(BAR_ESC_CANCELS)).color(TEXT_DIM).small());
-                            ctx.request_repaint_after(Duration::from_millis(100));
-                        }
-                        State::Idle => {
-                            let ready = self.selected_source().is_some();
-                            let text = if ready { t!(BAR_READY) } else { t!(BAR_PICK_SOURCE) };
-                            ui.label(RichText::new(text).color(TEXT_DIM).small());
+                ui.add_space(4.0);
+                let timer_w = capsule_width_for(ui, "‖  00:00:00");
+                let toast_max = (ui.min_rect().left() - left_end - 24.0).max(timer_w * 2.0);
+                match &self.state {
+                    State::Recording(rec) => {
+                        let s = rec.stats();
+                        let elapsed = rec.elapsed();
+                        let bytes = s.bytes_written.load(std::sync::atomic::Ordering::Relaxed);
+                        let (tint, glyph) = if paused { (Tint::Orange, "‖") } else { (Tint::Red, "●") };
+                        let text = format!("{glyph}  {}", format_duration(elapsed));
+                        status_capsule(ui, tint, &text, Some(timer_w), None, Some(&human_bytes(bytes)));
+                        if s.error().is_some() || rec.is_finished() {
+                            self.stop_recording();
+                        } else {
+                            ctx.request_repaint_after(Duration::from_millis(250));
                         }
                     }
-                });
+                    State::Picking(_) => {
+                        status_capsule(ui, Tint::Blue, &format!("{}  {}", icons::REGION, t!(SELECT_REGION)), None, None, None);
+                    }
+                    State::Countdown { started } => {
+                        let left = (self.countdown_secs as f32 - started.elapsed().as_secs_f32()).ceil().max(1.0);
+                        status_capsule(ui, Tint::Orange, &t!(BAR_STARTING_IN, left), None, None, Some(t!(BAR_ESC_CANCELS)));
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                    }
+                    State::Idle => {
+                        // The latest message (saved file / error) takes over the capsule for a few seconds.
+                        let toast = match (&self.message, self.message_at) {
+                            (Some((msg, is_err)), Some(at)) if at.elapsed() < TOAST_TTL => Some((msg.clone(), *is_err)),
+                            _ => None,
+                        };
+                        match toast {
+                            Some((msg, is_err)) => {
+                                let tint = if is_err { Tint::Red } else { Tint::Green };
+                                status_capsule(ui, tint, &msg, None, Some(toast_max), Some(&msg));
+                                ctx.request_repaint_after(Duration::from_millis(500));
+                            }
+                            None if can_record => {
+                                status_capsule(ui, Tint::Green, t!(BAR_READY), None, None, None);
+                            }
+                            None => {
+                                status_capsule(ui, Tint::Gray, t!(BAR_PICK_SOURCE), None, None, None);
+                            }
+                        }
+                    }
+                }
+                right_start = ui.min_rect().left();
             });
         });
 
-        // Toast with the latest message (saved file / error).
-        if let (Some((msg, is_err)), Some(at)) = (&self.message, self.message_at)
-            && at.elapsed() < TOAST_TTL
-        {
-            let color = if *is_err { ERR_RED } else { OK_GREEN };
-            let pos = egui::pos2(full.left() + 6.0, full.bottom() - 2.0);
-            ui.painter().text(pos, Align2::LEFT_BOTTOM, msg, FontId::proportional(11.0), color);
-            ctx.request_repaint_after(Duration::from_millis(500));
+        // Long localized labels: grow the window once instead of overlapping.
+        let overlap = left_end + 16.0 - right_start;
+        if overlap > 0.5 && self.bar_size.x < MAX_BAR_WIDTH {
+            self.bar_size.x = (self.bar_size.x + overlap.ceil()).min(MAX_BAR_WIDTH);
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.bar_size));
+            self.bar_moved_by_us();
         }
     }
-}
-
-/// Bordered group with a small centred title, like Camtasia's "Recording Area".
-fn group_box(ui: &mut egui::Ui, title: &str, width: f32, content: impl FnOnce(&mut egui::Ui)) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, GROUP_H), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(4), STATUS_BG);
-    p.rect_filled(
-        egui::Rect::from_min_size(rect.min, Vec2::new(width, 18.0)),
-        CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 },
-        BUTTON_BG,
-    );
-    p.text(rect.min + Vec2::new(width / 2.0, 9.0), Align2::CENTER_CENTER, title, FontId::proportional(12.0), TEXT_NORMAL);
-    p.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, SEPARATOR), egui::StrokeKind::Inside);
-    let inner = egui::Rect::from_min_max(rect.min + Vec2::new(8.0, 22.0), rect.max - Vec2::new(8.0, 4.0));
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
-    content(&mut child);
-}
-
-/// Icon toggle with a caption underneath ("Microphone on").
-fn input_toggle(ui: &mut egui::Ui, icon: &str, name: &str, value: &mut bool, tip: Option<String>) {
-    ui.vertical(|ui| {
-        ui.set_width(92.0);
-        ui.vertical_centered(|ui| {
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(40.0, 34.0), Sense::click());
-            if resp.clicked() {
-                *value = !*value;
-            }
-            let p = ui.painter();
-            let fill = if resp.hovered() { BUTTON_HOVER } else { BUTTON_BG };
-            p.rect_filled(rect, CornerRadius::same(3), fill);
-            let color = if *value { TEXT_BRIGHT } else { TEXT_DIM };
-            p.text(rect.center(), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), color);
-            let badge = if *value { (icons::CHECK, OK_GREEN) } else { (icons::XMARK, ERR_RED) };
-            p.text(rect.right_bottom() - Vec2::new(6.0, 6.0), Align2::CENTER_CENTER, badge.0, FontId::proportional(10.0), badge.1);
-            let caption = format!("{name} {}", if *value { t!(ON) } else { t!(OFF) });
-            ui.label(RichText::new(caption).size(11.0).color(if *value { TEXT_NORMAL } else { TEXT_DIM }));
-            if let Some(t) = tip {
-                resp.on_hover_text(t);
-            }
-        });
-    });
 }
 
 fn truncate(s: &str, max: usize) -> String {

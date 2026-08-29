@@ -12,8 +12,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("openclip")
             .with_app_id("openclip")
-            .with_inner_size([800.0, 640.0])
-            .with_min_inner_size([760.0, 600.0])
+            .with_inner_size([880.0, 660.0])
+            .with_min_inner_size([820.0, 600.0])
             .with_icon(app_icon()),
         ..Default::default()
     };
