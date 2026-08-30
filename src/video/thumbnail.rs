@@ -244,7 +244,7 @@ mod mf {
         MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
     };
 
-    use super::{thumbnail, MediaInfo, PixelFormat, RawFrame};
+    use super::{thumbnail, MediaInfo, RawFrame};
     use crate::video::mf::{startup, ComGuard};
 
     /// How many `ReadSample` calls to spend looking for the first frame; the
@@ -325,25 +325,7 @@ mod mf {
 
     /// Copies the locked buffer into a top-down, tightly packed BGRA frame.
     fn copy_rows(src: &[u8], width: u32, height: u32, stride: i32) -> Option<RawFrame> {
-        let pitch = stride.unsigned_abs() as usize;
-        let row = width as usize * 4;
-        if pitch < row || src.len() < pitch * height as usize {
-            return None;
-        }
-        let mut data = vec![0u8; row * height as usize];
-        for y in 0..height as usize {
-            let sy = if stride < 0 { height as usize - 1 - y } else { y };
-            data[y * row..(y + 1) * row].copy_from_slice(&src[sy * pitch..sy * pitch + row]);
-        }
-        Some(RawFrame {
-            data,
-            width,
-            height,
-            stride: width * 4,
-            format: PixelFormat::Bgra,
-            pts: Duration::ZERO,
-            mouse: None,
-        })
+        RawFrame::from_bgra_rows(src, width, height, stride)
     }
 }
 

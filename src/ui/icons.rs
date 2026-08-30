@@ -30,8 +30,15 @@ pub const CHECK: &str = "\u{f00c}";
 pub const XMARK: &str = "\u{f00d}";
 pub const CARET_DOWN: &str = "\u{f0d7}";
 pub const CHEVRON_RIGHT: &str = "\u{f054}";
+pub const CHEVRON_LEFT: &str = "\u{f053}";
 pub const CIRCLE: &str = "\u{f111}";
 pub const RECORD: &str = "\u{f192}"; // circle-dot
+
+// Media viewer transport
+pub const STEP_BACK: &str = "\u{f048}"; // backward-step
+pub const STEP_FORWARD: &str = "\u{f051}"; // forward-step
+pub const VOLUME_MUTE: &str = "\u{f6a9}"; // volume-xmark
+pub const EXPAND: &str = "\u{f065}"; // expand (image at 1:1)
 
 // Navigation
 pub const HOME: &str = "\u{f015}"; // house

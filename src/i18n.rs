@@ -567,6 +567,37 @@ strings! {
         "codificatorul pe procesor nu face față la {0}×{1} @ {2} fps; încearcă Jumătate sau o rată mai mică",
         "процессорный кодировщик не справляется при {0}×{1} @ {2} к/с; попробуйте половинный размер или меньшую частоту";
 
+    // ----- media viewer ----------------------------------------------------
+    VIEWER_BACK => "Library", "Bibliotecă", "Библиотека";
+    VIEWER_CLOSE_TIP => "Close (Esc)", "Închide (Esc)", "Закрыть (Esc)";
+    VIEWER_OPEN_EXTERNAL => "Open in system player", "Deschide în playerul sistemului",
+        "Открыть в системном плеере";
+    VIEWER_REVEAL_TIP => "Show in folder", "Arată în folder", "Показать в папке";
+    VIEWER_PLAY_TIP => "Play (Space)", "Redă (Space)", "Воспроизвести (пробел)";
+    VIEWER_PAUSE_TIP => "Pause (Space)", "Pauză (Space)", "Пауза (пробел)";
+    VIEWER_STEP_BACK => "Previous frame", "Cadrul anterior", "Предыдущий кадр";
+    VIEWER_STEP_FORWARD => "Next frame", "Cadrul următor", "Следующий кадр";
+    VIEWER_SNAPSHOT_TIP => "Save this frame as PNG", "Salvează acest cadru ca PNG",
+        "Сохранить этот кадр в PNG";
+    VIEWER_VOLUME => "Volume", "Volum", "Громкость";
+    VIEWER_MUTE => "Mute", "Fără sunet", "Выключить звук";
+    VIEWER_UNMUTE => "Unmute", "Cu sunet", "Включить звук";
+    VIEWER_FIT => "Fit to window", "Încadrează în fereastră", "Вписать в окно";
+    VIEWER_ACTUAL_SIZE => "Actual size", "Dimensiune reală", "Реальный размер";
+    VIEWER_OPENING => "Opening…", "Se deschide…", "Открытие…";
+    VIEWER_ENDED => "End of file", "Sfârșitul fișierului", "Конец файла";
+    VIEWER_NO_PLAYBACK => "In-app playback is only available on Windows.",
+        "Redarea în aplicație este disponibilă doar pe Windows.",
+        "Воспроизведение внутри приложения доступно только в Windows.";
+    VIEWER_FAILED => "This file cannot be played here: {0}",
+        "Acest fișier nu poate fi redat aici: {0}", "Этот файл нельзя воспроизвести здесь: {0}";
+    VIEWER_NO_AUDIO_DEVICE => "No audio output device — playing without sound.",
+        "Niciun dispozitiv de ieșire audio — se redă fără sunet.",
+        "Нет устройства вывода звука — воспроизведение без звука.";
+    VIEWER_UNKNOWN_LENGTH => "unknown length", "durată necunoscută", "длительность неизвестна";
+    VIEWER_NO_IMAGE => "This picture could not be opened: {0}",
+        "Această imagine nu a putut fi deschisă: {0}", "Не удалось открыть это изображение: {0}";
+
     // ----- region picker ---------------------------------------------------
     PICKER_TITLE => "Select region — drag to select, Esc to cancel",
         "Alege regiunea — trage pentru a selecta, Esc pentru anulare",

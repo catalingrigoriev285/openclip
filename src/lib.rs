@@ -23,6 +23,7 @@ pub mod capture;
 pub mod i18n;
 pub mod mux;
 pub mod pipeline;
+pub mod player;
 pub mod settings;
 pub mod ui;
 pub mod update;

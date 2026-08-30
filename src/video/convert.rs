@@ -41,6 +41,35 @@ impl RawFrame {
         RawFrame { data: Vec::new(), width: 0, height: 0, stride: 0, format, pts: Duration::ZERO, mouse: None }
     }
 
+    /// Copies a padded, possibly bottom-up 32-bit source into a top-down,
+    /// tightly packed BGRA frame.
+    ///
+    /// Media Foundation hands back RGB32 (which is BGRA on little-endian
+    /// Windows) with a `MF_MT_DEFAULT_STRIDE` that is **negative** when the
+    /// rows run bottom-up, so both the padding and the flip are handled here.
+    /// `None` when the buffer is too small for the stated geometry.
+    pub fn from_bgra_rows(src: &[u8], width: u32, height: u32, stride: i32) -> Option<RawFrame> {
+        let pitch = stride.unsigned_abs() as usize;
+        let row = width as usize * 4;
+        if width == 0 || height == 0 || pitch < row || src.len() < pitch * height as usize {
+            return None;
+        }
+        let mut data = vec![0u8; row * height as usize];
+        for y in 0..height as usize {
+            let sy = if stride < 0 { height as usize - 1 - y } else { y };
+            data[y * row..(y + 1) * row].copy_from_slice(&src[sy * pitch..sy * pitch + row]);
+        }
+        Some(RawFrame {
+            data,
+            width,
+            height,
+            stride: width * 4,
+            format: PixelFormat::Bgra,
+            pts: Duration::ZERO,
+            mouse: None,
+        })
+    }
+
     /// Returns a copy at half resolution using a 2×2 box filter.
     pub fn downscale_half(&self) -> RawFrame {
         let mut out = RawFrame::empty(self.format);

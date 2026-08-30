@@ -579,3 +579,157 @@ pub fn sheet_frame() -> egui::Frame {
         .inner_margin(egui::Margin::same(20))
         .shadow(egui::Shadow { offset: [0, 8], blur: 32, spread: 0, color: Color32::from_black_alpha(160) })
 }
+
+// ----- media viewer -------------------------------------------------------------
+
+/// What a [`scrubber`] drag did this frame.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScrubOut {
+    /// The handle moved: preview the new position, but do not commit it.
+    pub changed: bool,
+    /// The drag ended or the track was clicked: commit the seek.
+    pub committed: bool,
+    /// True for the whole drag, so callers can stop following the clock.
+    pub dragging: bool,
+}
+
+/// Flat timeline / volume slider: a rounded track, a blue fill up to `value`
+/// and a white knob. `value` is `0..=1` and is written in place while dragging.
+///
+/// Seeking on every mouse move would re-decode from a keyframe each time, so
+/// callers usually preview on `changed` and only seek on `committed`.
+pub fn scrubber(ui: &mut Ui, id_salt: &str, value: &mut f32, width: f32) -> ScrubOut {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::click_and_drag());
+    let enabled = ui.is_enabled();
+    let id = ui.id().with(id_salt);
+    let hot = enabled && (resp.hovered() || resp.dragged());
+    let grow = ui.ctx().animate_bool_with_time(id, hot, 0.12);
+
+    let track_h = 4.0 + 2.0 * grow;
+    let knob_r = 5.0 + 2.0 * grow;
+    let track = Rect::from_center_size(rect.center(), Vec2::new(rect.width() - 2.0 * knob_r, track_h))
+        .translate(Vec2::ZERO);
+
+    let mut out = ScrubOut { dragging: resp.dragged(), ..Default::default() };
+    if enabled && (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let next = track_fraction(track, pos.x);
+        if (next - *value).abs() > f32::EPSILON {
+            *value = next;
+            out.changed = true;
+        }
+    }
+    if enabled && (resp.drag_stopped() || resp.clicked()) {
+        out.committed = true;
+    }
+
+    let v = value.clamp(0.0, 1.0);
+    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
+    let p = ui.painter();
+    let radius = CornerRadius::same((track_h / 2.0) as u8);
+    p.rect_filled(track, radius, dim(FILL_STRONG));
+    let filled = Rect::from_min_max(track.min, egui::pos2(track.min.x + track.width() * v, track.max.y));
+    p.rect_filled(filled, radius, dim(BLUE));
+    if enabled {
+        let cx = track.min.x + track.width() * v;
+        p.circle_filled(egui::pos2(cx, rect.center().y), knob_r, Color32::WHITE);
+    }
+    out
+}
+
+/// Where `x` falls along `track`, as a fraction clamped to `0..=1`.
+pub fn track_fraction(track: Rect, x: f32) -> f32 {
+    if track.width() <= 0.0 {
+        return 0.0;
+    }
+    ((x - track.min.x) / track.width()).clamp(0.0, 1.0)
+}
+
+/// The big round transport button. Draws the triangle and the two bars itself,
+/// the way [`pause_button`] does, but tinted blue and without the recording
+/// wording. Returns true on click.
+pub fn play_pause_button(ui: &mut Ui, playing: bool, size: f32) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let enabled = ui.is_enabled();
+    let fill = match (enabled, resp.hovered()) {
+        (false, _) => FILL.gamma_multiply(0.6),
+        (true, true) => BLUE_HOVER,
+        (true, false) => BLUE,
+    };
+    let fg = if enabled { Color32::WHITE } else { LABEL_3 };
+    let p = ui.painter();
+    p.circle_filled(rect.center(), size / 2.0, fill);
+    let c = rect.center();
+    // Scaled off the 40 pt geometry `pause_button` uses.
+    let k = size / 40.0;
+    if playing {
+        let bar = Vec2::new(4.0 * k, 16.0 * k);
+        p.rect_filled(Rect::from_center_size(c + Vec2::new(-4.0 * k, 0.0), bar), CornerRadius::same(1), fg);
+        p.rect_filled(Rect::from_center_size(c + Vec2::new(4.0 * k, 0.0), bar), CornerRadius::same(1), fg);
+    } else {
+        p.add(Shape::convex_polygon(
+            vec![
+                c + Vec2::new(-5.0 * k, -8.0 * k),
+                c + Vec2::new(9.0 * k, 0.0),
+                c + Vec2::new(-5.0 * k, 8.0 * k),
+            ],
+            fg,
+            Stroke::NONE,
+        ));
+    }
+    let resp = resp.on_hover_text(if playing { t!(VIEWER_PAUSE_TIP) } else { t!(VIEWER_PLAY_TIP) });
+    enabled && resp.clicked()
+}
+
+/// Largest size `dims` can take inside `avail` minus `pad` on each axis,
+/// never magnified past `max_scale`.
+///
+/// The clamp at zero matters: a window squeezed below the padding would
+/// otherwise ask egui for a negative-sized image, which it asserts on.
+pub fn fit_size(avail: Vec2, dims: (u32, u32), pad: f32, max_scale: f32) -> Vec2 {
+    let (w, h) = (dims.0 as f32, dims.1 as f32);
+    if w <= 0.0 || h <= 0.0 {
+        return Vec2::ZERO;
+    }
+    let room = Vec2::new((avail.x - pad).max(0.0), (avail.y - pad).max(0.0));
+    let scale = (room.x / w).min(room.y / h).clamp(0.0, max_scale);
+    Vec2::new(w * scale, h * scale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fit_size_never_returns_a_negative_size() {
+        // Landscape into a wide box: height is the limit.
+        let got = fit_size(Vec2::new(400.0, 200.0), (1920, 1080), 16.0, 8.0);
+        assert!((got.y - 184.0).abs() < 0.01, "{got:?}");
+        assert!((got.x / got.y - 16.0 / 9.0).abs() < 0.01);
+
+        // Squeezed past the padding: zero, never negative.
+        let got = fit_size(Vec2::new(4.0, 4.0), (1920, 1080), 16.0, 8.0);
+        assert_eq!(got, Vec2::ZERO);
+
+        // A small picture is not blown up when `max_scale` is 1.
+        let got = fit_size(Vec2::new(800.0, 800.0), (64, 32), 16.0, 1.0);
+        assert_eq!(got, Vec2::new(64.0, 32.0));
+
+        // Degenerate dimensions are handled rather than dividing by zero.
+        assert_eq!(fit_size(Vec2::new(100.0, 100.0), (0, 0), 0.0, 1.0), Vec2::ZERO);
+    }
+
+    #[test]
+    fn track_fraction_clamps_to_the_track() {
+        let track = Rect::from_min_max(egui::pos2(10.0, 0.0), egui::pos2(110.0, 4.0));
+        assert_eq!(track_fraction(track, 10.0), 0.0);
+        assert_eq!(track_fraction(track, 60.0), 0.5);
+        assert_eq!(track_fraction(track, 110.0), 1.0);
+        // Dragging beyond either end sticks to the end.
+        assert_eq!(track_fraction(track, -50.0), 0.0);
+        assert_eq!(track_fraction(track, 500.0), 1.0);
+        // A collapsed track must not divide by zero.
+        assert_eq!(track_fraction(Rect::from_min_max(egui::pos2(5.0, 0.0), egui::pos2(5.0, 4.0)), 5.0), 0.0);
+    }
+}

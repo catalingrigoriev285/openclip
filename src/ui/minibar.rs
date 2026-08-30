@@ -27,6 +27,8 @@ impl App {
         let (outer, monitor) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size));
         self.saved_rect = outer;
         self.live.stop();
+        // The 72 pt bar has nowhere to put a media viewer.
+        self.close_viewer();
         self.compact = true;
         let bar = self.bar_size;
         ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(400.0, 60.0)));

@@ -11,6 +11,7 @@ pub mod region_frame;
 mod theme;
 mod thumbs;
 mod updater;
+mod viewer;
 mod widgets;
 
 use std::path::PathBuf;
@@ -38,9 +39,10 @@ use crate::video::preview::{make_preview, PreviewImage};
 use crate::video::watermark::{Corner, Watermark, WatermarkRenderer};
 
 use format_dialog::{DialogOutcome, FormatDialog, FormatSection};
-use library::{open_with_default, reveal_in_folder, Library, LibraryTab};
+use library::{reveal_in_folder, Library, LibraryTab};
 use picker::{Picker, PickerOutcome};
 use thumbs::Thumbs;
+use viewer::Viewer;
 use theme::*;
 use widgets::*;
 
@@ -280,6 +282,11 @@ pub struct App {
     library: Library,
     /// Poster frames and durations for the files the library lists.
     thumbs: Thumbs,
+    /// The full-window media viewer, when a library file is open in it.
+    viewer: Option<Viewer>,
+    /// Playback level, remembered between files for this session only.
+    viewer_volume: f32,
+    viewer_muted: bool,
     preview_tex: Option<TextureHandle>,
     preview_dims: (u32, u32),
     message: Option<(String, bool)>, // (text, is_error)
@@ -308,6 +315,9 @@ pub struct App {
     about_icon: Option<TextureHandle>,
     /// Debug aid: `OPENCLIP_START_COMPACT=1` opens straight into the mini bar.
     start_compact: bool,
+    /// Debug aid: `OPENCLIP_OPEN_VIEWER=<path>` opens that file in the media
+    /// viewer at start-up, since it otherwise takes a double-click to reach.
+    start_viewer: Option<PathBuf>,
 }
 
 /// `x,y,w,h` in monitor-local physical pixels, for `OPENCLIP_START_REGION`.
@@ -382,6 +392,9 @@ impl App {
             live: LivePreview::new(),
             library,
             thumbs: Thumbs::new(),
+            viewer: None,
+            viewer_volume: 1.0,
+            viewer_muted: false,
             preview_tex: None,
             preview_dims: (0, 0),
             message: None,
@@ -398,6 +411,9 @@ impl App {
             bar_size: minibar::BAR_SIZE,
             about_icon: None,
             start_compact: cfg!(debug_assertions) && std::env::var_os("OPENCLIP_START_COMPACT").is_some(),
+            start_viewer: cfg!(debug_assertions)
+                .then(|| std::env::var_os("OPENCLIP_OPEN_VIEWER").map(PathBuf::from))
+                .flatten(),
         };
         if app.check_updates {
             app.start_update_check(&cc.egui_ctx);
@@ -909,9 +925,9 @@ impl App {
         }
     }
 
-    fn page(&mut self, ui: &mut egui::Ui) {
+    fn page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         match self.tab {
-            Tab::Home => self.page_home(ui),
+            Tab::Home => self.page_home(ui, ctx),
             _ => {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.set_max_width(ui.available_width().min(760.0));
@@ -930,7 +946,7 @@ impl App {
 
     // ----- Home: Videos | Images | Audios | Preview -----------------------------
 
-    fn page_home(&mut self, ui: &mut egui::Ui) {
+    fn page_home(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut home_tab = self.home_tab;
         segmented(
             ui,
@@ -956,11 +972,11 @@ impl App {
                 self.source_row(ui, recording);
                 self.preview_panel(ui);
             }
-            _ => self.library_panel(ui),
+            _ => self.library_panel(ui, ctx),
         }
     }
 
-    fn library_panel(&mut self, ui: &mut egui::Ui) {
+    fn library_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.library.refresh(&self.output_dir, false);
         // Folder row.
         ui.horizontal(|ui| {
@@ -1062,20 +1078,21 @@ impl App {
         }
         if let Some(i) = activated {
             self.library.selected = Some(i);
-            if let Some(e) = self.library.entries.get(i) {
-                open_with_default(&e.path);
+            if let Some(path) = self.library.entries.get(i).map(|e| e.path.clone()) {
+                self.open_viewer(ctx, path);
             }
         }
 
         // Actions.
         let selected = self.library.selected_entry().map(|e| e.path.clone());
+        let mut open: Option<PathBuf> = None;
         ui.horizontal(|ui| {
             let has = selected.is_some();
             ui.add_enabled_ui(has, |ui| {
                 if tinted_button(ui, &format!("{}  {}", icons::PLAY, t!(PLAY))).clicked()
                     && let Some(p) = &selected
                 {
-                    open_with_default(p);
+                    open = Some(p.clone());
                 }
                 if tinted_button(ui, &format!("{}  {}", icons::FOLDER, t!(FOLDER))).clicked()
                     && let Some(p) = &selected
@@ -1087,6 +1104,9 @@ impl App {
                 }
             });
         });
+        if let Some(path) = open {
+            self.open_viewer(ctx, path);
+        }
     }
 
     fn source_row(&mut self, ui: &mut egui::Ui, recording: bool) {
@@ -1156,11 +1176,9 @@ impl App {
             ui.set_min_size(avail);
             match &self.preview_tex {
                 Some(tex) if self.preview_dims.0 > 0 => {
-                    let (w, h) = (self.preview_dims.0 as f32, self.preview_dims.1 as f32);
-                    // A window squeezed below the padding would otherwise ask
-                    // for a negative-sized image, which egui asserts on.
-                    let scale = ((avail.x - 16.0) / w).min((avail.y - 16.0) / h).clamp(0.0, 3.0);
-                    let size = egui::vec2(w * scale, h * scale);
+                    // `fit_size` carries the clamp that keeps a squeezed window
+                    // from asking egui for a negative-sized image.
+                    let size = fit_size(avail, self.preview_dims, 16.0, 3.0);
                     ui.centered_and_justified(|ui| {
                         ui.add(egui::Image::from_texture(&*tex).fit_to_exact_size(size).corner_radius(6.0));
                     });
@@ -1657,7 +1675,12 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if destructive_button(ui, t!(DELETE)).clicked() {
                     match self.library.delete(&path, &self.output_dir) {
-                        Ok(()) => self.message = Some((t!(MSG_DELETED, path.display()), false)),
+                        Ok(()) => {
+                        if self.viewer.as_ref().is_some_and(|v| v.path == path) {
+                            self.close_viewer();
+                        }
+                        self.message = Some((t!(MSG_DELETED, path.display()), false));
+                    }
                         Err(e) => self.message = Some((t!(MSG_DELETE_FAILED, e), true)),
                     }
                     close = true;
@@ -1684,6 +1707,9 @@ impl eframe::App for App {
         self.tick_countdown(&ctx);
         self.poll_preview(&ctx);
         self.track_message();
+        if let Some(path) = self.start_viewer.take() {
+            self.open_viewer(&ctx, path);
+        }
         if std::mem::take(&mut self.start_compact) {
             self.enter_compact(&ctx);
         }
@@ -1720,6 +1746,14 @@ impl eframe::App for App {
         // the mini bar was just dismissed.
         self.region_frame(&ctx);
 
+        // The media viewer owns the whole window while it is open: no toolbar,
+        // status strip, navigation or footer behind it.
+        if self.viewer_is_open() {
+            self.viewer_ui(ui, &ctx);
+            self.delete_dialog(&ctx);
+            return;
+        }
+
         egui::Panel::top("toolbar")
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(12, 10)))
             .show(ui, |ui| self.toolbar(ui, &ctx));
@@ -1736,7 +1770,7 @@ impl eframe::App for App {
             .show(ui, |ui| self.nav(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(20)))
-            .show(ui, |ui| self.page(ui));
+            .show(ui, |ui| self.page(ui, &ctx));
 
         self.countdown_overlay(&ctx);
         self.delete_dialog(&ctx);
@@ -1745,6 +1779,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        self.close_viewer();
         self.cancel_update_download();
         self.save_settings();
         self.live.stop();

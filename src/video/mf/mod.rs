@@ -19,8 +19,9 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_FRIENDLY_NAME_Attribute, MFT_REGISTER_TYPE_INFO, MFT_TRANSFORM_CLSID_Attribute, MFSTARTUP_NOSOCKET,
     MFVideoFormat_H264, MFVideoFormat_HEVC, MF_VERSION,
 };
+use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0};
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
-use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4};
+use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_I8, VT_UI4};
 
 use super::encoder::{EncoderInfo, Vendor};
 
@@ -91,6 +92,23 @@ pub fn variant_bool(v: bool) -> VARIANT {
                 wReserved2: 0,
                 wReserved3: 0,
                 Anonymous: VARIANT_0_0_0 { boolVal: VARIANT_BOOL(if v { -1 } else { 0 }) },
+            }),
+        },
+    }
+}
+
+/// A `VT_I8` property variant, which is what `IMFSourceReader::SetCurrentPosition`
+/// wants for a seek target (in 100 ns units). `VT_I8` owns no allocation, so the
+/// value can simply be dropped — no `PropVariantClear` needed.
+pub fn propvariant_i64(v: i64) -> PROPVARIANT {
+    PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_I8,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: PROPVARIANT_0_0_0 { hVal: v },
             }),
         },
     }
