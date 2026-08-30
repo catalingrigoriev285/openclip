@@ -133,7 +133,7 @@ cpal (mic / loopback) ──▶ mixer ──▶ LAME MP3 | MF AAC | PCM ──�
 - **System audio on Linux** has no loopback API in cpal; select a PulseAudio/PipeWire monitor source as the input device instead.
 - **Hardware encoders, HEVC and AAC are Windows-only** (Media Foundation). macOS and Linux record with OpenH264 + MP3/PCM. HEVC is written to MP4 only.
 - Microsoft's **DX12 encoder** transforms are listed by Windows but need a D3D12 device manager; they are skipped during enumeration.
-- If a captured **window** is resized mid-recording the encoder is not re-negotiated: at Full or Half size the recording stops with an error, and at a preset/percentage size the picture is rescaled to the original dimensions (the aspect ratio changes). A **region** may be moved freely while recording — only resizing it is disabled once recording starts.
+- If a captured **window** is resized mid-recording the encoder is not re-negotiated — the file keeps the size it started at. The new picture is fitted into that frame with its aspect ratio preserved, so a shape change shows up as black bars rather than a stretched picture or a failed recording; the status strip says so. A **region** may be moved freely while recording — only resizing it is disabled once recording starts.
 - Without `nasm`, OpenH264 manages roughly 25–30 fps at 1080p on high-entropy content on a modern desktop CPU; typical desktop content is much cheaper. Use a hardware encoder, Half Size or a lower frame rate if you see drops.
 
 ## Licensing notes

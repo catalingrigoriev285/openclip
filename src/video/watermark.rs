@@ -10,17 +10,21 @@
 //! openclip is free and open source, so the badge is a default, not a lock:
 //! [`Watermark::enabled`] turns it off.
 
-use ab_glyph::{point, Font, FontRef, GlyphId, PxScale, ScaleFont};
 use image::RgbaImage;
+use openclip_overlay::{Layout, Sprite, TextRenderer};
 use serde::{Deserialize, Serialize};
 
 use super::mouse_fx::{blend, save_patch, Patch};
 use super::RawFrame;
 
+/// Which corner of the frame the badge sits in. Shared with the in-game FPS
+/// counter so the two overlays agree about corners and margins.
+pub use openclip_overlay::Corner;
+/// Inter SemiBold, also registered with egui by [`crate::ui`].
+pub use openclip_overlay::INTER_SEMIBOLD;
+
 /// App icon artwork, also used for the window icon and the About page.
 pub const LOGO_PNG: &[u8] = include_bytes!("../../assets/android-chrome-192x192.png");
-/// Inter SemiBold, also registered with egui by [`crate::ui`].
-pub const INTER_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
 
 /// The wordmark, drawn as one run so kerning is applied across the split.
 const WORDMARK: &str = "openclip";
@@ -36,29 +40,17 @@ const SCRIM_ALPHA: f32 = 0.42;
 const HAIRLINE_ALPHA: f32 = 0.10;
 const TEXT_ALPHA: f32 = 0.96;
 
-/// Badge height as a fraction of the output height, and its bounds in pixels.
-const HEIGHT_RATIO: f32 = 0.045;
-const MIN_HEIGHT: f32 = 22.0;
-const MAX_HEIGHT: f32 = 64.0;
-/// Distance from the frame edge, as a fraction of the badge height.
-const MARGIN_RATIO: f32 = 0.55;
-/// The badge is skipped rather than swamping a very small capture.
-const MAX_WIDTH_FRACTION: f32 = 0.45;
-const MAX_HEIGHT_FRACTION: f32 = 0.25;
-
-/// Which corner of the frame the badge sits in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum Corner {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    #[default]
-    BottomRight,
-}
-
-impl Corner {
-    pub const ALL: [Corner; 4] = [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight];
-}
+/// How the badge is sized and where it sits, in the form the in-game FPS
+/// counter also uses. Its own numbers, so neither overlay moves when the other
+/// is tuned.
+const LAYOUT: Layout = Layout {
+    height_ratio: 0.045,
+    min_height: 22.0,
+    max_height: 64.0,
+    margin_ratio: 0.55,
+    max_width_fraction: 0.45,
+    max_height_fraction: 0.25,
+};
 
 /// User-facing watermark settings. Percentages are integers so the struct can
 /// derive `Eq` and the settings pages can diff it with `!=`, like [`super::mouse_fx::MouseFx`].
@@ -87,73 +79,28 @@ impl Watermark {
 
     /// Pill height in pixels for a frame `frame_h` pixels tall.
     pub fn badge_height(&self, frame_h: u32) -> u32 {
-        let base = (frame_h as f32 * HEIGHT_RATIO).clamp(MIN_HEIGHT, MAX_HEIGHT);
-        (base * self.size.clamp(10, 400) as f32 / 100.0).round().max(1.0) as u32
+        LAYOUT.height(frame_h, self.size)
     }
 
     /// Top-left corner of a `sprite`-sized badge in a `frame`-sized frame, or
     /// `None` when the badge would take too much of the frame to be tasteful.
     pub fn place(&self, sprite: (u32, u32), frame: (u32, u32)) -> Option<(i32, i32)> {
-        let ((sw, sh), (fw, fh)) = (sprite, frame);
-        if sw == 0 || sh == 0 || fw == 0 || fh == 0 {
-            return None;
-        }
-        if sw as f32 > fw as f32 * MAX_WIDTH_FRACTION || sh as f32 > fh as f32 * MAX_HEIGHT_FRACTION {
-            return None;
-        }
-        let m = (sh as f32 * MARGIN_RATIO).round() as i32;
-        let (right, bottom) = (fw as i32 - sw as i32 - m, fh as i32 - sh as i32 - m);
-        let (x, y) = match self.position {
-            Corner::TopLeft => (m, m),
-            Corner::TopRight => (right, m),
-            Corner::BottomLeft => (m, bottom),
-            Corner::BottomRight => (right, bottom),
-        };
-        (x >= 0 && y >= 0).then_some((x, y))
+        LAYOUT.place(self.position, sprite, frame)
     }
 }
 
-/// The composed badge: straight-alpha RGBA, row-major, 4 bytes per pixel.
-#[derive(Debug, Clone)]
-pub struct Sprite {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
-}
-
-impl Sprite {
-    /// Source-over of `rgb` at coverage `a` onto the straight-alpha buffer.
-    fn put(&mut self, x: i32, y: i32, rgb: [u8; 3], a: f32) {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
-            return;
-        }
-        let sa = a.clamp(0.0, 1.0);
-        if sa <= 0.0 {
-            return;
-        }
-        let i = (y as usize * self.width as usize + x as usize) * 4;
-        let da = self.rgba[i + 3] as f32 / 255.0;
-        let out = sa + da * (1.0 - sa);
-        if out <= 0.0 {
-            return;
-        }
-        for (dst, &src) in self.rgba[i..i + 3].iter_mut().zip(rgb.iter()) {
-            let over = src as f32 * sa + *dst as f32 * da * (1.0 - sa);
-            *dst = (over / out).round().clamp(0.0, 255.0) as u8;
-        }
-        self.rgba[i + 3] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
-    }
-
-    /// Alpha-blends the badge onto `frame` with its top-left at (`x0`, `y0`).
-    fn blit(&self, frame: &mut RawFrame, x0: i32, y0: i32, opacity: f32) {
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let i = (y as usize * self.width as usize + x as usize) * 4;
-                let a = self.rgba[i + 3] as f32 / 255.0 * opacity;
-                if a > 0.0 {
-                    let rgb = [self.rgba[i], self.rgba[i + 1], self.rgba[i + 2]];
-                    blend(frame, x0 + x as i32, y0 + y as i32, rgb, a);
-                }
+/// Alpha-blends a composed sprite onto `frame` with its top-left at (`x0`, `y0`).
+///
+/// This is the one part of the badge that cannot be shared with the injected
+/// hook: it has to know about [`RawFrame`] and its pixel order, and the hook
+/// hands its sprite to a GPU instead.
+fn blit(sprite: &Sprite, frame: &mut RawFrame, x0: i32, y0: i32, opacity: f32) {
+    for y in 0..sprite.height {
+        for x in 0..sprite.width {
+            let (rgb, a) = sprite.get(x, y);
+            let a = a * opacity;
+            if a > 0.0 {
+                blend(frame, x0 + x as i32, y0 + y as i32, rgb, a);
             }
         }
     }
@@ -162,7 +109,7 @@ impl Sprite {
 /// Composes and caches the badge. Not part of [`Watermark`] so the settings stay
 /// a plain value type; one renderer lives on the encode thread, one in the GUI.
 pub struct WatermarkRenderer {
-    font: FontRef<'static>,
+    text: TextRenderer,
     logo: RgbaImage,
     /// The badge composed for one pixel height; recomposed when it changes.
     cache: Option<(u32, Sprite)>,
@@ -172,14 +119,15 @@ impl WatermarkRenderer {
     /// `None` if the bundled font or icon cannot be parsed — the caller then
     /// carries on without a badge rather than failing the recording.
     pub fn new() -> Option<Self> {
-        let font = FontRef::try_from_slice(INTER_SEMIBOLD)
-            .map_err(|e| log::warn!("watermark: cannot parse the bundled font: {e}"))
-            .ok()?;
+        let Some(text) = TextRenderer::new() else {
+            log::warn!("watermark: cannot parse the bundled font");
+            return None;
+        };
         let logo = image::load_from_memory(LOGO_PNG)
             .map_err(|e| log::warn!("watermark: cannot decode the bundled icon: {e}"))
             .ok()?
             .to_rgba8();
-        Some(Self { font, logo, cache: None })
+        Some(Self { text, logo, cache: None })
     }
 
     /// The badge at `height` pixels tall, composing it if it is not cached.
@@ -204,7 +152,7 @@ impl WatermarkRenderer {
         };
         let (x1, y1) = ((x + sprite.width as i32) as f32, (y + sprite.height as i32) as f32);
         save_patch(frame, x as f32, y as f32, x1, y1, patches);
-        sprite.blit(frame, x, y, wm.opacity.min(100) as f32 / 100.0);
+        blit(sprite, frame, x, y, wm.opacity.min(100) as f32 / 100.0);
     }
 
     /// Like [`paint`](Self::paint) but without saving the pixels underneath,
@@ -214,47 +162,18 @@ impl WatermarkRenderer {
         self.paint(wm, frame, &mut patches);
     }
 
-    /// Advance width of the wordmark at `px`, kerning included.
-    fn wordmark_width(&self, px: f32) -> f32 {
-        let sf = self.font.as_scaled(PxScale::from(px));
-        let mut w = 0.0;
-        let mut prev: Option<GlyphId> = None;
-        for c in WORDMARK.chars() {
-            let id = sf.glyph_id(c);
-            if let Some(p) = prev {
-                w += sf.kern(p, id);
-            }
-            w += sf.h_advance(id);
-            prev = Some(id);
-        }
-        w
-    }
-
     fn compose(&self, height: u32) -> Sprite {
         let h = height as f32;
         let pad = h * 0.34;
         let gap = h * 0.30;
         let logo_px = (h * 0.62).round().clamp(1.0, h) as u32;
         let font_px = h * 0.44;
-        let text_w = self.wordmark_width(font_px);
+        let text_w = self.text.width(WORDMARK, font_px);
         let width = (pad + logo_px as f32 + gap + text_w + pad).ceil().max(1.0) as u32;
-        let mut sprite = Sprite { width, height, rgba: vec![0; (width as usize * height as usize) * 4] };
+        let mut sprite = Sprite::new(width, height);
 
         // The pill, plus a hairline just inside its edge.
-        let radius = h / 2.0;
-        for y in 0..height {
-            for x in 0..width {
-                let d = rounded_box_sdf(x as f32 + 0.5, y as f32 + 0.5, width as f32, h, radius);
-                let fill = (0.5 - d).clamp(0.0, 1.0);
-                if fill > 0.0 {
-                    sprite.put(x as i32, y as i32, SCRIM, SCRIM_ALPHA * fill);
-                }
-                let edge = (1.0 - (d + 1.0).abs()).clamp(0.0, 1.0);
-                if edge > 0.0 {
-                    sprite.put(x as i32, y as i32, TEXT, HAIRLINE_ALPHA * edge);
-                }
-            }
-        }
+        sprite.fill_pill(h / 2.0, (SCRIM, SCRIM_ALPHA), (TEXT, HAIRLINE_ALPHA));
 
         // The icon.
         let logo = self.logo_at(logo_px);
@@ -265,28 +184,13 @@ impl WatermarkRenderer {
             sprite.put(lx + px as i32, ly + py as i32, [r, g, b], a as f32 / 255.0);
         }
 
-        // The wordmark, "open" in white and "clip" in the accent colour.
-        let scale = PxScale::from(font_px);
-        let sf = self.font.as_scaled(scale);
-        let baseline = (h - (sf.ascent() - sf.descent())) / 2.0 + sf.ascent();
-        let mut pen = pad + logo_px as f32 + gap;
-        let mut prev: Option<GlyphId> = None;
-        for (i, c) in WORDMARK.chars().enumerate() {
-            let id = sf.glyph_id(c);
-            if let Some(p) = prev {
-                pen += sf.kern(p, id);
-            }
-            let color = if i < ACCENT_FROM { TEXT } else { ACCENT };
-            if let Some(outline) = self.font.outline_glyph(id.with_scale_and_position(scale, point(pen, baseline))) {
-                let bounds = outline.px_bounds();
-                let (ox, oy) = (bounds.min.x as i32, bounds.min.y as i32);
-                outline.draw(|gx, gy, cov| {
-                    sprite.put(ox + gx as i32, oy + gy as i32, color, cov * TEXT_ALPHA);
-                });
-            }
-            pen += sf.h_advance(id);
-            prev = Some(id);
-        }
+        // The wordmark, "open" in white and "clip" in the accent colour, drawn
+        // as one run so kerning is applied across the split.
+        let pen = pad + logo_px as f32 + gap;
+        let baseline = self.text.baseline(font_px, h);
+        self.text.draw_run(&mut sprite, WORDMARK, font_px, (pen, baseline), TEXT_ALPHA, |i| {
+            if i < ACCENT_FROM { TEXT } else { ACCENT }
+        });
         sprite
     }
 
@@ -311,14 +215,6 @@ impl WatermarkRenderer {
         }
         out
     }
-}
-
-/// Signed distance from (`px`, `py`) to a `w`×`h` box with corner radius `r`,
-/// negative inside. Same coverage idiom as `fill_disc` in `mouse_fx`.
-fn rounded_box_sdf(px: f32, py: f32, w: f32, h: f32, r: f32) -> f32 {
-    let qx = (px - w / 2.0).abs() - (w / 2.0 - r);
-    let qy = (py - h / 2.0).abs() - (h / 2.0 - r);
-    (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r
 }
 
 #[cfg(test)]
@@ -347,8 +243,8 @@ mod tests {
     fn badge_scales_with_output_and_size() {
         let wm = Watermark::default();
         // Clamped at both ends, proportional in between.
-        assert_eq!(wm.badge_height(240), MIN_HEIGHT as u32);
-        assert_eq!(wm.badge_height(4320), MAX_HEIGHT as u32);
+        assert_eq!(wm.badge_height(240), LAYOUT.min_height as u32);
+        assert_eq!(wm.badge_height(4320), LAYOUT.max_height as u32);
         assert_eq!(wm.badge_height(1080), 49);
         let big = Watermark { size: 200, ..wm };
         assert_eq!(big.badge_height(1080), 97);

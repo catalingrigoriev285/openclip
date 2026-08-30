@@ -1,0 +1,19 @@
+[package]
+name = "openclip-overlay"
+version = "0.1.6"
+edition = "2024"
+license = "Apache-2.0"
+description = "Shared overlay rasteriser and hook ABI for openclip"
+repository = "https://github.com/catalingrigoriev285/openclip"
+
+# Deliberately tiny. This crate is linked into both openclip itself and the DLL
+# loaded into other people's game processes, so it must not pull in a GUI, a
+# runtime, or anything that allocates at load time.
+
+[dependencies]
+ab_glyph = "0.2"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

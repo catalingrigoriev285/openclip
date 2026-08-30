@@ -788,7 +788,7 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         let slot = c.next;
         let pts = c.slot_pts(slot);
         if let Some(f) = newest.take() {
-            st.accept(f, &pool);
+            st.accept(f, &pool, &stats);
         } else {
             stats.frames_repeated.fetch_add(1, Ordering::Relaxed);
             // The screen is static but the pointer may move: sample now.
@@ -932,6 +932,13 @@ struct EncodeState {
     /// Half size uses the exact 2×2 box filter; everything else the scaler.
     half: bool,
     scaler: Option<Scaler>,
+    /// Size of the first captured frame, which everything below was built from.
+    src: (u32, u32),
+    /// Size the frames are converted at (before the encoder's even rounding).
+    scaled: (u32, u32),
+    /// Fits a differently-sized source into `scaled`; built the first time the
+    /// source changes size and reused after that.
+    letterbox: Option<Scaler>,
     /// The frame being encoded (already scaled). Kept for repeats.
     frame: Option<RawFrame>,
     /// True when `frame` changed since the converter last saw it.
@@ -1008,6 +1015,9 @@ impl EncodeState {
         Ok(Self {
             half,
             scaler,
+            src,
+            scaled,
+            letterbox: None,
             frame: None,
             converted_is_new: false,
             converter,
@@ -1025,7 +1035,25 @@ impl EncodeState {
 
     /// Makes `captured` the current frame (scaling into the reusable buffer),
     /// returning consumed buffers to the pool.
-    fn accept(&mut self, captured: RawFrame, pool: &FramePool) {
+    fn accept(&mut self, captured: RawFrame, pool: &FramePool, stats: &Stats) {
+        if (captured.width, captured.height) != self.src {
+            // The source was resized under us — a window dragged to another
+            // resolution, or a game toggling fullscreen. The encoder, converter
+            // and container header were all built from the first frame and
+            // cannot be renegotiated, so fit the new picture into the size they
+            // expect instead of failing the recording.
+            let scaled = self.scaled;
+            let fit = self.letterbox.get_or_insert_with(|| {
+                stats.add_note(crate::t!(NOTE_SOURCE_RESIZED, scaled.0, scaled.1));
+                Scaler::new((captured.width, captured.height), scaled)
+            });
+            let mut dst = self.frame.take().unwrap_or_else(|| RawFrame::empty(PixelFormat::Bgra));
+            fit.letterbox_into(&captured, &mut dst);
+            pool.recycle(captured.data);
+            self.frame = Some(dst);
+            self.converted_is_new = true;
+            return;
+        }
         if self.half || self.scaler.is_some() {
             let mut dst = self.frame.take().unwrap_or_else(|| RawFrame::empty(PixelFormat::Bgra));
             if self.half {

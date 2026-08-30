@@ -544,6 +544,9 @@ strings! {
     NOTE_CAPTURE_CURSOR_UNSUPPORTED => "this Windows version cannot hide the cursor in the capture",
         "această versiune de Windows nu poate ascunde cursorul în captură",
         "эта версия Windows не может скрыть курсор в записи";
+    NOTE_SOURCE_RESIZED => "the source changed size; fitted into {0}×{1}",
+        "sursa și-a schimbat dimensiunea; încadrată în {0}×{1}",
+        "источник изменил размер; вписан в {0}×{1}";
     NOTE_SYSTEM_AUDIO_UNAVAILABLE => "system audio unavailable: {0}", "sunetul de sistem nu este disponibil: {0}",
         "системный звук недоступен: {0}";
     NOTE_MIC_UNAVAILABLE => "microphone unavailable: {0}", "microfonul nu este disponibil: {0}",

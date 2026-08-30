@@ -1,0 +1,38 @@
+[package]
+name = "openclip-hook"
+version = "0.1.6"
+edition = "2024"
+license = "Apache-2.0"
+description = "openclip in-game capture hook"
+repository = "https://github.com/catalingrigoriev285/openclip"
+
+# Loaded into other people's game processes. Named plainly and carrying a full
+# version resource on purpose: anti-cheat vendors whitelist by name and
+# signature, and a nameless DLL is indistinguishable from a cheat loader.
+[lib]
+name = "openclip_hook64"
+crate-type = ["cdylib"]
+
+[dependencies]
+openclip-overlay = { path = "../openclip-overlay" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Performance",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
