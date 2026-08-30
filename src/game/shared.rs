@@ -95,7 +95,7 @@ impl HookSession {
     /// The hook's version as `major.minor.patch`, once it has reported.
     pub fn hook_version(&self) -> Option<(u16, u8, u8)> {
         let v = self.control().hook_version.load(Ordering::Relaxed);
-        (v != 0).then(|| ((v >> 16) as u16, (v >> 8) as u8, v as u8))
+        (v != 0).then_some(((v >> 16) as u16, (v >> 8) as u8, v as u8))
     }
 
     /// Whether the hook has presented recently. A game that hung, exited or was

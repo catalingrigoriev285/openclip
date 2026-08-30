@@ -39,7 +39,8 @@ mod win {
     use windows::Win32::Graphics::Direct3D11::*;
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_DESC, DXGI_SAMPLE_DESC};
     use windows::Win32::Graphics::Dxgi::{
-        IDXGISwapChain, DXGI_SWAP_CHAIN_DESC, DXGI_SWAP_EFFECT_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        IDXGISwapChain, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_DISCARD,
+        DXGI_USAGE_RENDER_TARGET_OUTPUT,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -48,14 +49,16 @@ mod win {
         vsync: bool,
         resize_after: Option<f32>,
         size: (i32, i32),
+        verify: bool,
     }
 
     fn parse_args() -> Args {
-        let mut args = Args { vsync: false, resize_after: None, size: (1280, 720) };
+        let mut args = Args { vsync: false, resize_after: None, size: (1280, 720), verify: false };
         let mut it = std::env::args().skip(1);
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--vsync" => args.vsync = true,
+                "--verify" => args.verify = true,
                 "--resize-after" => args.resize_after = it.next().and_then(|v| v.parse().ok()),
                 "--size" => {
                     if let Some(v) = it.next()
@@ -78,6 +81,12 @@ mod win {
         let mut rtv = render_target(&device, &swap)?;
 
         println!("gfx_sandbox: pid {} hwnd {:#x}", std::process::id(), hwnd.0 as isize);
+        // Also links the openclip library, which is where `build.rs` expects the
+        // hybrid-graphics export symbols it adds to every example to come from.
+        match openclip::game::hook_dll_path() {
+            Some(p) => println!("hook component: {}", p.display()),
+            None => println!("hook component: not built — run `cargo build` first"),
+        }
         println!("inject with:  cargo run --example inject_test -- --pid {}", std::process::id());
 
         let start = Instant::now();
@@ -101,27 +110,35 @@ mod win {
                 drop(rtv);
                 println!("resizing the swapchain");
                 // SAFETY: no outstanding back-buffer references — `rtv` is gone.
-                unsafe { swap.ResizeBuffers(0, 960, 540, DXGI_FORMAT_B8G8R8A8_UNORM, 0)? };
+                unsafe { swap.ResizeBuffers(0, 960, 540, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SWAP_CHAIN_FLAG(0))? };
                 rtv = render_target(&device, &swap)?;
             }
 
             // A colour that moves, so a frozen picture is obvious at a glance.
-            let clear = [
-                0.5 + 0.5 * (t * 0.7).sin(),
-                0.5 + 0.5 * (t * 1.1).sin(),
-                0.5 + 0.5 * (t * 1.7).sin(),
-                1.0,
-            ];
+            // Under --verify it stays a flat dark grey instead, so anything
+            // strongly coloured in the buffer can only have come from an overlay.
+            let clear = if args.verify {
+                [0.05, 0.05, 0.05, 1.0]
+            } else {
+                [0.5 + 0.5 * (t * 0.7).sin(), 0.5 + 0.5 * (t * 1.1).sin(), 0.5 + 0.5 * (t * 1.7).sin(), 1.0]
+            };
             // SAFETY: plain D3D11 rendering on our own device.
             unsafe {
                 context.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
                 context.ClearRenderTargetView(&rtv, &clear);
-                swap.Present(u32::from(args.vsync), 0).ok()?;
+                swap.Present(u32::from(args.vsync), DXGI_PRESENT(0)).ok()?;
             }
 
             frames += 1;
             if last_report.elapsed().as_secs_f32() >= 1.0 {
-                println!("{:.0} fps", frames as f32 / last_report.elapsed().as_secs_f32());
+                print!("{:.0} fps", frames as f32 / last_report.elapsed().as_secs_f32());
+                if args.verify {
+                    match scan_overlay(&device, &context, &swap) {
+                        Ok(found) => print!("   {found}"),
+                        Err(e) => print!("   scan failed: {e}"),
+                    }
+                }
+                println!();
                 frames = 0;
                 last_report = Instant::now();
             }
@@ -232,6 +249,63 @@ mod win {
             context.ok_or_else(|| anyhow!("no context"))?,
             swap.ok_or_else(|| anyhow!("no swapchain"))?,
         ))
+    }
+
+    /// Reads the back buffer and reports whether openclip's counter is in it.
+    ///
+    /// This is how the overlay is verified without a screenshot: the hook draws
+    /// into the back buffer *before* chaining to the real `Present`, so anything
+    /// it painted is in the buffer we read here. With `--verify` the frame is
+    /// cleared to a flat dark grey, so a saturated green or red pixel cannot
+    /// have come from anywhere else.
+    fn scan_overlay(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        swap: &IDXGISwapChain,
+    ) -> Result<String> {
+        // SAFETY: a staging copy of the back buffer, mapped for read and
+        // unmapped before returning.
+        unsafe {
+            let back: ID3D11Texture2D = swap.GetBuffer(0)?;
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            back.GetDesc(&mut desc);
+            let staging_desc = D3D11_TEXTURE2D_DESC {
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+                ..desc
+            };
+            let mut staging = None;
+            device.CreateTexture2D(&staging_desc, None, Some(&mut staging))?;
+            let staging = staging.ok_or_else(|| anyhow!("no staging texture"))?;
+            context.CopyResource(&staging, &back);
+
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut m))?;
+            let (mut green, mut red) = (0u32, 0u32);
+            for y in 0..desc.Height as usize {
+                let row = (m.pData as *const u8).add(y * m.RowPitch as usize);
+                for x in 0..desc.Width as usize {
+                    // The swapchain is BGRA.
+                    let px = row.add(x * 4);
+                    let (b, g, r) = (*px as i32, *px.add(1) as i32, *px.add(2) as i32);
+                    if g > 140 && r < 120 && b < 140 {
+                        green += 1;
+                    } else if r > 200 && g < 130 && b < 130 {
+                        red += 1;
+                    }
+                }
+            }
+            context.Unmap(&staging, 0);
+
+            Ok(match (green, red) {
+                (0, 0) => "overlay: not found".to_string(),
+                (g, 0) => format!("overlay: GREEN (ready), {g} px"),
+                (0, r) => format!("overlay: RED (recording), {r} px"),
+                (g, r) => format!("overlay: {g} green + {r} red px"),
+            })
+        }
     }
 
     fn render_target(device: &ID3D11Device, swap: &IDXGISwapChain) -> Result<ID3D11RenderTargetView> {

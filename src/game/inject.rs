@@ -14,15 +14,19 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use windows::core::{s, HSTRING, PCSTR};
-use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND};
+use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HOOKPROC, WH_GETMESSAGE,
     WM_NULL,
 };
+
+type FarProc = unsafe extern "system" fn() -> isize;
+type HookProcFn = unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT;
 
 /// The file name shipped beside `openclip.exe`.
 pub const HOOK_DLL: &str = "openclip_hook64.dll";
@@ -73,12 +77,18 @@ fn local_module() -> Result<HMODULE> {
     Ok(HMODULE(*raw as *mut std::ffi::c_void))
 }
 
-/// Injects the hook into the process owning `hwnd`.
+/// Injects the hook into the process owning `hwnd`, waiting until `attached`
+/// reports success or `timeout` passes.
 ///
 /// The control block must already exist for that pid: the hook looks for it as
 /// soon as it starts, and creating it first is what lets the DLL attach without
 /// being told anything by us.
-pub fn inject(hwnd: isize) -> Result<()> {
+///
+/// The wait is not optional. Windows only maps the DLL when the hooked thread
+/// next pumps a message, so removing the message hook straight after installing
+/// it — the obvious-looking thing to do — means the DLL is essentially never
+/// loaded. The hook has to stay in place until the DLL is in.
+pub fn inject(hwnd: isize, attached: impl Fn() -> bool, timeout: Duration) -> Result<()> {
     let module = local_module()?;
     // SAFETY: `GetProcAddress` on a module we just loaded; the symbol is
     // exported by our own DLL with exactly this signature.
@@ -95,20 +105,35 @@ pub fn inject(hwnd: isize) -> Result<()> {
 
     // SAFETY: installing a message hook on one thread of the target. The
     // procedure lives in our DLL, which the loader maps into that process.
-    let hook = unsafe {
-        SetWindowsHookExW(WH_GETMESSAGE, Some(std::mem::transmute::<_, HOOKPROC>(proc).unwrap()), Some(HINSTANCE(module.0)), thread)
+    // `GetProcAddress` hands back an untyped `FARPROC`; this is the one place
+    // the exported procedure's real signature has to be asserted.
+    let hook_proc: HOOKPROC = Some(unsafe { std::mem::transmute::<FarProc, HookProcFn>(proc) });
+    let hook = unsafe { SetWindowsHookExW(WH_GETMESSAGE, hook_proc, Some(HINSTANCE(module.0)), thread) }
+        .context("installing the message hook")?;
+
+    // The loader maps the DLL when the hooked thread next pumps a message, so
+    // nudge it rather than waiting on whatever the game does on its own — a
+    // fullscreen title between frames can go a long time without pumping. Keep
+    // nudging: one message can be consumed before the hook is fully in place.
+    let deadline = Instant::now() + timeout;
+    let mut attached_ok = false;
+    while Instant::now() < deadline {
+        let _ = unsafe { PostThreadMessageW(thread, WM_NULL, Default::default(), Default::default()) };
+        if attached() {
+            attached_ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
-    .context("installing the message hook")?;
 
-    // The loader only maps the DLL when the thread next pumps a message. Some
-    // engines pump rarely — a fullscreen game between frames may not for a
-    // while — so nudge it rather than waiting.
-    let _ = unsafe { PostThreadMessageW(thread, WM_NULL, Default::default(), Default::default()) };
-
-    // The hook is only a loading mechanism; the DLL pins itself and takes over
-    // from its own thread, so this can come straight back out. Leaving it in
-    // would put our procedure on every message that thread handles.
+    // The message hook is only a loading mechanism. Once the DLL is in it pins
+    // itself and works from its own thread, so this comes back out — leaving it
+    // installed would put our procedure on every message that thread handles.
     let _ = unsafe { UnhookWindowsHookEx(hook) };
+
+    if !attached_ok {
+        bail!("the hook did not attach within {:.0} s", timeout.as_secs_f32());
+    }
     Ok(())
 }
 

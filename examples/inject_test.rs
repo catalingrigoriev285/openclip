@@ -78,11 +78,9 @@ mod win {
         });
         session.arm(true);
 
-        inject::inject(hwnd)?;
-        println!("injected; waiting for the hook to report...");
-        if !session.wait_for_hook(Duration::from_secs(5)) {
-            bail!("the hook did not attach within 5 s — see %LOCALAPPDATA%\\openclip\\hook-{pid}.log");
-        }
+        println!("injecting; the message hook stays in place until the DLL reports...");
+        inject::inject(hwnd, || session.is_hooked(), Duration::from_secs(5))
+            .map_err(|e| anyhow::anyhow!("{e} — see %LOCALAPPDATA%\\openclip\\hook-{pid}.log"))?;
         let v = session.hook_version().expect("just reported");
         println!("hook {}.{}.{} attached", v.0, v.1, v.2);
 
@@ -141,14 +139,14 @@ mod win {
             search.found = hwnd.0 as isize;
             return windows::core::BOOL(0); // stop enumerating
         }
-        TRUE.into()
+        TRUE
     }
 
     /// Finds a visible window whose title contains `needle`, and reports what
     /// the probe makes of the process behind it.
     fn find_window(needle: &str) -> Result<(u32, isize)> {
         let needle = needle.to_ascii_lowercase();
-        let mut hits = Vec::new();
+        let mut hits: Vec<(u32, isize, String)> = Vec::new();
         // SAFETY: synchronous enumeration into a local vector.
         unsafe {
             let _ = EnumWindows(Some(collect), LPARAM(&mut hits as *mut Vec<(u32, isize, String)> as isize));
@@ -178,7 +176,7 @@ mod win {
                 out.push((pid, hwnd.0 as isize, String::from_utf16_lossy(&buf[..len])));
             }
         }
-        TRUE.into()
+        TRUE
     }
 
     /// Keeps `classify_modules` referenced from the example so its shape stays

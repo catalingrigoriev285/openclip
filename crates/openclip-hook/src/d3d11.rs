@@ -178,7 +178,7 @@ unsafe extern "system" fn resize_buffers_hook(
 /// catch our own bugs, and killing someone's game over one would be far worse
 /// than losing the counter. After [`MAX_FAULTS`] the hook stops trying.
 fn guard(f: impl FnOnce()) {
-    if crate::shutting_down() || FAULTS.load(Ordering::Relaxed) >= MAX_FAULTS {
+    if crate::shutting_down() || crate::detached() || FAULTS.load(Ordering::Relaxed) >= MAX_FAULTS {
         return;
     }
     if catch_unwind(AssertUnwindSafe(f)).is_err() {

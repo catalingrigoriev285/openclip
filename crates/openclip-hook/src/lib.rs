@@ -49,6 +49,10 @@ static SELF_MODULE: AtomicIsize = AtomicIsize::new(0);
 /// Set on `DLL_PROCESS_DETACH`. Every hook checks it and chains straight
 /// through: the process is going away and touching the GPU is pointless.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+/// Set when openclip asked us to let go — or died without asking. The vtable
+/// patch stays (removing it races with threads inside our hooks), but from here
+/// on the hooks do nothing but chain, so the game is left exactly as found.
+static DETACHED: AtomicBool = AtomicBool::new(false);
 
 /// Used by the graphics backends to resolve their own module.
 #[allow(dead_code)]
@@ -58,6 +62,20 @@ pub(crate) fn self_module() -> HINSTANCE {
 
 pub(crate) fn shutting_down() -> bool {
     SHUTTING_DOWN.load(Ordering::Relaxed)
+}
+
+pub(crate) fn detached() -> bool {
+    DETACHED.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_detached() {
+    DETACHED.store(true, Ordering::Relaxed);
+}
+
+/// Undone when openclip arms us again — the DLL stays mapped for the life of the
+/// process, so a second recording session needs no second injection.
+pub(crate) fn clear_detached() {
+    DETACHED.store(false, Ordering::Relaxed);
 }
 
 /// Entry point. Read the module docs before adding anything here.

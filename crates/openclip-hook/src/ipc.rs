@@ -15,7 +15,10 @@ use windows::Win32::System::Memory::{
     MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS,
 };
 use windows::Win32::System::Performance::QueryPerformanceCounter;
-use windows::Win32::System::Threading::{CreateEventW, OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+use windows::Win32::Foundation::WAIT_OBJECT_0;
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenEventW, OpenProcess, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, PROCESS_SYNCHRONIZE,
+};
 
 use crate::logging::hlog;
 
@@ -28,6 +31,8 @@ pub struct Shared {
     ready: HANDLE,
     /// openclip signals this to ask us to unhook.
     stop: HANDLE,
+    /// openclip's own process, watched so a crash cannot leave the counter on.
+    host: Option<HANDLE>,
 }
 
 // The pointer is into a shared mapping that outlives the struct's use, and every
@@ -87,8 +92,14 @@ impl Shared {
         }
         .unwrap_or_default();
 
+        let host_pid = unsafe { &*control }.host_pid;
+        let host = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, host_pid) }.ok();
+        if host.is_none() {
+            hlog!("cannot watch openclip (pid {host_pid}); a crash there will not be noticed");
+        }
+
         hlog!("attached to openclip control block for pid {pid}");
-        Some(Self { mapping, view, control, ready, stop })
+        Some(Self { mapping, view, control, ready, stop, host })
     }
 
     pub fn control(&self) -> &Control {
@@ -109,9 +120,28 @@ impl Shared {
         self.stop
     }
 
-    /// True once openclip has asked us to detach, or the block says so.
+    /// True once openclip has asked us to detach, or has died.
+    ///
+    /// The liveness check is not belt-and-braces: the shared section stays alive
+    /// while *we* hold a view of it, so a crashed or force-killed openclip
+    /// leaves `armed` set forever and the counter stuck on someone's game with
+    /// nothing left to turn it off. Watching the host process is the only way
+    /// to notice.
     pub fn should_stop(&self) -> bool {
-        self.control().stop.load(Ordering::Relaxed) != 0
+        if self.control().stop.load(Ordering::Relaxed) != 0 {
+            return true;
+        }
+        if !self.host_alive() {
+            hlog!("openclip (pid {}) is gone; detaching", self.control().host_pid);
+            return true;
+        }
+        false
+    }
+
+    fn host_alive(&self) -> bool {
+        let Some(host) = self.host else { return true };
+        // SAFETY: a handle we opened and own; a zero timeout only polls.
+        unsafe { WaitForSingleObject(host, 0) != WAIT_OBJECT_0 }
     }
 }
 
@@ -126,6 +156,9 @@ impl Drop for Shared {
             }
             if !self.stop.is_invalid() {
                 let _ = CloseHandle(self.stop);
+            }
+            if let Some(host) = self.host {
+                let _ = CloseHandle(host);
             }
         }
     }
