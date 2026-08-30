@@ -271,7 +271,9 @@ pub struct App {
     fps_overlay: FpsOverlay,
     /// Composes the counter for the Game tab's preview.
     fps_badge: Option<openclip_overlay::FpsBadge>,
-    fps_badge_tex: Option<(u32, TextureHandle)>,
+    /// One cached texture per state, keyed by the reading it shows. Without
+    /// this the preview re-rasterises and re-uploads two sprites every frame.
+    fps_badge_tex: [Option<(String, TextureHandle)>; 2],
     /// Watches for a game to hook. Only on Windows; a stub elsewhere.
     #[cfg(windows)]
     game: crate::game::GameWatcher,
@@ -393,7 +395,7 @@ impl App {
             watermark_tex: None,
             fps_overlay: settings.fps_overlay,
             fps_badge: None,
-            fps_badge_tex: None,
+            fps_badge_tex: [None, None],
             #[cfg(windows)]
             game: Default::default(),
             game_consented: settings.game_consented,
@@ -1010,6 +1012,20 @@ impl App {
         Some(format!("{major}.{minor}.{patch} · {api}"))
     }
 
+    /// The hooked game's present rate, which is what the counter is showing
+    /// right now. `None` when nothing is hooked.
+    fn game_present_fps(&self) -> Option<f32> {
+        #[cfg(windows)]
+        {
+            let fps = self.game.state.session()?.present_fps();
+            (fps > 0.0).then_some(fps)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
     /// The executable of the hooked game, if any.
     #[cfg(windows)]
     fn hooked_exe(&self) -> Option<String> {
@@ -1057,14 +1073,14 @@ impl App {
     fn fps_overlay_preview(&mut self, ui: &mut egui::Ui, fps: &FpsOverlay) {
         // Both states side by side: the colour *is* the feature, and showing one
         // of them would leave the other a surprise.
-        let recording = self.is_recording();
+        let live = self.game_present_fps();
         ui.horizontal(|ui| {
             for (state, label) in [
                 (openclip_overlay::HookState::Ready, t!(GAME_STATE_READY)),
                 (openclip_overlay::HookState::Recording, t!(GAME_STATE_RECORDING)),
             ] {
                 ui.vertical(|ui| {
-                    self.fps_badge_swatch(ui, fps, state, recording);
+                    self.fps_badge_swatch(ui, fps, state, live);
                     ui.label(secondary(label).small());
                 });
                 ui.add_space(8.0);
@@ -1077,25 +1093,40 @@ impl App {
         ui: &mut egui::Ui,
         fps: &FpsOverlay,
         state: openclip_overlay::HookState,
-        live: bool,
+        live: Option<f32>,
     ) {
         const PREVIEW_H: u32 = 34;
-        let badge = self.fps_badge.get_or_insert_with(|| {
-            openclip_overlay::FpsBadge::new().expect("the bundled font parses; the watermark uses it too")
-        });
-        // A plausible reading when there is no game, the real one when there is.
-        let text = if live { "120" } else { "120" };
-        let sprite = badge.sprite_for(PREVIEW_H, text, state.color());
-        let image = ColorImage::from_rgba_unmultiplied(
-            [sprite.width as usize, sprite.height as usize],
-            &sprite.rgba,
-        );
-        let tex = ui.ctx().load_texture(format!("fps-badge-{}", state.as_u32()), image, TextureOptions::LINEAR);
-        let size = egui::vec2(sprite.width as f32, sprite.height as f32);
+        // The hooked game's real reading when there is one, so the preview
+        // doubles as a live monitor; a plausible number otherwise.
+        let text = match live {
+            Some(fps) => openclip_overlay::format_fps(fps),
+            None => "120".to_string(),
+        };
+        let slot = state.as_u32() as usize;
+        let stale = !matches!(&self.fps_badge_tex[slot], Some((t, _)) if *t == text);
+        if stale {
+            let badge = self.fps_badge.get_or_insert_with(|| {
+                openclip_overlay::FpsBadge::new()
+                    .expect("the bundled font parses; the watermark uses it too")
+            });
+            let sprite = badge.sprite_for(PREVIEW_H, &text, state.color());
+            let image = ColorImage::from_rgba_unmultiplied(
+                [sprite.width as usize, sprite.height as usize],
+                &sprite.rgba,
+            );
+            let tex = ui.ctx().load_texture(
+                format!("fps-badge-{slot}"),
+                image,
+                TextureOptions::LINEAR,
+            );
+            self.fps_badge_tex[slot] = Some((text, tex));
+        }
+        let tex = &self.fps_badge_tex[slot].as_ref().expect("just cached").1;
+        let size = tex.size_vec2();
         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
         ui.painter().rect_filled(rect, CornerRadius::same(6), PREVIEW_BG);
         let opacity = fps.opacity.min(100) as f32 / 100.0;
-        egui::Image::new(&tex).tint(Color32::WHITE.gamma_multiply(opacity)).paint_at(ui, rect);
+        egui::Image::new(tex).tint(Color32::WHITE.gamma_multiply(opacity)).paint_at(ui, rect);
     }
 
     /// Whether the watcher is running.

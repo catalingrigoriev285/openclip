@@ -18,7 +18,7 @@ pub mod sprite;
 pub mod text;
 
 pub use abi::{Control, GfxApi, HookError, OverlaySettings, Transport, HOOK_ABI_VERSION, HOOK_MAGIC};
-pub use fps::{FpsBadge, FpsOverlay, HookState};
+pub use fps::{format_fps, FpsBadge, FpsOverlay, HookState};
 pub use layout::{Corner, Layout};
 pub use sprite::{rounded_box_sdf, Sprite};
 pub use text::{TextRenderer, INTER_SEMIBOLD};
