@@ -10,6 +10,7 @@ use crate::i18n::Lang;
 use crate::t;
 use crate::video::encoder::EncoderInfo;
 use crate::video::mouse_fx::MouseFx;
+use crate::video::watermark::Watermark;
 
 /// Output container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -432,6 +433,8 @@ pub struct Settings {
     /// Microphone by name (re-resolved to a device index at load).
     pub mic_name: Option<String>,
     pub mouse_fx: MouseFx,
+    /// The openclip badge burned into recordings and snapshots.
+    pub watermark: Watermark,
     /// Count down before recording starts.
     pub countdown_enabled: bool,
     pub countdown_secs: u32,
@@ -451,6 +454,7 @@ impl Default for Settings {
             mic_enabled: false,
             mic_name: None,
             mouse_fx: MouseFx::default(),
+            watermark: Watermark::default(),
             countdown_enabled: true,
             countdown_secs: 3,
             language: Lang::default(),

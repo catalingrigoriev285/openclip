@@ -6,8 +6,8 @@
 //! deadline, the newest one is encoded with the slot's timestamp (or the last
 //! frame is repeated when nothing new arrived), so the file always has a
 //! perfectly regular frame rate whatever the capture timing does. Frame
-//! buffers are pooled, mouse effects are painted in place and restored, and
-//! previews are only produced while the GUI shows them.
+//! buffers are pooled, the watermark and mouse effects are painted in place and
+//! restored, and previews are only produced while the GUI shows them.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -28,6 +28,7 @@ use crate::settings::{FormatSettings, SizeMode};
 use crate::video::convert::even_dims;
 use crate::video::mouse_fx::{FrameClick, MouseFx, MouseSampler, Patch};
 use crate::video::preview::{PreviewImage, Previewer};
+use crate::video::watermark::{Watermark, WatermarkRenderer};
 use crate::video::{create_video_encoder, Converter, EncodedFrame, EncoderRequest, PixelFormat, RawFrame, Scaler, VideoEncoder};
 
 /// Longest side of preview images handed to the GUI.
@@ -44,6 +45,7 @@ pub struct RecordConfig {
     pub source: Source,
     pub format: FormatSettings,
     pub mouse_fx: MouseFx,
+    pub watermark: Watermark,
     pub system_audio: bool,
     /// `Some(None)` = default microphone, `Some(Some(name))` = named device.
     pub microphone: Option<Option<String>>,
@@ -796,8 +798,10 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
         }
         let snap = st.frame.as_mut().expect("frame present after accept").mouse.take();
 
-        // Mouse effects: paint in place, convert, restore — no frame copy.
-        let mut painted = false;
+        // Overlays: paint in place, convert, restore — no frame copy. Deciding
+        // is kept apart from painting because the watermark has to be painted
+        // even when the mouse sampler is off (the common case).
+        let mut fx = None;
         if let Some(snap) = snap.filter(|_| sampler.is_some()) {
             if let (Some(base), Some(live)) = (region_origin, &region) {
                 let r = live.get();
@@ -813,20 +817,28 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
             }
             let (cursor, clicks) = snap.mapped(origin, st.fx_scale);
             let changed = st.fx_changed(cursor, &clicks);
-            if changed || st.converted_is_new {
-                let scale = st.fx_scale.0.min(st.fx_scale.1);
-                let frame = st.frame.as_mut().unwrap();
-                config.mouse_fx.paint(frame, cursor, &clicks, scale, &mut st.patches);
-                painted = true;
+            fx = Some((cursor, clicks, changed));
+        }
+        // An unchanged repeat needs neither: the converted frame still carries
+        // both overlays from the slot that produced it.
+        let mut painted = false;
+        if st.converted_is_new || fx.as_ref().is_some_and(|(_, _, changed)| *changed) {
+            let frame = st.frame.as_mut().unwrap();
+            if let Some(wm) = &mut st.watermark {
+                wm.paint(&config.watermark, frame, &mut st.patches);
             }
+            if let Some((cursor, clicks, _)) = &fx {
+                let scale = st.fx_scale.0.min(st.fx_scale.1);
+                config.mouse_fx.paint(frame, *cursor, clicks, scale, &mut st.patches);
+            }
+            painted = !st.patches.is_empty();
+        }
+        if let Some((cursor, clicks, _)) = fx {
             st.last_fx = Some((cursor, clicks));
         }
         if st.converted_is_new || painted {
             st.converter.convert(st.frame.as_ref().unwrap())?;
             st.converted_is_new = false;
-        }
-        if painted {
-            MouseFx::restore(st.frame.as_mut().unwrap(), &mut st.patches);
         }
         let t1 = Instant::now();
         let encoded = st.encoder.encode(st.converter.frame(), pts)?;
@@ -853,6 +865,12 @@ fn encode_loop(args: EncodeArgs) -> Result<()> {
             if let Some(cb) = &on_preview {
                 cb();
             }
+        }
+        // Undone only now, so the preview above shows what went into the file
+        // (watermark and mouse effects included) and the reusable buffer is
+        // still clean for the next repeated slot.
+        if painted {
+            MouseFx::restore(st.frame.as_mut().unwrap(), &mut st.patches);
         }
         let t4 = Instant::now();
 
@@ -927,6 +945,9 @@ struct EncodeState {
     fx_scale: (f32, f32),
     params_sent: bool,
     patches: Vec<Patch>,
+    /// Composes the watermark badge once for this recording; `None` when the
+    /// badge is off or the bundled artwork could not be loaded.
+    watermark: Option<WatermarkRenderer>,
     last_fx: Option<((i32, i32), Vec<FrameClick>)>,
 }
 
@@ -997,6 +1018,7 @@ impl EncodeState {
             fx_scale,
             params_sent: false,
             patches: Vec::new(),
+            watermark: config.watermark.any_overlay().then(WatermarkRenderer::new).flatten(),
             last_fx: None,
         })
     }

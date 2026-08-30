@@ -35,6 +35,7 @@ use crate::t;
 use crate::video::encoder::{available_encoders, refresh_encoders, EncoderInfo};
 use crate::video::mouse_fx::{MouseFx, MouseSampler, ARROW, CLICK_DURATION};
 use crate::video::preview::{make_preview, PreviewImage};
+use crate::video::watermark::{Corner, Watermark, WatermarkRenderer};
 
 use format_dialog::{DialogOutcome, FormatDialog, FormatSection};
 use library::{open_with_default, reveal_in_folder, Library, LibraryTab};
@@ -44,13 +45,14 @@ use theme::*;
 use widgets::*;
 
 type SharedFx = Arc<RwLock<MouseFx>>;
+type SharedWatermark = Arc<RwLock<Watermark>>;
 
 /// Size of the full window. It opens at its minimum, so the app takes as
 /// little of the screen as it can while every page still fits.
 pub const WINDOW_SIZE: Vec2 = Vec2::new(820.0, 600.0);
 
 /// Application icon shown on the About page (same artwork as the window icon).
-const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/android-chrome-192x192.png");
+const APP_ICON_PNG: &[u8] = crate::video::watermark::LOGO_PNG;
 
 /// Height of one library row: the poster tile plus a little air.
 const ROW_H: f32 = 70.0;
@@ -110,6 +112,7 @@ impl HomeTab {
 enum VideoTab {
     Record,
     Mouse,
+    Watermark,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +158,7 @@ impl LivePreview {
     }
 
     /// Starts/restarts the preview capture if the source or cursor mode changed.
-    fn ensure(&mut self, source: Option<Source>, fx: &SharedFx, ctx: &egui::Context) {
+    fn ensure(&mut self, source: Option<Source>, fx: &SharedFx, wm: &SharedWatermark, ctx: &egui::Context) {
         let native_cursor = fx.read().unwrap().native_cursor();
         let changed = source != self.source || native_cursor != self.native_cursor;
         let retry = self.handle.is_none()
@@ -173,10 +176,13 @@ impl LivePreview {
         let slot = self.slot.clone();
         let ctx = ctx.clone();
         let fx = fx.clone();
+        let wm = wm.clone();
         let is_window = matches!(source, Source::Window { .. });
         let src = source.clone();
         let mut origin = source_origin(&source).unwrap_or((0, 0));
         let mut sampler: Option<MouseSampler> = None;
+        let mut badge: Option<WatermarkRenderer> = None;
+        let mut badge_failed = false;
         let mut n = 0u32;
         let sink: cap::FrameSink = Box::new(move |mut frame| {
             let fx = fx.read().unwrap().clone();
@@ -192,6 +198,16 @@ impl LivePreview {
                 }
                 let (cursor, clicks) = s.mapped(origin, (1.0, 1.0));
                 fx.apply(&mut frame, cursor, &clicks, 1.0);
+            }
+            let wm = *wm.read().unwrap();
+            if wm.any_overlay() {
+                if badge.is_none() && !badge_failed {
+                    badge = WatermarkRenderer::new();
+                    badge_failed = badge.is_none();
+                }
+                if let Some(b) = &mut badge {
+                    b.apply(&wm, &mut frame);
+                }
             }
             *slot.lock().unwrap() = Some(make_preview(&frame, 720));
             ctx.request_repaint();
@@ -236,6 +252,13 @@ pub struct App {
     encoder_rx: Option<mpsc::Receiver<Vec<EncoderInfo>>>,
     mouse_fx: SharedFx,
     fx_demo_clicks: Vec<(Instant, bool)>,
+    watermark: SharedWatermark,
+    /// Composes the badge for snapshots and the Watermark tab. Built on first
+    /// use; stays `None` when the bundled artwork cannot be loaded.
+    watermark_renderer: Option<WatermarkRenderer>,
+    watermark_unavailable: bool,
+    /// The badge texture on the Watermark tab, and the pixel height it is for.
+    watermark_tex: Option<(u32, TextureHandle)>,
     system_audio: bool,
     mic_enabled: bool,
     mic_idx: usize,
@@ -336,6 +359,10 @@ impl App {
             encoder_rx: Some(encoder_rx),
             mouse_fx: Arc::new(RwLock::new(settings.mouse_fx)),
             fx_demo_clicks: Vec::new(),
+            watermark: Arc::new(RwLock::new(settings.watermark)),
+            watermark_renderer: None,
+            watermark_unavailable: false,
+            watermark_tex: None,
             system_audio: settings.system_audio,
             mic_enabled: settings.mic_enabled,
             mic_idx,
@@ -406,6 +433,7 @@ impl App {
             mic_enabled: self.mic_enabled,
             mic_name: self.mics.get(self.mic_idx).cloned(),
             mouse_fx: self.mouse_fx.read().unwrap().clone(),
+            watermark: *self.watermark.read().unwrap(),
             countdown_enabled: self.countdown_enabled,
             countdown_secs: self.countdown_secs,
             language: self.language,
@@ -590,6 +618,7 @@ impl App {
             source,
             format,
             mouse_fx: self.mouse_fx.read().unwrap().clone(),
+            watermark: *self.watermark.read().unwrap(),
             system_audio: self.system_audio,
             microphone: self.mic_enabled.then(|| self.mics.get(self.mic_idx).cloned()),
             output,
@@ -630,12 +659,17 @@ impl App {
             return;
         };
         let path = self.timestamped("png");
-        let result = screenshot_source(&source).and_then(|frame| {
+        let wm = *self.watermark.read().unwrap();
+        let result = (|| {
+            let mut frame = screenshot_source(&source)?;
+            if let Some(r) = self.watermark_renderer() {
+                r.apply(&wm, &mut frame);
+            }
             std::fs::create_dir_all(&self.output_dir).ok();
             let img = xcap::image::RgbaImage::from_raw(frame.width, frame.height, frame.data)
                 .ok_or_else(|| anyhow::anyhow!("bad image buffer"))?;
             img.save(&path).map_err(|e| anyhow::anyhow!("{e}"))
-        });
+        })();
         match result {
             Ok(()) => self.saved(path, t!(WHAT_SNAPSHOT)),
             Err(e) => self.message = Some((t!(MSG_SNAPSHOT_FAILED, format!("{e:#}")), true)),
@@ -665,7 +699,7 @@ impl App {
                     // Restarting the backend on every mouse-move of a border
                     // drag would thrash WGC; pick the new rect up on release.
                     if self.frame_drag.is_none() {
-                        self.live.ensure(self.selected_source(), &self.mouse_fx, ctx);
+                        self.live.ensure(self.selected_source(), &self.mouse_fx, &self.watermark, ctx);
                     }
                     if let Some(img) = self.live.take() {
                         self.upload_preview(ctx, &img);
@@ -1250,12 +1284,22 @@ impl App {
 
     fn page_video(&mut self, ui: &mut egui::Ui) {
         let mut vt = self.video_tab;
-        segmented(ui, "video", &[(VideoTab::Record, None, t!(TAB_RECORD)), (VideoTab::Mouse, None, t!(TAB_MOUSE))], &mut vt);
+        segmented(
+            ui,
+            "video",
+            &[
+                (VideoTab::Record, None, t!(TAB_RECORD)),
+                (VideoTab::Mouse, None, t!(TAB_MOUSE)),
+                (VideoTab::Watermark, None, t!(TAB_WATERMARK)),
+            ],
+            &mut vt,
+        );
         self.video_tab = vt;
         ui.add_space(4.0);
         match self.video_tab {
             VideoTab::Record => self.video_record_tab(ui),
             VideoTab::Mouse => self.video_mouse_tab(ui),
+            VideoTab::Watermark => self.video_watermark_tab(ui),
         }
     }
 
@@ -1343,6 +1387,105 @@ impl App {
         }
     }
 
+    fn video_watermark_tab(&mut self, ui: &mut egui::Ui) {
+        let current = *self.watermark.read().unwrap();
+        let mut wm = current;
+        if ui.available_width() >= FX_SETTINGS_W + FX_GAP + FX_PREVIEW_W {
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(FX_SETTINGS_W);
+                    watermark_cards(ui, &mut wm);
+                });
+                ui.add_space(FX_GAP);
+                ui.vertical(|ui| {
+                    ui.set_width(FX_PREVIEW_W);
+                    self.watermark_preview_card(ui, &wm);
+                });
+            });
+        } else {
+            watermark_cards(ui, &mut wm);
+            self.watermark_preview_card(ui, &wm);
+        }
+        if wm != current {
+            *self.watermark.write().unwrap() = wm;
+            self.save_settings();
+        }
+    }
+
+    fn watermark_preview_card(&mut self, ui: &mut egui::Ui, wm: &Watermark) {
+        section_header(ui, t!(TAB_PREVIEW));
+        Card::show(ui, |card| {
+            card.custom(|ui| {
+                self.watermark_preview(ui, wm);
+                ui.label(secondary(t!(WATERMARK_PREVIEW_HINT)).small());
+            });
+        });
+    }
+
+    /// A 16:9 checkerboard with the real badge in the chosen corner. At this
+    /// scale a 1080p badge would be about five points tall, so it is drawn
+    /// `EXAGGERATION` times larger to stay readable; everything else (corner,
+    /// margin, proportions, opacity) matches what lands in the file.
+    fn watermark_preview(&mut self, ui: &mut egui::Ui, wm: &Watermark) {
+        const EXAGGERATION: f32 = 4.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(200.0, 112.0), Sense::hover());
+        let p = ui.painter_at(rect);
+        let cell = 10.0;
+        for cy in 0..(rect.height() / cell).ceil() as i32 {
+            for cx in 0..(rect.width() / cell).ceil() as i32 {
+                let c = if (cx + cy) % 2 == 0 { CHECKER_LIGHT } else { CHECKER_DARK };
+                let r = egui::Rect::from_min_size(
+                    rect.min + Vec2::new(cx as f32 * cell, cy as f32 * cell),
+                    Vec2::splat(cell),
+                )
+                .intersect(rect);
+                p.rect_filled(r, CornerRadius::ZERO, c);
+            }
+        }
+        if !wm.any_overlay() {
+            return;
+        }
+        // Badge height relative to a 1080p recording, applied to the preview.
+        let rel = wm.badge_height(1080) as f32 / 1080.0;
+        let h = (rect.height() * rel * EXAGGERATION).max(12.0);
+        let px = (h * ui.ctx().pixels_per_point()).round() as u32;
+        let Some(tex) = self.watermark_texture(ui.ctx(), px) else { return };
+        let size = tex.size_vec2();
+        let (w, m) = (h * size.x / size.y.max(1.0), h * 0.55);
+        let (left, top) = (rect.left() + m, rect.top() + m);
+        let (right, bottom) = (rect.right() - w - m, rect.bottom() - h - m);
+        let min = match wm.position {
+            Corner::TopLeft => egui::pos2(left, top),
+            Corner::TopRight => egui::pos2(right, top),
+            Corner::BottomLeft => egui::pos2(left, bottom),
+            Corner::BottomRight => egui::pos2(right, bottom),
+        };
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        let tint = Color32::from_white_alpha((wm.opacity.min(100) * 255 / 100) as u8);
+        p.image(tex.id(), egui::Rect::from_min_size(min, Vec2::new(w, h)), uv, tint);
+    }
+
+    /// The badge as a texture, recomposed only when its size changes.
+    fn watermark_texture(&mut self, ctx: &egui::Context, px: u32) -> Option<TextureHandle> {
+        if self.watermark_tex.as_ref().map(|(h, _)| *h) != Some(px) {
+            let sprite = self.watermark_renderer()?.sprite(px);
+            let image =
+                ColorImage::from_rgba_unmultiplied([sprite.width as usize, sprite.height as usize], &sprite.rgba);
+            self.watermark_tex = Some((px, ctx.load_texture("watermark", image, TextureOptions::LINEAR)));
+        }
+        self.watermark_tex.as_ref().map(|(_, tex)| tex.clone())
+    }
+
+    /// The badge renderer, built on first use. `None` means the bundled artwork
+    /// could not be loaded (already logged), so callers simply skip the badge.
+    fn watermark_renderer(&mut self) -> Option<&mut WatermarkRenderer> {
+        if self.watermark_renderer.is_none() && !self.watermark_unavailable {
+            self.watermark_renderer = WatermarkRenderer::new();
+            self.watermark_unavailable = self.watermark_renderer.is_none();
+        }
+        self.watermark_renderer.as_mut()
+    }
+
     fn mouse_fx_preview_card(&mut self, ui: &mut egui::Ui, fx: &MouseFx) {
         section_header(ui, t!(TAB_PREVIEW));
         Card::show(ui, |card| {
@@ -1425,6 +1568,11 @@ impl App {
                 }
             });
             card.text_row(t!(ROW_SOURCE), &self.source_label());
+            let on = self.watermark.read().unwrap().any_overlay();
+            if card.nav_row(t!(ROW_WATERMARK), if on { t!(ON) } else { t!(OFF) }).clicked() {
+                self.tab = Tab::Video;
+                self.video_tab = VideoTab::Watermark;
+            }
         });
     }
 
@@ -1691,6 +1839,48 @@ fn mouse_fx_cards(ui: &mut egui::Ui, fx: &mut MouseFx) {
             });
         });
     });
+}
+
+/// The watermark settings cards (everything but the live preview).
+fn watermark_cards(ui: &mut egui::Ui, wm: &mut Watermark) {
+    section_header(ui, t!(SECTION_WATERMARK));
+    Card::show(ui, |card| {
+        switch_row(card, t!(CHK_WATERMARK), &mut wm.enabled);
+        card.row(t!(ROW_POSITION_INDENT).trim(), |ui| {
+            ui.add_enabled_ui(wm.enabled, |ui| corner_combo(ui, &mut wm.position));
+        });
+        card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
+            ui.add_enabled_ui(wm.enabled, |ui| size_combo(ui, "watermark_size", &mut wm.size));
+        });
+        card.row(t!(ROW_OPACITY).trim(), |ui| {
+            ui.add_enabled_ui(wm.enabled, |ui| {
+                ui.add(egui::DragValue::new(&mut wm.opacity).range(0..=100).suffix(" %"));
+                ui.add(egui::Slider::new(&mut wm.opacity, 0..=100).show_value(false));
+            });
+        });
+    });
+    footnote(ui, t!(WATERMARK_FOOTNOTE));
+}
+
+fn corner_label(corner: Corner) -> &'static str {
+    match corner {
+        Corner::TopLeft => t!(POS_TOP_LEFT),
+        Corner::TopRight => t!(POS_TOP_RIGHT),
+        Corner::BottomLeft => t!(POS_BOTTOM_LEFT),
+        Corner::BottomRight => t!(POS_BOTTOM_RIGHT),
+    }
+}
+
+fn corner_combo(ui: &mut egui::Ui, value: &mut Corner) {
+    egui::ComboBox::from_id_salt("watermark_corner")
+        .width(combo_width(ui))
+        .truncate()
+        .selected_text(corner_label(*value))
+        .show_ui(ui, |ui| {
+            for corner in Corner::ALL {
+                ui.selectable_value(value, corner, corner_label(corner));
+            }
+        });
 }
 
 /// Width for a combo that has to stay inside its card row. `ComboBox::width`

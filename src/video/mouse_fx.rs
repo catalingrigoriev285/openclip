@@ -134,7 +134,7 @@ pub struct Patch {
 }
 
 /// Saves the frame pixels of the (clamped) rectangle into `patches`.
-fn save_patch(frame: &RawFrame, x0: f32, y0: f32, x1: f32, y1: f32, patches: &mut Vec<Patch>) {
+pub(crate) fn save_patch(frame: &RawFrame, x0: f32, y0: f32, x1: f32, y1: f32, patches: &mut Vec<Patch>) {
     let x0 = (x0.floor() as i64).clamp(0, frame.width as i64);
     let y0 = (y0.floor() as i64).clamp(0, frame.height as i64);
     let x1 = (x1.ceil() as i64 + 1).clamp(0, frame.width as i64);
@@ -264,7 +264,7 @@ impl MouseSampler {
 // ----- rasterisation ---------------------------------------------------------
 
 #[inline]
-fn blend(frame: &mut RawFrame, x: i32, y: i32, rgb: [u8; 3], alpha: f32) {
+pub(crate) fn blend(frame: &mut RawFrame, x: i32, y: i32, rgb: [u8; 3], alpha: f32) {
     if x < 0 || y < 0 || x >= frame.width as i32 || y >= frame.height as i32 || alpha <= 0.0 {
         return;
     }

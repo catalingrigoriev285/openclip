@@ -284,6 +284,7 @@ strings! {
     // ----- Video page ------------------------------------------------------
     TAB_RECORD => "Record", "Înregistrare", "Запись";
     TAB_MOUSE => "Mouse", "Mouse", "Мышь";
+    TAB_WATERMARK => "Watermark", "Filigran", "Водяной знак";
     CHK_SHOW_CURSOR => "Show mouse cursor", "Arată cursorul mouse-ului", "Показывать курсор мыши";
     CHK_CLICK_EFFECTS => "Add mouse click effects", "Adaugă efecte la clic", "Добавлять эффекты нажатий мыши";
     CHK_CLICK_EFFECT => "Add mouse click effect", "Adaugă efect la clic", "Добавлять эффект нажатия мыши";
@@ -315,6 +316,22 @@ strings! {
     APP_DRAWN => "(app-drawn)", "(desenat de aplicație)", "(рисует приложение)";
     FX_PREVIEW_HINT => "Click inside to test the click effect.", "Dă clic înăuntru pentru a testa efectul.",
         "Щёлкните внутри, чтобы проверить эффект нажатия.";
+
+    // ----- Watermark tab ---------------------------------------------------
+    SECTION_WATERMARK => "Watermark", "Filigran", "Водяной знак";
+    CHK_WATERMARK => "Show watermark", "Afișează filigranul", "Показывать водяной знак";
+    ROW_POSITION_INDENT => "      Position", "      Poziție", "      Положение";
+    POS_TOP_LEFT => "Top left", "Stânga sus", "Сверху слева";
+    POS_TOP_RIGHT => "Top right", "Dreapta sus", "Сверху справа";
+    POS_BOTTOM_LEFT => "Bottom left", "Stânga jos", "Снизу слева";
+    POS_BOTTOM_RIGHT => "Bottom right", "Dreapta jos", "Снизу справа";
+    ROW_WATERMARK => "Watermark", "Filigran", "Водяной знак";
+    WATERMARK_PREVIEW_HINT => "Shown larger than it will appear in the recording.",
+        "Afișat mai mare decât va apărea în înregistrare.",
+        "Показан крупнее, чем будет в записи.";
+    WATERMARK_FOOTNOTE => "Added to recordings and snapshots. openclip is free and open source — you can turn it off.",
+        "Adăugat la înregistrări și capturi. openclip este gratuit și open source — îl poți dezactiva.",
+        "Добавляется к записям и снимкам. openclip бесплатен и с открытым кодом — его можно отключить.";
 
     // ----- Image page ------------------------------------------------------
     SECTION_SNAPSHOT => "Snapshot", "Captură de ecran", "Снимок экрана";

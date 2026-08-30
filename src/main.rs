@@ -4,7 +4,7 @@ use eframe::egui;
 
 /// Application icon (same artwork as `assets/favicon.ico`), decoded at startup
 /// for the window title bar / taskbar / dock.
-const APP_ICON_PNG: &[u8] = include_bytes!("../assets/android-chrome-192x192.png");
+const APP_ICON_PNG: &[u8] = openclip::video::watermark::LOGO_PNG;
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();

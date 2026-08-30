@@ -2,7 +2,7 @@
 //! available) for a few seconds and writes an MP4 (or AVI).
 //!
 //! Usage: cargo run --release --example capture_to_mp4 [-- SECONDS OUT.mp4 [flags]]
-//! Flags: --half --mic --no-audio --fx --region X,Y,W,H --window TITLE --pause-at S --resume-at S
+//! Flags: --half --mic --no-audio --fx --no-watermark --region X,Y,W,H --window TITLE --pause-at S --resume-at S
 //!        --codec openh264|h264-hw|h264-sw|hevc|hevc-sw|<label substring>  --audio mp3|aac|pcm  --avi  --fps N  --quality Q
 
 use std::path::PathBuf;
@@ -15,6 +15,7 @@ use openclip::pipeline::{RecordConfig, Recorder};
 use openclip::settings::{pick_encoder, AudioCodec, Container, FormatSettings, RateControl, SizeMode, VideoCodec};
 use openclip::video::available_encoders;
 use openclip::video::mouse_fx::MouseFx;
+use openclip::video::watermark::Watermark;
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -23,6 +24,7 @@ fn main() -> anyhow::Result<()> {
     let audio = !args.iter().any(|a| a == "--no-audio");
     let half = args.iter().any(|a| a == "--half");
     let mic = args.iter().any(|a| a == "--mic");
+    let watermark = Watermark { enabled: !args.iter().any(|a| a == "--no-watermark"), ..Default::default() };
     let mut fx = MouseFx::default();
     if args.iter().any(|a| a == "--fx") {
         fx.cursor_size = 150;
@@ -93,6 +95,7 @@ fn main() -> anyhow::Result<()> {
         source,
         format,
         mouse_fx: fx,
+        watermark,
         system_audio: audio,
         microphone: mic.then_some(None),
         output: out.clone(),

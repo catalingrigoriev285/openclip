@@ -9,6 +9,7 @@ pub mod openh264;
 pub mod preview;
 pub mod scale;
 pub mod thumbnail;
+pub mod watermark;
 
 pub use convert::{Converter, PixelFormat, RawFrame};
 pub use encoder::{
@@ -18,3 +19,4 @@ pub use encoder::{
 pub use openh264::H264Encoder;
 pub use scale::Scaler;
 pub use thumbnail::MediaInfo;
+pub use watermark::{Watermark, WatermarkRenderer};

@@ -1,6 +1,6 @@
 [package]
 name = "openclip"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "Apache-2.0"
 description = "Cross-platform screen recorder with an egui GUI and no external runtime dependencies"
@@ -25,6 +25,10 @@ dirs = "6"
 fast_image_resize = "5"
 # Thumbnails for the library: decodes the picture formats the Images tab lists.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp"] }
+# Watermark badge: rasterises the bundled Inter SemiBold into a coverage mask.
+# Pure Rust, so the "no external runtime dependencies" promise is unaffected.
+ab_glyph = "0.2"
+
 # Update checker / self-updater (GitHub Releases). All statically linked.
 ureq = { version = "3", features = ["json", "platform-verifier"] }
 semver = "1"

@@ -49,7 +49,7 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 // ----- typography --------------------------------------------------------------
 
 const INTER_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Inter-Regular.ttf");
-const INTER_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
+const INTER_SEMIBOLD: &[u8] = crate::video::watermark::INTER_SEMIBOLD;
 
 /// Font family carrying Inter SemiBold (titles, selected segments, primary buttons).
 pub fn semibold_family() -> FontFamily {
