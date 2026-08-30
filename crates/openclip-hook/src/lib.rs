@@ -38,8 +38,10 @@ use windows::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DET
 use windows::Win32::System::Threading::CreateThread;
 use windows::Win32::UI::WindowsAndMessaging::CallNextHookEx;
 
+mod d3d11;
 mod ipc;
 mod logging;
+mod vtable;
 mod worker;
 
 /// This module's own `HINSTANCE`, needed to pin the DLL and to resolve resources.

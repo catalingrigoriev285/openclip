@@ -56,11 +56,42 @@ pub fn run() {
     control.heartbeat_qpc.store(ipc::qpc() as u64, Ordering::Relaxed);
     let _ = SHARED.set(shared);
 
-    hlog!("waiting for a graphics API to appear");
-    // TODO(phase 2): detect d3d11/d3d12/opengl32/vulkan-1 and install the
-    // present hooks. Until then the hook attaches, reports its version and
-    // heartbeat, and openclip can see it is alive.
+    install_backends();
     idle_until_stopped();
+}
+
+/// Waits for a graphics API to turn up and hooks it.
+///
+/// A game may not have created its device yet when we attach — launchers and
+/// splash screens routinely load D3D late — so this keeps looking rather than
+/// giving up on the first pass.
+fn install_backends() {
+    let Some(shared) = shared() else { return };
+    let mut waited = 0u32;
+    while !crate::shutting_down() && !shared.should_stop() {
+        // `GetModuleHandleW` never loads anything: it only reports what the game
+        // has already brought in itself.
+        if module_loaded("d3d11.dll") || module_loaded("dxgi.dll") {
+            if crate::d3d11::install() {
+                return;
+            }
+            // Installing failed for a reason that will not change by retrying
+            // (an unexpected vtable, a device we cannot use). The hook stays
+            // attached and inert so openclip can still see it and its error.
+            hlog!("no graphics backend could be hooked");
+            return;
+        }
+        if waited == 20 {
+            hlog!("still waiting for a graphics API after 5 s");
+        }
+        waited = waited.saturating_add(1);
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn module_loaded(name: &str) -> bool {
+    // SAFETY: `GetModuleHandleW` only queries; it never loads the module.
+    unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(&windows::core::HSTRING::from(name)) }.is_ok()
 }
 
 fn idle_until_stopped() {

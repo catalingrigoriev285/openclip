@@ -63,6 +63,17 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi_Common",
+    # Game capture. `Win32_Graphics_Dxgi` is NOT implied by `Dxgi_Common` and is
+    # not enabled by windows-capture either, so it has to be asked for by name;
+    # the rest were only ever reaching us through windows-capture's own feature
+    # list, which is not something to depend on across a `cargo update`.
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Direct3D",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Performance",
+    "Win32_System_ProcessStatus",
 ] }
 
 [target.'cfg(windows)'.build-dependencies]
