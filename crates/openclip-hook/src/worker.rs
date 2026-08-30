@@ -54,8 +54,13 @@ pub fn run() {
         *SHARED.write().expect("not poisoned") = Some(shared.clone());
         crate::clear_detached();
 
-        install_backends(&shared);
+        // The scan is the loop body, not a step before it: an OpenGL game loads
+        // the module that owns the `SwapBuffers` import seconds after it starts
+        // (for a Java game, long after the JVM is up), so a single pass at
+        // attach time would miss it. Installing is idempotent.
+        let mut backends = Backends::default();
         while !crate::shutting_down() && !shared.should_stop() {
+            backends.scan(control);
             std::thread::sleep(Duration::from_millis(250));
         }
 
@@ -85,31 +90,60 @@ fn wait_for_control_block() -> Option<Arc<Shared>> {
     }
 }
 
-/// Waits for a graphics API to turn up and hooks it.
+/// Which graphics APIs have been hooked, and how long we have been looking.
 ///
 /// A game may not have created its device yet — launchers and splash screens
-/// routinely load Direct3D late — so this keeps looking rather than giving up on
-/// the first pass. Installing is idempotent, so a second arming is a no-op.
-fn install_backends(shared: &Shared) {
-    let mut waited = 0u32;
-    while !crate::shutting_down() && !shared.should_stop() {
+/// routinely load Direct3D late, and an OpenGL game loads the module holding the
+/// `SwapBuffers` import later still — so this keeps looking rather than giving
+/// up on the first pass.
+#[derive(Default)]
+struct Backends {
+    dxgi: bool,
+    /// Never latched: unlike the single DXGI vtable, import slots live in every
+    /// module, so a module loaded later carries an unpatched one. Re-scanning is
+    /// cheap and [`crate::iat`] skips slots it has already done.
+    opengl: bool,
+    /// Set once DXGI has refused for a reason retrying cannot change, so the
+    /// failure is not re-reported four times a second.
+    dxgi_refused: bool,
+    passes: u32,
+}
+
+impl Backends {
+    fn scan(&mut self, control: &openclip_overlay::abi::Control) {
+        // Being here at all is proof the hook is alive, which matters when no
+        // backend has attached yet: without this the heartbeat only moves once
+        // a frame is presented, and openclip would give up on a game whose API
+        // it cannot hook rather than saying so.
+        control.heartbeat_qpc.store(ipc::qpc() as u64, Ordering::Relaxed);
+
         // `GetModuleHandleW` never loads anything: it only reports what the game
         // has already brought in itself.
-        if module_loaded("d3d11.dll") || module_loaded("dxgi.dll") {
-            if crate::d3d11::install() {
-                return;
+        if !self.dxgi && !self.dxgi_refused && (module_loaded("d3d11.dll") || module_loaded("dxgi.dll")) {
+            if crate::dxgi::install() {
+                self.dxgi = true;
+            } else {
+                // An unexpected vtable or a device we cannot use: retrying will
+                // not change either. The hook stays attached and inert so
+                // openclip can still see it and its error.
+                self.dxgi_refused = true;
+                hlog!("dxgi: not hooked");
             }
-            // Installing failed for a reason retrying will not change (an
-            // unexpected vtable, a device we cannot use). The hook stays
-            // attached and inert so openclip can still see it and its error.
-            hlog!("no graphics backend could be hooked");
-            return;
         }
-        if waited == 20 {
+        if module_loaded("opengl32.dll") && crate::opengl::install() && !self.opengl {
+            self.opengl = true;
+        }
+
+        self.passes = self.passes.saturating_add(1);
+        if self.passes == 20 && !self.dxgi && !self.opengl {
             hlog!("still waiting for a graphics API after 5 s");
+            if module_loaded("opengl32.dll") {
+                // The single most useful line in the log when an OpenGL game
+                // does not light up: it says whether any module imports the
+                // function at all, which is the whole premise of the IAT patch.
+                crate::iat::log_swapbuffers_importers();
+            }
         }
-        waited = waited.saturating_add(1);
-        std::thread::sleep(Duration::from_millis(250));
     }
 }
 

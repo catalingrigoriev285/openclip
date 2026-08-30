@@ -1,310 +1,81 @@
-//! Direct3D 11 / DXGI: the present hook, the frame-rate meter and the counter.
+//! Direct3D 11: the overlay renderer, and the surface that hands DXGI the
+//! game's own back buffer.
 //!
-//! The hook attaches by pointing three DXGI vtable slots at us (see
-//! [`crate::vtable`]). Every swapchain in the process shares that vtable, so one
-//! patch covers the game's real swapchain, any launcher window, and any
-//! swapchain created later — which is what makes alt-enter and fullscreen
-//! transitions a non-event here.
-//!
-//! Order inside `Present` matters and is deliberate: the counter is drawn
-//! *after* the frame has been published for recording, so the number a player
-//! sees on screen does not end up baked into the file. `burn_in` swaps the two.
+//! The renderer here is deliberately *not* tied to a swapchain. It draws onto
+//! and publishes from whatever [`crate::dxgi::Target`] it is given, which is
+//! what lets the D3D12 path reuse every line of it through a D3D11On12 wrapper
+//! rather than growing a second copy of the same shader pipeline.
 
-use std::ffi::c_void;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
-
-use openclip_overlay::abi::{GfxApi, HookError, OverlaySettings};
-use openclip_overlay::fps::{FpsBadge, HookState};
+use openclip_overlay::abi::{GfxApi, OverlaySettings};
+use openclip_overlay::fps::{self, FpsBadge, HookState};
 use openclip_overlay::layout::Corner;
-use openclip_overlay::fps;
-use windows::core::{Interface, HRESULT};
+use windows::core::HRESULT;
 use windows::Win32::Graphics::Direct3D::{D3D_PRIMITIVE_TOPOLOGY, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP};
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_UNORM};
-use windows::Win32::Graphics::Dxgi::{IDXGISwapChain, IDXGISwapChain1, DXGI_PRESENT_TEST, DXGI_SWAP_CHAIN_DESC};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 
+use crate::dxgi::{Surface, Target};
 use crate::logging::hlog;
 use crate::publish::{self, Publisher};
-use crate::vtable;
-use crate::worker;
 
-/// `IDXGISwapChain::Present` — `IUnknown`(3) + `IDXGIObject`(4) + `IDXGIDeviceSubObject`(1).
-const SLOT_PRESENT: usize = 8;
-/// `IDXGISwapChain::ResizeBuffers`, five methods after `Present`.
-const SLOT_RESIZE_BUFFERS: usize = 13;
-/// `IDXGISwapChain1::Present1` — `IDXGISwapChain1` starts at 18; this is its 5th.
-const SLOT_PRESENT1: usize = 22;
+// ----- the surface -----------------------------------------------------------
 
-type PresentFn = unsafe extern "system" fn(*mut c_void, u32, u32) -> HRESULT;
-type Present1Fn = unsafe extern "system" fn(*mut c_void, u32, u32, *const c_void) -> HRESULT;
-type ResizeBuffersFn = unsafe extern "system" fn(*mut c_void, u32, u32, u32, DXGI_FORMAT, u32) -> HRESULT;
-
-struct Originals {
-    present: PresentFn,
-    present1: Option<Present1Fn>,
-    resize_buffers: ResizeBuffersFn,
-}
-
-static ORIGINALS: OnceLock<Originals> = OnceLock::new();
-static RENDERER: Mutex<Option<Renderer>> = Mutex::new(None);
-static METER: Mutex<FpsMeter> = Mutex::new(FpsMeter::new());
-/// Panics caught inside the hooks. At [`MAX_FAULTS`] we stop drawing for good:
-/// a broken overlay is a nuisance, a game that crashes every frame is not.
-static FAULTS: AtomicU32 = AtomicU32::new(0);
-const MAX_FAULTS: u32 = 3;
-
-/// Points the DXGI vtable at us. Safe to call more than once; only the first
-/// call does anything.
-pub fn install() -> bool {
-    if ORIGINALS.get().is_some() {
-        return true;
-    }
-    let Some(swap) = probe::dummy_swapchain() else {
-        hlog!("d3d11: could not create a probe swapchain; not hooking");
-        return false;
-    };
-
-    // SAFETY: `swap` is a live COM object, and each slot is checked to point
-    // into dxgi.dll before it is replaced.
-    unsafe {
-        let vt = vtable::vtable_of(swap.as_raw());
-        let present = vtable::slot(vt, SLOT_PRESENT);
-        let resize = vtable::slot(vt, SLOT_RESIZE_BUFFERS);
-        // If these do not live in dxgi.dll the index is wrong for this Windows
-        // build, or something else got there first. Either way, patching blind
-        // would redirect an unknown function inside someone's game.
-        for (what, addr) in [("Present", present), ("ResizeBuffers", resize)] {
-            if !vtable::is_in_module(addr, "dxgi.dll") {
-                hlog!("d3d11: {what} points into {:?}, not dxgi.dll; refusing to patch", vtable::module_of(addr));
-                report_error(HookError::VtableUnexpected, "unexpected DXGI vtable layout");
-                return false;
-            }
-        }
-
-        let Ok(old_present) = vtable::swap(vt, SLOT_PRESENT, present_hook as *mut c_void) else {
-            hlog!("d3d11: could not make the Present slot writable");
-            return false;
-        };
-        let old_resize = vtable::swap(vt, SLOT_RESIZE_BUFFERS, resize_buffers_hook as *mut c_void).ok();
-
-        // Present1 only exists on IDXGISwapChain1. Games that use it would
-        // otherwise bypass the Present hook entirely.
-        let present1 = swap.cast::<IDXGISwapChain1>().ok().and_then(|s1| {
-            let vt1 = vtable::vtable_of(s1.as_raw());
-            let addr = vtable::slot(vt1, SLOT_PRESENT1);
-            vtable::is_in_module(addr, "dxgi.dll")
-                .then(|| vtable::swap(vt1, SLOT_PRESENT1, present1_hook as *mut c_void).ok())
-                .flatten()
-        });
-
-        let _ = ORIGINALS.set(Originals {
-            present: std::mem::transmute::<*mut c_void, PresentFn>(old_present),
-            present1: present1.map(|p| std::mem::transmute::<*mut c_void, Present1Fn>(p)),
-            resize_buffers: std::mem::transmute::<*mut c_void, ResizeBuffersFn>(
-                old_resize.unwrap_or(present /* never used; ResizeBuffers is optional */),
-            ),
-        });
-    }
-    hlog!("d3d11: hooked Present{}", if ORIGINALS.get().unwrap().present1.is_some() { " and Present1" } else { "" });
-    true
-}
-
-fn report_error(code: HookError, detail: &str) {
-    let Some(shared) = worker::shared() else { return };
-    let control = shared.control();
-    control.error_code.store(code as u32, Ordering::Relaxed);
-    // SAFETY: `error_text` is a plain byte array in the shared mapping and this
-    // is the only writer.
-    unsafe {
-        let text = &raw const control.error_text as *mut [u8; 160];
-        openclip_overlay::abi::write_cstr(&mut *text, detail);
-    }
-}
-
-// ----- the hooks -------------------------------------------------------------
-
-unsafe extern "system" fn present_hook(swap: *mut c_void, interval: u32, flags: u32) -> HRESULT {
-    let originals = ORIGINALS.get().expect("installed before the hook can run");
-    // A test present renders nothing; counting it would inflate the rate and
-    // publishing it would record a frame the player never saw.
-    if flags & DXGI_PRESENT_TEST.0 == 0 {
-        guard(|| on_present(swap));
-    }
-    unsafe { (originals.present)(swap, interval, flags) }
-}
-
-unsafe extern "system" fn present1_hook(
-    swap: *mut c_void,
-    interval: u32,
-    flags: u32,
-    params: *const c_void,
-) -> HRESULT {
-    let originals = ORIGINALS.get().expect("installed before the hook can run");
-    if flags & DXGI_PRESENT_TEST.0 == 0 {
-        guard(|| on_present(swap));
-    }
-    match originals.present1 {
-        Some(p) => unsafe { p(swap, interval, flags, params) },
-        // Present1 was not hooked, so this cannot be reached.
-        None => unsafe { (originals.present)(swap, interval, flags) },
-    }
-}
-
-unsafe extern "system" fn resize_buffers_hook(
-    swap: *mut c_void,
-    count: u32,
-    width: u32,
-    height: u32,
-    format: DXGI_FORMAT,
-    flags: u32,
-) -> HRESULT {
-    // Everything referencing the swapchain's buffers has to go *before* the
-    // original runs. An outstanding back-buffer reference makes ResizeBuffers
-    // fail with DXGI_ERROR_INVALID_CALL, which black-screens the game — the
-    // single most common way an overlay breaks one.
-    guard(|| {
-        if let Ok(mut guard) = RENDERER.lock() {
-            if let Some(r) = guard.as_mut() {
-                r.release_swapchain_resources();
-            }
-            *guard = None;
-        }
-    });
-    let originals = ORIGINALS.get().expect("installed before the hook can run");
-    unsafe { (originals.resize_buffers)(swap, count, width, height, format, flags) }
-}
-
-/// Runs overlay work, swallowing panics.
+/// The back buffer of a Direct3D 11 swapchain, handed over as it is.
 ///
-/// Rust has no stable SEH, so this cannot catch a hardware fault — but it does
-/// catch our own bugs, and killing someone's game over one would be far worse
-/// than losing the counter. After [`MAX_FAULTS`] the hook stops trying.
-fn guard(f: impl FnOnce()) {
-    if crate::shutting_down() || crate::detached() || FAULTS.load(Ordering::Relaxed) >= MAX_FAULTS {
-        return;
-    }
-    if catch_unwind(AssertUnwindSafe(f)).is_err() {
-        let n = FAULTS.fetch_add(1, Ordering::Relaxed) + 1;
-        hlog!("panic inside the present hook ({n}/{MAX_FAULTS})");
-        if n >= MAX_FAULTS {
-            hlog!("disarming: too many faults");
-            report_error(HookError::SelfDisarmed, "the overlay faulted repeatedly and stopped itself");
+/// The cheapest possible surface: the game's device *is* the device the overlay
+/// draws with, so there is nothing to wrap, acquire or release. The render
+/// target is cached because a D3D11 swapchain's buffer 0 is the same texture
+/// every frame until `ResizeBuffers`, which drops the whole surface anyway.
+pub struct Surface11 {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    back: ID3D11Texture2D,
+    rtv: ID3D11RenderTargetView,
+    size: (u32, u32),
+}
+
+impl Surface11 {
+    /// `None` when the swapchain is not a Direct3D 11 one.
+    pub fn for_swapchain(swap: &IDXGISwapChain) -> Option<Self> {
+        // SAFETY: `swap` is the live swapchain the game just presented on;
+        // `GetDevice` is a QueryInterface and fails cleanly for D3D12.
+        unsafe {
+            let device: ID3D11Device = swap.GetDevice().ok()?;
+            let context = device.GetImmediateContext().ok()?;
+            let back: ID3D11Texture2D = swap.GetBuffer(0).ok()?;
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            back.GetDesc(&mut desc);
+            let mut rtv = None;
+            device.CreateRenderTargetView(&back, None, Some(&mut rtv)).ok()?;
+            Some(Self { device, context, back, rtv: rtv?, size: (desc.Width, desc.Height) })
         }
     }
 }
 
-fn on_present(swap: *mut c_void) {
-    let Some(shared) = worker::shared() else { return };
-    let control = shared.control();
-
-    let now = crate::ipc::qpc();
-    let fps = METER.lock().map(|mut m| m.tick(now, control.qpc_freq)).unwrap_or(0.0);
-    control.present_count.fetch_add(1, Ordering::Relaxed);
-    control.present_fps_milli.store((fps * 1000.0) as u32, Ordering::Relaxed);
-    control.heartbeat_qpc.store(now as u64, Ordering::Relaxed);
-    control.api.store(GfxApi::D3D11 as u32, Ordering::Relaxed);
-
-    let armed = control.armed.load(Ordering::Relaxed) != 0;
-    let capturing = control.capturing.load(Ordering::Relaxed) != 0;
-    let settings = control.overlay_settings();
-    let wants_badge = armed && settings.enabled;
-    if !wants_badge && !capturing {
-        return;
-    }
-    let state = if capturing { HookState::Recording } else { HookState::Ready };
-
-    // SAFETY: `swap` is the live swapchain the game just called Present on; the
-    // borrow does not take a reference, so nothing is released underneath it.
-    let Some(swap) = (unsafe { IDXGISwapChain::from_raw_borrowed(&swap) }) else { return };
-    let Ok(mut guard) = RENDERER.lock() else { return };
-    if guard.is_none() {
-        match Renderer::new(swap) {
-            Ok(r) => *guard = Some(r),
-            Err(e) => {
-                hlog!("d3d11: cannot set up the overlay: {e}");
-                report_error(HookError::NoDevice, "the overlay could not be created on this device");
-                FAULTS.store(MAX_FAULTS, Ordering::Relaxed);
-                return;
-            }
-        }
-    }
-    let Some(r) = guard.as_mut() else { return };
-
-    // Publish before drawing, so the recorded frame is clean and the counter is
-    // only on screen. `burn_in` is the request to have it in the file too, and
-    // then it has to be painted first.
-    let mut failed = None;
-    let mut published = false;
-    if capturing && !settings.burn_in {
-        match r.publish(control, swap, now) {
-            Ok(sent) => published = sent,
-            Err(e) => failed = Some(e),
-        }
-    }
-    if wants_badge && failed.is_none() {
-        failed = r.draw(fps, state, settings).err();
-    }
-    if capturing && settings.burn_in && failed.is_none() {
-        match r.publish(control, swap, now) {
-            Ok(sent) => published = sent,
-            Err(e) => failed = Some(e),
-        }
-    }
-    if published {
-        shared.signal_ready();
+impl Surface for Surface11 {
+    fn api(&self) -> GfxApi {
+        GfxApi::D3D11
     }
 
-    if let Some(e) = failed {
-        hlog!("d3d11: {e}");
-        // The device may have been reset under us; rebuild on the next frame
-        // rather than carrying on with objects that belong to a dead device.
-        *guard = None;
-    }
-}
-
-// ----- the frame-rate meter --------------------------------------------------
-
-/// The game's present rate over a one-second window, lightly smoothed.
-///
-/// A window rather than a per-frame reciprocal: `1/frame_time` flickers far too
-/// hard to read, which is why every in-game counter averages. The EWMA on top
-/// stops the reading jumping when the window boundary lands badly.
-struct FpsMeter {
-    window_start: i64,
-    frames: u32,
-    smoothed: f32,
-}
-
-impl FpsMeter {
-    const fn new() -> Self {
-        Self { window_start: 0, frames: 0, smoothed: 0.0 }
+    fn acquire(&mut self, _swap: &IDXGISwapChain) -> windows::core::Result<Target> {
+        Ok(Target {
+            device: self.device.clone(),
+            context: self.context.clone(),
+            back: self.back.clone(),
+            rtv: self.rtv.clone(),
+            size: self.size,
+        })
     }
 
-    fn tick(&mut self, now: i64, freq: i64) -> f32 {
-        if freq <= 0 {
-            return self.smoothed;
-        }
-        if self.window_start == 0 {
-            self.window_start = now;
-        }
-        self.frames += 1;
-        let elapsed = now - self.window_start;
-        if elapsed >= freq {
-            let instant = self.frames as f64 * freq as f64 / elapsed as f64;
-            self.smoothed =
-                if self.smoothed <= 0.0 { instant as f32 } else { self.smoothed * 0.7 + instant as f32 * 0.3 };
-            self.window_start = now;
-            self.frames = 0;
-        }
-        self.smoothed
-    }
+    fn release(&mut self) {}
+
+    fn release_swapchain_resources(&mut self) {}
 }
 
 // ----- the overlay renderer --------------------------------------------------
 
-struct Renderer {
+pub(crate) struct Renderer {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     vs: ID3D11VertexShader,
@@ -312,9 +83,6 @@ struct Renderer {
     blend: ID3D11BlendState,
     sampler: ID3D11SamplerState,
     constants: ID3D11Buffer,
-    rtv: ID3D11RenderTargetView,
-    /// Back-buffer size, so the counter scales with the game's resolution.
-    size: (u32, u32),
     badge: FpsBadge,
     /// The uploaded sprite and the dimensions it was made for.
     texture: Option<(u32, u32, ID3D11Texture2D, ID3D11ShaderResourceView)>,
@@ -328,13 +96,14 @@ struct Renderer {
 }
 
 impl Renderer {
-    fn new(swap: &IDXGISwapChain) -> windows::core::Result<Self> {
+    /// Builds the shader pipeline on `device`.
+    ///
+    /// Nothing here is swapchain-specific — no render target, no size — because
+    /// the same renderer serves a D3D11 game directly and a D3D12 one through a
+    /// D3D11On12 wrapper, and those disagree about everything except the device.
+    pub(crate) fn new(device: &ID3D11Device, context: &ID3D11DeviceContext) -> windows::core::Result<Self> {
         // SAFETY: standard D3D11 resource creation on the game's own device.
         unsafe {
-            let device: ID3D11Device = swap.GetDevice()?;
-            let context = device.GetImmediateContext()?;
-            let desc: DXGI_SWAP_CHAIN_DESC = swap.GetDesc()?;
-
             let mut vs = None;
             device.CreateVertexShader(include_bytes!("../shaders/overlay_vs.dxbc"), None, Some(&mut vs))?;
             let mut ps = None;
@@ -376,20 +145,14 @@ impl Renderer {
             let mut constants = None;
             device.CreateBuffer(&cb_desc, None, Some(&mut constants))?;
 
-            let back: ID3D11Texture2D = swap.GetBuffer(0)?;
-            let mut rtv = None;
-            device.CreateRenderTargetView(&back, None, Some(&mut rtv))?;
-
             Ok(Self {
-                device,
-                context,
+                device: device.clone(),
+                context: context.clone(),
                 vs: vs.expect("created above"),
                 ps: ps.expect("created above"),
                 blend: blend.expect("created above"),
                 sampler: sampler.expect("created above"),
                 constants: constants.expect("created above"),
-                rtv: rtv.expect("created above"),
-                size: (desc.BufferDesc.Width, desc.BufferDesc.Height),
                 badge: FpsBadge::new().ok_or_else(|| windows::core::Error::from(HRESULT(-1)))?,
                 texture: None,
                 shown: None,
@@ -399,21 +162,27 @@ impl Renderer {
         }
     }
 
+    /// Whether this renderer belongs to `device`, so a device change rebuilds it
+    /// rather than issuing calls against objects from a dead one.
+    pub(crate) fn matches(&self, device: &ID3D11Device) -> bool {
+        use windows::core::Interface;
+        self.device.as_raw() == device.as_raw()
+    }
+
     /// Copies the back buffer into openclip's shared texture.
     ///
     /// `Ok(false)` means the frame was deliberately skipped — the rate limiter
     /// dropped it, openclip was still reading the slot, or the format is one the
     /// pipeline cannot take. None of those is an error worth tearing down for.
-    fn publish(
+    pub(crate) fn publish(
         &mut self,
         control: &openclip_overlay::abi::Control,
-        swap: &IDXGISwapChain,
+        target: &Target,
         now: i64,
     ) -> windows::core::Result<bool> {
-        // SAFETY: the swapchain's own back buffer; the reference is dropped
-        // before this returns, which `ResizeBuffers` depends on.
-        let back: ID3D11Texture2D = unsafe { swap.GetBuffer(0) }?;
+        let back = &target.back;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `back` is the surface's own back buffer.
         unsafe { back.GetDesc(&mut desc) };
 
         if !openclip_overlay::abi::format_supported(desc.Format.0 as u32) {
@@ -428,18 +197,24 @@ impl Renderer {
         let publisher = self
             .publisher
             .get_or_insert_with(|| Publisher::new(self.device.clone(), self.context.clone()));
-        publisher.publish(control, &back, now)
+        publisher.publish(control, back, now)
     }
 
     /// Releases everything that references the swapchain's buffers.
-    fn release_swapchain_resources(&mut self) {
+    pub(crate) fn release_swapchain_resources(&mut self) {
         if let Some(p) = &mut self.publisher {
             p.release();
         }
     }
 
-    fn draw(&mut self, fps: f32, state: HookState, settings: OverlaySettings) -> windows::core::Result<()> {
-        let (fw, fh) = self.size;
+    pub(crate) fn draw(
+        &mut self,
+        target: &Target,
+        fps: f32,
+        state: HookState,
+        settings: OverlaySettings,
+    ) -> windows::core::Result<()> {
+        let (fw, fh) = target.size;
         let overlay = fps::FpsOverlay {
             enabled: settings.enabled,
             position: Corner::ALL[(settings.corner as usize).min(3)],
@@ -492,7 +267,7 @@ impl Renderer {
             self.context.Unmap(&self.constants, 0);
 
             let saved = StateBlock::capture(&self.context);
-            self.set_state(&srv, fw, fh);
+            self.set_state(&target.rtv, &srv, fw, fh);
             self.context.Draw(4, 0);
             saved.restore(&self.context);
         }
@@ -503,7 +278,7 @@ impl Renderer {
     ///
     /// The quad comes from `SV_VertexID`, so there is no vertex buffer and no
     /// input layout to bind — one less piece of state to get wrong.
-    unsafe fn set_state(&self, srv: &ID3D11ShaderResourceView, fw: u32, fh: u32) {
+    unsafe fn set_state(&self, rtv: &ID3D11RenderTargetView, srv: &ID3D11ShaderResourceView, fw: u32, fh: u32) {
         let ctx = &self.context;
         unsafe {
             let viewport = D3D11_VIEWPORT {
@@ -516,7 +291,7 @@ impl Renderer {
             };
             ctx.RSSetViewports(Some(&[viewport]));
             ctx.RSSetState(None);
-            ctx.OMSetRenderTargets(Some(&[Some(self.rtv.clone())]), None);
+            ctx.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
             ctx.OMSetBlendState(&self.blend, Some(&[0.0; 4]), 0xffff_ffff);
             ctx.OMSetDepthStencilState(None, 0);
             ctx.IASetInputLayout(None);
@@ -688,94 +463,5 @@ impl StateBlock {
             ctx.PSSetShaderResources(0, Some(&self.ps_srv));
             ctx.PSSetSamplers(0, Some(&self.ps_sampler));
         }
-    }
-}
-
-// ----- probing ---------------------------------------------------------------
-
-mod probe {
-    use super::*;
-    use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
-    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_DESC, DXGI_SAMPLE_DESC};
-    use windows::Win32::Graphics::Dxgi::{DXGI_SWAP_CHAIN_DESC, DXGI_SWAP_EFFECT_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT};
-    use windows::Win32::Foundation::HMODULE;
-    use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
-
-    /// A throwaway 1×1 swapchain, purely to read the DXGI vtable off it.
-    ///
-    /// Every swapchain in the process shares that vtable, so this never has to
-    /// find the game's own — which matters, because the game may not have
-    /// created it yet when we attach.
-    pub fn dummy_swapchain() -> Option<IDXGISwapChain> {
-        let desc = DXGI_SWAP_CHAIN_DESC {
-            BufferDesc: DXGI_MODE_DESC { Width: 1, Height: 1, Format: DXGI_FORMAT_B8G8R8A8_UNORM, ..Default::default() },
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            BufferCount: 1,
-            // The desktop window is always valid and is never rendered to: the
-            // swapchain is released before this function returns.
-            OutputWindow: unsafe { GetDesktopWindow() },
-            Windowed: true.into(),
-            SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
-            ..Default::default()
-        };
-        let mut swap = None;
-        let mut device = None;
-        // SAFETY: standard device creation; everything is released on drop.
-        let created = unsafe {
-            D3D11CreateDeviceAndSwapChain(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                Default::default(),
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&desc),
-                Some(&mut swap),
-                Some(&mut device),
-                None,
-                None,
-            )
-        };
-        created.ok()?;
-        swap
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn meter_reports_the_rate_over_a_window() {
-        // 6 MHz divides evenly by 60, so the window closes exactly on the last
-        // present rather than a tick short of it.
-        const FREQ: i64 = 6_000_000;
-        let step = FREQ / 60;
-        let mut m = FpsMeter::new();
-        let mut now = FREQ; // a non-zero start, as QPC always is
-        for i in 0..=60 {
-            let fps = m.tick(now, FREQ);
-            // Nothing is reported until the first window closes.
-            if i < 60 {
-                assert_eq!(fps, 0.0, "reported a rate {i} presents in, before a full window");
-            }
-            now += step;
-        }
-        assert!((m.smoothed - 60.0).abs() < 2.0, "expected about 60, got {}", m.smoothed);
-
-        // A second identical window must not drift.
-        for _ in 0..60 {
-            m.tick(now, FREQ);
-            now += step;
-        }
-        assert!((m.smoothed - 60.0).abs() < 2.0, "drifted to {} over two windows", m.smoothed);
-    }
-
-    #[test]
-    fn meter_survives_a_broken_clock() {
-        let mut m = FpsMeter::new();
-        // A zero frequency would divide by zero; it must simply report nothing.
-        assert_eq!(m.tick(1_000, 0), 0.0);
     }
 }

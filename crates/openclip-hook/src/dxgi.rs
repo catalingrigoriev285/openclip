@@ -16,8 +16,7 @@
 //! sees on screen does not end up baked into the file. `burn_in` swaps the two.
 
 use std::ffi::c_void;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 
 use openclip_overlay::abi::{Control, GfxApi, HookError};
@@ -28,6 +27,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::Win32::Graphics::Dxgi::{IDXGISwapChain, IDXGISwapChain1, DXGI_PRESENT_TEST};
 
 use crate::d3d11::Renderer;
+use crate::fault;
 use crate::logging::hlog;
 use crate::vtable;
 use crate::worker;
@@ -53,10 +53,6 @@ static ORIGINALS: OnceLock<Originals> = OnceLock::new();
 static SURFACE: Mutex<Option<Box<dyn Surface>>> = Mutex::new(None);
 static RENDERER: Mutex<Option<Renderer>> = Mutex::new(None);
 static METER: Mutex<FpsMeter> = Mutex::new(FpsMeter::new());
-/// Panics caught inside the hooks. At [`MAX_FAULTS`] we stop drawing for good:
-/// a broken overlay is a nuisance, a game that crashes every frame is not.
-static FAULTS: AtomicU32 = AtomicU32::new(0);
-const MAX_FAULTS: u32 = 3;
 
 // ----- what a backend has to provide -----------------------------------------
 
@@ -121,7 +117,7 @@ pub fn install() -> bool {
         for (what, addr) in [("Present", present), ("ResizeBuffers", resize)] {
             if !vtable::is_in_module(addr, "dxgi.dll") {
                 hlog!("dxgi: {what} points into {:?}, not dxgi.dll; refusing to patch", vtable::module_of(addr));
-                report_error(HookError::VtableUnexpected, "unexpected DXGI vtable layout");
+                fault::report(HookError::VtableUnexpected, "unexpected DXGI vtable layout");
                 return false;
             }
         }
@@ -154,18 +150,6 @@ pub fn install() -> bool {
     true
 }
 
-pub(crate) fn report_error(code: HookError, detail: &str) {
-    let Some(shared) = worker::shared() else { return };
-    let control = shared.control();
-    control.error_code.store(code as u32, Ordering::Relaxed);
-    // SAFETY: `error_text` is a plain byte array in the shared mapping and this
-    // is the only writer.
-    unsafe {
-        let text = &raw const control.error_text as *mut [u8; 160];
-        openclip_overlay::abi::write_cstr(&mut *text, detail);
-    }
-}
-
 // ----- the hooks -------------------------------------------------------------
 
 unsafe extern "system" fn present_hook(swap: *mut c_void, interval: u32, flags: u32) -> HRESULT {
@@ -173,7 +157,7 @@ unsafe extern "system" fn present_hook(swap: *mut c_void, interval: u32, flags: 
     // A test present renders nothing; counting it would inflate the rate and
     // publishing it would record a frame the player never saw.
     if flags & DXGI_PRESENT_TEST.0 == 0 {
-        guard(|| on_present(swap));
+        fault::guard("present", || on_present(swap));
     }
     unsafe { (originals.present)(swap, interval, flags) }
 }
@@ -186,7 +170,7 @@ unsafe extern "system" fn present1_hook(
 ) -> HRESULT {
     let originals = ORIGINALS.get().expect("installed before the hook can run");
     if flags & DXGI_PRESENT_TEST.0 == 0 {
-        guard(|| on_present(swap));
+        fault::guard("present", || on_present(swap));
     }
     match originals.present1 {
         Some(p) => unsafe { p(swap, interval, flags, params) },
@@ -207,7 +191,7 @@ unsafe extern "system" fn resize_buffers_hook(
     // original runs. An outstanding back-buffer reference makes ResizeBuffers
     // fail with DXGI_ERROR_INVALID_CALL, which black-screens the game — the
     // single most common way an overlay breaks one.
-    guard(|| {
+    fault::guard("resize", || {
         if let Ok(mut guard) = SURFACE.lock() {
             if let Some(s) = guard.as_mut() {
                 s.release_swapchain_resources();
@@ -215,33 +199,19 @@ unsafe extern "system" fn resize_buffers_hook(
             *guard = None;
         }
         // The renderer's own resources are device-scoped, not swapchain-scoped,
-        // but it caches nothing worth keeping across a resize and rebuilding it
-        // is a handful of small objects.
+        // but its publisher holds shared textures sized to the old back buffer.
+        // Releasing them explicitly (rather than leaving it to drop order) is
+        // what guarantees nothing still references a swapchain buffer when the
+        // original `ResizeBuffers` runs.
         if let Ok(mut guard) = RENDERER.lock() {
+            if let Some(r) = guard.as_mut() {
+                r.release_swapchain_resources();
+            }
             *guard = None;
         }
     });
     let originals = ORIGINALS.get().expect("installed before the hook can run");
     unsafe { (originals.resize_buffers)(swap, count, width, height, format, flags) }
-}
-
-/// Runs overlay work, swallowing panics.
-///
-/// Rust has no stable SEH, so this cannot catch a hardware fault — but it does
-/// catch our own bugs, and killing someone's game over one would be far worse
-/// than losing the counter. After [`MAX_FAULTS`] the hook stops trying.
-fn guard(f: impl FnOnce()) {
-    if crate::shutting_down() || crate::detached() || FAULTS.load(Ordering::Relaxed) >= MAX_FAULTS {
-        return;
-    }
-    if catch_unwind(AssertUnwindSafe(f)).is_err() {
-        let n = FAULTS.fetch_add(1, Ordering::Relaxed) + 1;
-        hlog!("panic inside the present hook ({n}/{MAX_FAULTS})");
-        if n >= MAX_FAULTS {
-            hlog!("disarming: too many faults");
-            report_error(HookError::SelfDisarmed, "the overlay faulted repeatedly and stopped itself");
-        }
-    }
 }
 
 fn on_present(swap: *mut c_void) {
@@ -277,8 +247,8 @@ fn on_present(swap: *mut c_void) {
             None => {
                 // Nothing retrying will fix: the device behind this swapchain is
                 // one we have no backend for. Report it and stop trying.
-                report_error(HookError::NoDevice, "this graphics device is not supported");
-                FAULTS.store(MAX_FAULTS, Ordering::Relaxed);
+                fault::report(HookError::NoDevice, "this graphics device is not supported");
+                fault::disarm();
                 return;
             }
         }
@@ -349,15 +319,18 @@ fn render(
 }
 
 /// Picks the backend for a swapchain from the type of device behind it.
-///
-/// D3D12 is tried first: a D3D12 swapchain has no `ID3D11Device` at all, so the
-/// order only matters for the (impossible) case of both succeeding.
 fn select_surface(swap: &IDXGISwapChain) -> Option<Box<dyn Surface>> {
-    #[cfg(target_pointer_width = "64")]
-    if let Some(s) = crate::d3d12::Surface12::for_swapchain(swap) {
+    if let Some(s) = crate::d3d11::Surface11::for_swapchain(swap) {
         return Some(Box::new(s));
     }
-    crate::d3d11::Surface11::for_swapchain(swap).map(|s| Box::new(s) as Box<dyn Surface>)
+    // A D3D12 swapchain has no `ID3D11Device` behind it at all, so it lands
+    // here. Saying so precisely beats a generic "no device": the counter is
+    // already being measured correctly, and only the frame path is missing.
+    if crate::d3d12::is_d3d12(swap) {
+        hlog!("dxgi: Direct3D 12 swapchain; frame capture for it is not built yet");
+        fault::report(HookError::NoDevice, "Direct3D 12 games are not supported yet");
+    }
+    None
 }
 
 // ----- the frame-rate meter --------------------------------------------------

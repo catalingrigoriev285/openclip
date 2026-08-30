@@ -88,14 +88,34 @@ impl Publisher {
     /// reporting: a game presenting at 300 fps into a 60 fps recording is
     /// *expected* to have most of its frames skipped.
     pub fn publish(&mut self, control: &Control, back: &ID3D11Texture2D, now_qpc: i64) -> windows::core::Result<bool> {
+        if !self.due(control, now_qpc) {
+            return Ok(false);
+        }
+        self.publish_due(control, back, now_qpc)
+    }
+
+    /// Whether this present is one the recording wants, per the rate limiter.
+    ///
+    /// Split out from [`publish`](Self::publish) for backends where getting the
+    /// pixels is the expensive part: the OpenGL path has to stall the pipeline
+    /// on `glReadPixels`, so it must know a frame is wanted *before* it pays
+    /// for it, not after. Calling this advances the limiter, so a caller that
+    /// asks must go on to publish (or lose the slot's turn, which is harmless).
+    pub fn due(&mut self, control: &Control, now_qpc: i64) -> bool {
+        let fps = control.capture_fps.load(Ordering::Relaxed).max(1);
+        self.limiter.accept(now_qpc, control.qpc_freq, fps)
+    }
+
+    /// The body of [`publish`](Self::publish), with the limiter already consulted.
+    pub fn publish_due(
+        &mut self,
+        control: &Control,
+        back: &ID3D11Texture2D,
+        now_qpc: i64,
+    ) -> windows::core::Result<bool> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: `back` is the swapchain's own buffer.
         unsafe { back.GetDesc(&mut desc) };
-
-        let fps = control.capture_fps.load(Ordering::Relaxed).max(1);
-        if !self.limiter.accept(now_qpc, control.qpc_freq, fps) {
-            return Ok(false);
-        }
 
         self.ensure(control, desc.Width, desc.Height, desc.Format, desc.SampleDesc.Count)?;
         if self.slots.is_empty() {

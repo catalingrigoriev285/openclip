@@ -39,8 +39,13 @@ use windows::Win32::System::Threading::CreateThread;
 use windows::Win32::UI::WindowsAndMessaging::CallNextHookEx;
 
 mod d3d11;
+mod d3d12;
+mod dxgi;
+mod fault;
+mod iat;
 mod ipc;
 mod logging;
+mod opengl;
 mod publish;
 mod vtable;
 mod worker;
@@ -56,7 +61,6 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 static DETACHED: AtomicBool = AtomicBool::new(false);
 
 /// Used by the graphics backends to resolve their own module.
-#[allow(dead_code)]
 pub(crate) fn self_module() -> HINSTANCE {
     HINSTANCE(SELF_MODULE.load(Ordering::Relaxed) as *mut c_void)
 }

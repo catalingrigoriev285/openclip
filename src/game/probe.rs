@@ -202,9 +202,7 @@ pub fn classify_modules(modules: &[String]) -> (GfxApi, Option<AntiCheat>) {
         GfxApi::D3D12
     } else if has("vulkan-1.dll") {
         GfxApi::Vulkan
-    } else if has("d3d11.dll") {
-        GfxApi::D3D11
-    } else if has("dxgi.dll") {
+    } else if has("d3d11.dll") || has("dxgi.dll") {
         GfxApi::D3D11
     } else {
         GfxApi::Unknown
