@@ -18,6 +18,8 @@ pub mod inject;
 pub mod probe;
 #[cfg(windows)]
 pub mod shared;
+#[cfg(windows)]
+pub mod watcher;
 
 #[cfg(windows)]
 pub use inject::{hook_dll_path, is_available, HOOK_DLL};
@@ -25,6 +27,8 @@ pub use inject::{hook_dll_path, is_available, HOOK_DLL};
 pub use probe::{AntiCheat, Candidate, Refusal};
 #[cfg(windows)]
 pub use shared::HookSession;
+#[cfg(windows)]
+pub use watcher::{GameWatcher, WatchState};
 
 /// Whether this build can record games at all.
 pub fn supported() -> bool {

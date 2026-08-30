@@ -2,7 +2,7 @@
 //!
 //! The number is the game's own present rate, measured inside the hook, and its
 //! colour says what openclip is doing with it: **green** while armed and ready
-//! to record, **red** while recording. That is the convention Bandicam, RTSS and
+//! to record, **red** while recording. That is the convention, RTSS and
 //! the other in-game recorders use, and it is the only feedback a player gets
 //! without alt-tabbing out of a fullscreen game.
 

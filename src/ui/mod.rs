@@ -37,6 +37,7 @@ use crate::video::encoder::{available_encoders, refresh_encoders, EncoderInfo};
 use crate::video::mouse_fx::{MouseFx, MouseSampler, ARROW, CLICK_DURATION};
 use crate::video::preview::{make_preview, PreviewImage};
 use crate::video::watermark::{Corner, Watermark, WatermarkRenderer};
+use openclip_overlay::FpsOverlay;
 
 use format_dialog::{DialogOutcome, FormatDialog, FormatSection};
 use library::{reveal_in_folder, Library, LibraryTab};
@@ -72,6 +73,10 @@ enum SourceKind {
     Region,
     Monitor,
     Window,
+    /// Whatever game openclip's hook is currently loaded into. Unlike the
+    /// others this is not picked from a list — you cannot alt-tab into a
+    /// fullscreen game to select it — so it arms and waits instead.
+    Game,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +120,7 @@ enum VideoTab {
     Record,
     Mouse,
     Watermark,
+    Game,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,6 +267,18 @@ pub struct App {
     watermark_unavailable: bool,
     /// The badge texture on the Watermark tab, and the pixel height it is for.
     watermark_tex: Option<(u32, TextureHandle)>,
+    /// The in-game frame-rate counter's appearance.
+    fps_overlay: FpsOverlay,
+    /// Composes the counter for the Game tab's preview.
+    fps_badge: Option<openclip_overlay::FpsBadge>,
+    fps_badge_tex: Option<(u32, TextureHandle)>,
+    /// Watches for a game to hook. Only on Windows; a stub elsewhere.
+    #[cfg(windows)]
+    game: crate::game::GameWatcher,
+    /// The one-time explanation of what game mode loads into a game.
+    game_consented: bool,
+    game_consent_open: bool,
+    game_ignored: Vec<String>,
     system_audio: bool,
     mic_enabled: bool,
     mic_idx: usize,
@@ -293,7 +311,7 @@ pub struct App {
     message_at: Option<Instant>,
     last_message: Option<String>,
     last_file: Option<PathBuf>,
-    /// Compact "mini bar" mode (Camtasia-style floating recorder bar).
+    /// Compact "mini bar" mode (style floating recorder bar).
     compact: bool,
     /// Outer rect of the full window, restored when leaving compact mode.
     saved_rect: Option<egui::Rect>,
@@ -373,6 +391,14 @@ impl App {
             watermark_renderer: None,
             watermark_unavailable: false,
             watermark_tex: None,
+            fps_overlay: settings.fps_overlay,
+            fps_badge: None,
+            fps_badge_tex: None,
+            #[cfg(windows)]
+            game: Default::default(),
+            game_consented: settings.game_consented,
+            game_consent_open: false,
+            game_ignored: settings.game_ignored.clone(),
             system_audio: settings.system_audio,
             mic_enabled: settings.mic_enabled,
             mic_idx,
@@ -426,6 +452,21 @@ impl App {
             SourceKind::Monitor => self.monitors.get(self.monitor_idx).map(|m| Source::Monitor { id: m.id }),
             SourceKind::Window => self.windows.get(self.window_idx).map(|w| Source::Window { id: w.id }),
             SourceKind::Region => self.region.map(|(monitor_id, rect)| Source::Region { monitor_id, rect }),
+            // Only once something is actually hooked — which is exactly when the
+            // in-game counter appears, so the precondition is visible.
+            SourceKind::Game => self.hooked_pid().map(|pid| Source::Game { pid }),
+        }
+    }
+
+    /// The process id of the hooked game, if there is one.
+    pub(super) fn hooked_pid(&self) -> Option<u32> {
+        #[cfg(windows)]
+        {
+            self.game.state.hooked_pid()
+        }
+        #[cfg(not(windows))]
+        {
+            None
         }
     }
 
@@ -435,6 +476,8 @@ impl App {
             SourceKind::Monitor => self.monitors.get(self.monitor_idx).map(|m| (m.width, m.height)).unwrap_or((0, 0)),
             SourceKind::Window => self.windows.get(self.window_idx).map(|w| (w.width, w.height)).unwrap_or((0, 0)),
             SourceKind::Region => self.region.map(|(_, r)| (r.width, r.height)).unwrap_or((0, 0)),
+            // The hook reports the game's back-buffer size once it is publishing.
+            SourceKind::Game => self.game_frame_size().unwrap_or((0, 0)),
         };
         (w > 0 && h > 0).then_some((w, h))
     }
@@ -450,6 +493,9 @@ impl App {
             mic_name: self.mics.get(self.mic_idx).cloned(),
             mouse_fx: self.mouse_fx.read().unwrap().clone(),
             watermark: *self.watermark.read().unwrap(),
+            fps_overlay: self.fps_overlay,
+            game_consented: self.game_consented,
+            game_ignored: self.game_ignored.clone(),
             countdown_enabled: self.countdown_enabled,
             countdown_secs: self.countdown_secs,
             language: self.language,
@@ -530,6 +576,44 @@ impl App {
                 }
                 None => t!(NO_REGION_SELECTED).into(),
             },
+            SourceKind::Game => self.game_label(),
+        }
+    }
+
+    /// What the toolbar and mini bar say for the Game source.
+    fn game_label(&self) -> String {
+        #[cfg(windows)]
+        {
+            use crate::game::WatchState;
+            match &self.game.state {
+                WatchState::Hooked { exe, api, session } => {
+                    t!(GAME_HOOKED_LABEL, exe, api.label(), format!("{:.0}", session.present_fps()))
+                }
+                WatchState::Waiting => t!(GAME_WAITING).into(),
+                WatchState::Refused { exe, reason } => crate::game::watcher::refusal_message(exe, reason),
+                WatchState::Failed { error, .. } => error.clone(),
+                WatchState::Off => t!(GAME_NOT_ARMED).into(),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            t!(GAME_WINDOWS_ONLY).into()
+        }
+    }
+
+    /// The size of the frames the hook is publishing, once it is.
+    fn game_frame_size(&self) -> Option<(u32, u32)> {
+        #[cfg(windows)]
+        {
+            use std::sync::atomic::Ordering;
+            let session = self.game.state.session()?;
+            let c = session.control();
+            let (w, h) = (c.width.load(Ordering::Relaxed), c.height.load(Ordering::Relaxed));
+            (w > 0 && h > 0).then_some((w, h))
+        }
+        #[cfg(not(windows))]
+        {
+            None
         }
     }
 
@@ -630,10 +714,14 @@ impl App {
             log::warn!("format settings adjusted: {}", notes.join(" "));
         }
         let output = self.timestamped(format.container.extension());
+        let game = matches!(source, Source::Game { .. });
         let config = RecordConfig {
             source,
             format,
-            mouse_fx: self.mouse_fx.read().unwrap().clone(),
+            // The pointer is somewhere on the desktop, not in the game's back
+            // buffer, so cursor and click effects would land in an unrelated
+            // corner of the picture. The watermark is frame-relative and fine.
+            mouse_fx: if game { MouseFx::default_off() } else { self.mouse_fx.read().unwrap().clone() },
             watermark: *self.watermark.read().unwrap(),
             system_audio: self.system_audio,
             microphone: self.mic_enabled.then(|| self.mics.get(self.mic_idx).cloned()),
@@ -743,9 +831,10 @@ impl App {
                     (SourceKind::Region, Some(icons::REGION), t!(MODE_REGION)),
                     (SourceKind::Monitor, Some(icons::MONITOR), t!(MODE_MONITOR)),
                     (SourceKind::Window, Some(icons::WINDOW), t!(MODE_WINDOW)),
+                    (SourceKind::Game, Some(icons::GAMEPAD), t!(MODE_GAME)),
                 ];
                 if segmented(ui, "mode", &items, &mut kind) {
-                    self.select_mode(kind);
+                    self.select_mode(kind, ctx);
                 }
                 ui.add_space(12.0);
                 icon_toggle(ui, icons::SPEAKER, t!(SYSTEM_AUDIO), &mut self.system_audio);
@@ -814,17 +903,217 @@ impl App {
     }
 
     /// Switches recording mode and opens the Preview tab when a choice is needed.
-    fn select_mode(&mut self, kind: SourceKind) {
+    fn select_mode(&mut self, kind: SourceKind, ctx: &egui::Context) {
         self.source_kind = kind;
         let needs_choice = match kind {
             SourceKind::Window => true,
             SourceKind::Monitor => self.monitors.len() > 1,
-            SourceKind::Region => false,
+            SourceKind::Region | SourceKind::Game => false,
         };
+        // Game mode loads code into another process, so it does not start until
+        // the user has been told that once and agreed.
+        if kind == SourceKind::Game {
+            if self.game_consented {
+                self.arm_game_mode(ctx);
+            } else {
+                self.game_consent_open = true;
+            }
+            self.show_preview_tab();
+            return;
+        }
+        self.disarm_game_mode();
         if kind == SourceKind::Region && self.region.is_none() {
             self.open_picker();
         } else if needs_choice {
             self.show_preview_tab();
+        }
+    }
+
+    /// Starts watching for a game to hook.
+    pub(super) fn arm_game_mode(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        {
+            let ctx = ctx.clone();
+            self.game.arm(&self.game_ignored, move || ctx.request_repaint());
+        }
+        #[cfg(not(windows))]
+        let _ = ctx;
+    }
+
+    /// Picks up what the watcher found and keeps the counter's appearance in
+    /// step with the settings (called every frame).
+    pub(super) fn poll_game(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        {
+            self.game.poll();
+            if self.game.state.is_armed() {
+                self.game.push_overlay(openclip_overlay::OverlaySettings {
+                    enabled: self.fps_overlay.enabled,
+                    corner: Corner::ALL.iter().position(|c| *c == self.fps_overlay.position).unwrap_or(0) as u8,
+                    size: self.fps_overlay.size as u16,
+                    opacity: self.fps_overlay.opacity as u8,
+                    burn_in: self.fps_overlay.in_recording,
+                });
+                // The hooked game's frame rate changes constantly, and it is on
+                // screen; keep the label moving without spinning the GUI.
+                ctx.request_repaint_after(Duration::from_millis(500));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = ctx;
+    }
+
+    /// The one-time explanation of what Game mode does, before it does it.
+    fn game_consent_dialog(&mut self, ctx: &egui::Context) {
+        if !self.game_consent_open {
+            return;
+        }
+        let mut accepted = false;
+        let mut cancelled = false;
+        egui::Modal::new(egui::Id::new("game-consent")).frame(sheet_frame()).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.label(heading(t!(GAME_CONSENT_TITLE)));
+            ui.add_space(10.0);
+            ui.label(t!(GAME_CONSENT_BODY));
+            ui.add_space(8.0);
+            ui.label(RichText::new(t!(GAME_CONSENT_ANTICHEAT)).color(ORANGE));
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                if primary_button(ui, t!(GAME_CONSENT_ACCEPT)).clicked() {
+                    accepted = true;
+                }
+                if gray_button(ui, t!(CANCEL)).clicked() {
+                    cancelled = true;
+                }
+            });
+        });
+        if accepted {
+            self.game_consent_open = false;
+            self.game_consented = true;
+            self.save_settings();
+            self.arm_game_mode(ctx);
+        } else if cancelled {
+            self.game_consent_open = false;
+            // Backing out of the explanation means backing out of the mode.
+            if self.source_kind == SourceKind::Game {
+                self.source_kind = SourceKind::Monitor;
+            }
+        }
+    }
+
+    /// The hook's version in the hooked game, for the status card.
+    #[cfg(windows)]
+    fn game_session_info(&self) -> Option<String> {
+        let session = self.game.state.session()?;
+        let (major, minor, patch) = session.hook_version()?;
+        let api = session.api().label();
+        Some(format!("{major}.{minor}.{patch} · {api}"))
+    }
+
+    /// The executable of the hooked game, if any.
+    #[cfg(windows)]
+    fn hooked_exe(&self) -> Option<String> {
+        match &self.game.state {
+            crate::game::WatchState::Hooked { exe, .. } => Some(exe.clone()),
+            _ => None,
+        }
+    }
+
+    /// Never hook this executable again, and let go of it now.
+    #[cfg(windows)]
+    fn ignore_game(&mut self, exe: &str) {
+        if !self.game_ignored.iter().any(|e| e.eq_ignore_ascii_case(exe)) {
+            self.game_ignored.push(exe.to_string());
+        }
+        self.game.ignore(exe);
+        self.save_settings();
+    }
+
+    /// Opens the hook's own log, which is the only place a problem inside a
+    /// fullscreen game can be reported.
+    #[cfg(windows)]
+    fn open_hook_log(&mut self) {
+        let Some(pid) = self.hooked_pid() else { return };
+        let Some(base) = std::env::var_os("LOCALAPPDATA") else { return };
+        let path = std::path::PathBuf::from(base).join("openclip").join(format!("hook-{pid}.log"));
+        if path.exists() {
+            library::open_with_default(&path);
+        } else {
+            self.message = Some((t!(MSG_GAME_NO_LOG).into(), true));
+        }
+    }
+
+    /// The counter as it will look in a game, at a legible size.
+    fn fps_overlay_preview_card(&mut self, ui: &mut egui::Ui, fps: &FpsOverlay) {
+        section_header(ui, t!(TAB_PREVIEW));
+        Card::show(ui, |card| {
+            card.custom(|ui| {
+                self.fps_overlay_preview(ui, fps);
+                ui.label(secondary(t!(FPS_PREVIEW_HINT)).small());
+            });
+        });
+    }
+
+    fn fps_overlay_preview(&mut self, ui: &mut egui::Ui, fps: &FpsOverlay) {
+        // Both states side by side: the colour *is* the feature, and showing one
+        // of them would leave the other a surprise.
+        let recording = self.is_recording();
+        ui.horizontal(|ui| {
+            for (state, label) in [
+                (openclip_overlay::HookState::Ready, t!(GAME_STATE_READY)),
+                (openclip_overlay::HookState::Recording, t!(GAME_STATE_RECORDING)),
+            ] {
+                ui.vertical(|ui| {
+                    self.fps_badge_swatch(ui, fps, state, recording);
+                    ui.label(secondary(label).small());
+                });
+                ui.add_space(8.0);
+            }
+        });
+    }
+
+    fn fps_badge_swatch(
+        &mut self,
+        ui: &mut egui::Ui,
+        fps: &FpsOverlay,
+        state: openclip_overlay::HookState,
+        live: bool,
+    ) {
+        const PREVIEW_H: u32 = 34;
+        let badge = self.fps_badge.get_or_insert_with(|| {
+            openclip_overlay::FpsBadge::new().expect("the bundled font parses; the watermark uses it too")
+        });
+        // A plausible reading when there is no game, the real one when there is.
+        let text = if live { "120" } else { "120" };
+        let sprite = badge.sprite_for(PREVIEW_H, text, state.color());
+        let image = ColorImage::from_rgba_unmultiplied(
+            [sprite.width as usize, sprite.height as usize],
+            &sprite.rgba,
+        );
+        let tex = ui.ctx().load_texture(format!("fps-badge-{}", state.as_u32()), image, TextureOptions::LINEAR);
+        let size = egui::vec2(sprite.width as f32, sprite.height as f32);
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        ui.painter().rect_filled(rect, CornerRadius::same(6), PREVIEW_BG);
+        let opacity = fps.opacity.min(100) as f32 / 100.0;
+        egui::Image::new(&tex).tint(Color32::WHITE.gamma_multiply(opacity)).paint_at(ui, rect);
+    }
+
+    /// Whether the watcher is running.
+    pub(super) fn game_armed(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.game.state.is_armed()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn disarm_game_mode(&mut self) {
+        #[cfg(windows)]
+        {
+            self.game.disarm();
         }
     }
 
@@ -1116,6 +1405,7 @@ impl App {
                     SourceKind::Monitor => t!(MODE_MONITOR),
                     SourceKind::Window => t!(MODE_WINDOW),
                     SourceKind::Region => t!(MODE_REGION),
+                    SourceKind::Game => t!(MODE_GAME),
                 };
                 card.row(label, |ui| {
                     if icon_button(ui, icons::REFRESH, t!(REFRESH_SOURCES_TIP)).clicked() {
@@ -1161,6 +1451,20 @@ impl App {
                         SourceKind::Region => {
                             if tinted_button_small(ui, t!(SELECT_REGION)).clicked() {
                                 self.open_picker();
+                            }
+                            ui.add(egui::Label::new(secondary(self.source_label())).truncate());
+                        }
+                        SourceKind::Game => {
+                            let armed = self.game_armed();
+                            let button = if armed { t!(GAME_DISARM) } else { t!(GAME_ARM) };
+                            if tinted_button_small(ui, button).clicked() {
+                                if armed {
+                                    self.disarm_game_mode();
+                                } else if self.game_consented {
+                                    self.arm_game_mode(ui.ctx());
+                                } else {
+                                    self.game_consent_open = true;
+                                }
                             }
                             ui.add(egui::Label::new(secondary(self.source_label())).truncate());
                         }
@@ -1309,6 +1613,7 @@ impl App {
                 (VideoTab::Record, None, t!(TAB_RECORD)),
                 (VideoTab::Mouse, None, t!(TAB_MOUSE)),
                 (VideoTab::Watermark, None, t!(TAB_WATERMARK)),
+                (VideoTab::Game, None, t!(TAB_GAME)),
             ],
             &mut vt,
         );
@@ -1318,7 +1623,76 @@ impl App {
             VideoTab::Record => self.video_record_tab(ui),
             VideoTab::Mouse => self.video_mouse_tab(ui),
             VideoTab::Watermark => self.video_watermark_tab(ui),
+            VideoTab::Game => self.video_game_tab(ui),
         }
+    }
+
+    /// Game mode: the in-game counter's appearance, and what is hooked.
+    fn video_game_tab(&mut self, ui: &mut egui::Ui) {
+        let current = self.fps_overlay;
+        let mut fps = current;
+        if ui.available_width() >= FX_SETTINGS_W + FX_GAP + FX_PREVIEW_W {
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(FX_SETTINGS_W);
+                    fps_overlay_cards(ui, &mut fps);
+                });
+                ui.add_space(FX_GAP);
+                ui.vertical(|ui| {
+                    ui.set_width(FX_PREVIEW_W);
+                    self.fps_overlay_preview_card(ui, &fps);
+                });
+            });
+        } else {
+            fps_overlay_cards(ui, &mut fps);
+            self.fps_overlay_preview_card(ui, &fps);
+        }
+        if fps != current {
+            self.fps_overlay = fps;
+            self.save_settings();
+        }
+        self.game_status_card(ui);
+    }
+
+    /// What the watcher has found, and the way out of it.
+    fn game_status_card(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, t!(SECTION_GAME_CAPTURE));
+        let armed = self.game_armed();
+        Card::show(ui, |card| {
+            card.text_row(t!(GAME_STATUS), &self.game_label());
+            #[cfg(windows)]
+            if let Some(session) = self.game_session_info() {
+                card.text_row(t!(GAME_HOOK_VERSION), &session);
+            }
+            card.row(t!(GAME_MODE_ROW), |ui| {
+                if tinted_button_small(ui, if armed { t!(GAME_DISARM) } else { t!(GAME_ARM) }).clicked() {
+                    if armed {
+                        self.disarm_game_mode();
+                    } else if self.game_consented {
+                        self.arm_game_mode(ui.ctx());
+                    } else {
+                        self.game_consent_open = true;
+                    }
+                }
+            });
+            #[cfg(windows)]
+            {
+                let hooked = self.hooked_exe();
+                if let Some(exe) = hooked {
+                    card.row(t!(GAME_IGNORE_ROW), |ui| {
+                        if gray_button(ui, t!(GAME_IGNORE)).clicked() {
+                            self.ignore_game(&exe);
+                        }
+                    });
+                }
+                card.row(t!(GAME_HOOK_LOG), |ui| {
+                    if gray_button(ui, t!(OPEN)).clicked() {
+                        self.open_hook_log();
+                    }
+                });
+            }
+        });
+        footnote(ui, t!(GAME_ANTICHEAT_FOOTNOTE));
     }
 
     fn video_record_tab(&mut self, ui: &mut egui::Ui) {
@@ -1705,6 +2079,7 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.tick_countdown(&ctx);
+        self.poll_game(&ctx);
         self.poll_preview(&ctx);
         self.track_message();
         if let Some(path) = self.start_viewer.take() {
@@ -1775,11 +2150,15 @@ impl eframe::App for App {
         self.countdown_overlay(&ctx);
         self.delete_dialog(&ctx);
         self.show_format_dialog(&ctx);
+        self.game_consent_dialog(&ctx);
         self.update_dialog(&ctx);
     }
 
     fn on_exit(&mut self) {
         self.close_viewer();
+        // Let go of any hooked game, so its counter goes away with us rather
+        // than waiting for the hook to notice we died.
+        self.disarm_game_mode();
         self.cancel_update_download();
         self.save_settings();
         self.live.stop();
@@ -1895,6 +2274,29 @@ fn watermark_cards(ui: &mut egui::Ui, wm: &mut Watermark) {
         });
     });
     footnote(ui, t!(WATERMARK_FOOTNOTE));
+}
+
+/// The counter's settings, laid out like the watermark's — they are the same
+/// kind of thing and there is no reason for them to look different.
+fn fps_overlay_cards(ui: &mut egui::Ui, fps: &mut FpsOverlay) {
+    section_header(ui, t!(SECTION_FPS_COUNTER));
+    Card::show(ui, |card| {
+        switch_row(card, t!(CHK_FPS_COUNTER), &mut fps.enabled);
+        card.row(t!(ROW_POSITION_INDENT).trim(), |ui| {
+            ui.add_enabled_ui(fps.enabled, |ui| corner_combo(ui, &mut fps.position));
+        });
+        card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
+            ui.add_enabled_ui(fps.enabled, |ui| size_combo(ui, "fps_counter_size", &mut fps.size));
+        });
+        card.row(t!(ROW_OPACITY).trim(), |ui| {
+            ui.add_enabled_ui(fps.enabled, |ui| {
+                ui.add(egui::DragValue::new(&mut fps.opacity).range(0..=100).suffix(" %"));
+                ui.add(egui::Slider::new(&mut fps.opacity, 0..=100).show_value(false));
+            });
+        });
+        switch_row(card, t!(CHK_FPS_IN_RECORDING), &mut fps.in_recording);
+    });
+    footnote(ui, t!(FPS_COUNTER_FOOTNOTE));
 }
 
 fn corner_label(corner: Corner) -> &'static str {

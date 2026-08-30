@@ -544,6 +544,68 @@ strings! {
     NOTE_CAPTURE_CURSOR_UNSUPPORTED => "this Windows version cannot hide the cursor in the capture",
         "această versiune de Windows nu poate ascunde cursorul în captură",
         "эта версия Windows не может скрыть курсор в записи";
+    MODE_GAME => "Game", "Joc", "Игра";
+    GAME_WAITING => "Waiting for a game…", "Se așteaptă un joc…", "Ожидание игры…";
+    GAME_NOT_ARMED => "Game mode is off", "Modul joc este oprit", "Игровой режим выключен";
+    GAME_WINDOWS_ONLY => "Game recording is Windows-only",
+        "Înregistrarea jocurilor este doar pentru Windows",
+        "Запись игр доступна только в Windows";
+    GAME_HOOKED_LABEL => "{0} — {1}, {2} fps", "{0} — {1}, {2} fps", "{0} — {1}, {2} fps";
+    TAB_GAME => "Game", "Joc", "Игра";
+    SECTION_FPS_COUNTER => "In-game frame rate", "Cadre pe secundă în joc", "Частота кадров в игре";
+    CHK_FPS_COUNTER => "Show the counter in the game",
+        "Afișează contorul în joc",
+        "Показывать счётчик в игре";
+    CHK_FPS_IN_RECORDING => "      Also record it", "      Include-l și în înregistrare", "      Записывать его тоже";
+    FPS_COUNTER_FOOTNOTE => "Green while armed, red while recording — the only way to tell what openclip is doing without leaving a fullscreen game. Off by default in the recording itself.",
+        "Verde cât timp e pregătit, roșu în timpul înregistrării — singurul mod de a ști ce face openclip fără să ieși dintr-un joc pe tot ecranul. Implicit nu apare în înregistrare.",
+        "Зелёный — готов, красный — идёт запись: единственный способ понять, что делает openclip, не выходя из полноэкранной игры. В саму запись по умолчанию не попадает.";
+    SECTION_GAME_CAPTURE => "Game capture", "Captura jocurilor", "Захват игр";
+    GAME_STATUS => "Status", "Stare", "Состояние";
+    GAME_MODE_ROW => "Game mode", "Mod joc", "Игровой режим";
+    GAME_HOOK_VERSION => "Hook", "Componentă", "Компонент";
+    GAME_HOOK_LOG => "Hook log", "Jurnalul componentei", "Журнал компонента";
+    GAME_IGNORE_ROW => "This application", "Această aplicație", "Это приложение";
+    GAME_IGNORE => "Never hook", "Nu te atașa niciodată", "Никогда не подключаться";
+    GAME_ANTICHEAT_FOOTNOTE => "openclip loads a small component into the game to take frames from it. It refuses any game running an anti-cheat, and there is no way to override that — competitive online games should be recorded with Monitor mode instead.",
+        "openclip încarcă o componentă mică în joc pentru a prelua cadre. Refuză orice joc cu anti-cheat, fără excepții — jocurile online competitive ar trebui înregistrate cu modul Monitor.",
+        "openclip загружает в игру небольшой компонент, чтобы забирать кадры. Он отказывается работать с играми, где есть анти-чит, и обойти это нельзя — соревновательные онлайн-игры записывайте в режиме «Монитор».";
+    MSG_GAME_HOOKED_CANNOT_UPDATE => "stop Game mode before updating; the game-capture component is in use",
+        "oprește modul joc înainte de actualizare; componenta de captură este în uz",
+        "остановите игровой режим перед обновлением: компонент захвата используется";
+    GAME_CONSENT_TITLE => "About Game mode", "Despre modul joc", "О игровом режиме";
+    GAME_CONSENT_BODY => "To record a game at the source, openclip loads a small component (openclip_hook64.dll) into it. That component takes frames from the game's own picture and draws the frame-rate counter you see in the corner. It is loaded with a documented Windows API, is named plainly, and does nothing to hide itself.",
+        "Pentru a înregistra un joc de la sursă, openclip încarcă în el o componentă mică (openclip_hook64.dll). Aceasta preia cadre din imaginea jocului și desenează contorul de cadre din colț. Este încărcată printr-un API Windows documentat, are un nume clar și nu face nimic pentru a se ascunde.",
+        "Чтобы записывать игру из источника, openclip загружает в неё небольшой компонент (openclip_hook64.dll). Он забирает кадры из картинки самой игры и рисует счётчик кадров в углу. Компонент загружается документированным API Windows, назван прямо и никак себя не скрывает.";
+    GAME_CONSENT_ANTICHEAT => "Games running an anti-cheat are refused outright and cannot be overridden. Even so, loading anything into an online game carries a risk to your account — record those with Monitor mode.",
+        "Jocurile cu anti-cheat sunt refuzate complet, fără excepții. Chiar și așa, încărcarea a ceva într-un joc online implică un risc pentru contul tău — înregistrează-le cu modul Monitor.",
+        "Игры с анти-читом отклоняются полностью, без исключений. И всё же загрузка чего-либо в онлайн-игру создаёт риск для вашей учётной записи — записывайте их в режиме «Монитор».";
+    GAME_CONSENT_ACCEPT => "I understand", "Am înțeles", "Понятно";
+    GAME_STATE_READY => "Ready", "Pregătit", "Готов";
+    GAME_STATE_RECORDING => "Recording", "Se înregistrează", "Идёт запись";
+    FPS_PREVIEW_HINT => "Shown larger than it will appear in the game.",
+        "Afișat mai mare decât va apărea în joc.",
+        "Показан крупнее, чем будет в игре.";
+    MSG_GAME_NO_LOG => "the hook has not written a log yet",
+        "componenta nu a scris încă un jurnal",
+        "компонент ещё не записал журнал";
+    GAME_ARM => "Arm", "Activează", "Включить";
+    GAME_DISARM => "Stop", "Oprește", "Остановить";
+    MSG_GAME_DLL_MISSING => "the game-capture component is missing; reinstall openclip",
+        "componenta de captură a jocurilor lipsește; reinstalează openclip",
+        "компонент захвата игр отсутствует; переустановите openclip";
+    MSG_GAME_REFUSED_ANTICHEAT => "{0} is protected by {1}; openclip will not hook it",
+        "{0} este protejat de {1}; openclip nu se va atașa",
+        "{0} защищён системой {1}; openclip не будет подключаться";
+    MSG_GAME_REFUSED_X86 => "{0} is 32-bit; only 64-bit games can be recorded this way",
+        "{0} este pe 32 de biți; doar jocurile pe 64 de biți pot fi înregistrate astfel",
+        "{0} 32-битная; так можно записывать только 64-битные игры";
+    MSG_GAME_REFUSED_D3D9 => "{0} uses Direct3D 9, which is not supported",
+        "{0} folosește Direct3D 9, care nu este acceptat",
+        "{0} использует Direct3D 9, который не поддерживается";
+    MSG_GAME_REFUSED_PROTECTED => "{0} cannot be inspected; it may be running as administrator",
+        "{0} nu poate fi inspectat; poate rulează ca administrator",
+        "{0} нельзя проверить; возможно, запущен от имени администратора";
     NOTE_GAME_SLOW_TRANSPORT => "this game's frames go through system memory, which costs frame rate",
         "cadrele acestui joc trec prin memoria de sistem, ceea ce costă cadre pe secundă",
         "кадры этой игры идут через системную память, что снижает частоту кадров";

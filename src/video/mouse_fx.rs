@@ -63,6 +63,15 @@ impl MouseFx {
         self.show_cursor && self.cursor_size != 100
     }
 
+    /// Every effect off.
+    ///
+    /// Used for game capture: the sampler reads the *global* pointer and maps it
+    /// through the source's desktop origin, which a game's back buffer does not
+    /// have — the effects would land in an unrelated corner of the picture.
+    pub fn default_off() -> Self {
+        Self { show_cursor: false, click_effect: false, highlight: false, ..Default::default() }
+    }
+
     /// Whether any per-frame overlay work is needed.
     pub fn any_overlay(&self) -> bool {
         self.draws_cursor() || self.click_effect || self.highlight

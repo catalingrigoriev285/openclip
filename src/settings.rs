@@ -11,6 +11,7 @@ use crate::t;
 use crate::video::encoder::EncoderInfo;
 use crate::video::mouse_fx::MouseFx;
 use crate::video::watermark::Watermark;
+use openclip_overlay::FpsOverlay;
 
 /// Output container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -435,6 +436,13 @@ pub struct Settings {
     pub mouse_fx: MouseFx,
     /// The openclip badge burned into recordings and snapshots.
     pub watermark: Watermark,
+    /// The frame-rate counter openclip's hook draws inside a game.
+    pub fps_overlay: FpsOverlay,
+    /// Whether the one-time explanation of what game mode loads into a game has
+    /// been acknowledged. Game mode does nothing until it has.
+    pub game_consented: bool,
+    /// Executables the user chose never to hook, by file name.
+    pub game_ignored: Vec<String>,
     /// Count down before recording starts.
     pub countdown_enabled: bool,
     pub countdown_secs: u32,
@@ -455,6 +463,9 @@ impl Default for Settings {
             mic_name: None,
             mouse_fx: MouseFx::default(),
             watermark: Watermark::default(),
+            fps_overlay: FpsOverlay::default(),
+            game_consented: false,
+            game_ignored: Vec::new(),
             countdown_enabled: true,
             countdown_secs: 3,
             language: Lang::default(),

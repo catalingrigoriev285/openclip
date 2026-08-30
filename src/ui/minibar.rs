@@ -149,6 +149,7 @@ impl App {
                     SourceKind::Region => (icons::REGION, t!(MODE_REGION)),
                     SourceKind::Monitor => (icons::MONITOR, t!(MODE_MONITOR)),
                     SourceKind::Window => (icons::WINDOW, t!(MODE_WINDOW)),
+                    SourceKind::Game => (icons::GAMEPAD, t!(MODE_GAME)),
                 };
                 let mut picked: Option<SourceKind> = None;
                 ui.style_mut().spacing.button_padding = Vec2::new(12.0, 7.0);
@@ -158,6 +159,7 @@ impl App {
                         (SourceKind::Region, icons::REGION, t!(MODE_REGION)),
                         (SourceKind::Monitor, icons::MONITOR, t!(MODE_MONITOR)),
                         (SourceKind::Window, icons::WINDOW, t!(MODE_WINDOW)),
+                        (SourceKind::Game, icons::GAMEPAD, t!(MODE_GAME)),
                     ] {
                         if ui.button(format!("{icon}  {label}")).clicked() {
                             picked = Some(kind);

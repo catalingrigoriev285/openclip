@@ -176,6 +176,147 @@ pub fn is_d3d9_only(modules: &[String]) -> bool {
 /// The smallest window that could plausibly be a game.
 pub const MIN_GAME_SIZE: (i32, i32) = (640, 480);
 
+/// Decides whether `hwnd` belongs to a game openclip may hook.
+///
+/// Everything here is a *read* — no handle with more rights than
+/// `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ` is ever opened, and in
+/// particular never `PROCESS_DUP_HANDLE` or `PROCESS_ALL_ACCESS`.
+pub fn probe_window(hwnd: isize) -> Result<Candidate, Refusal> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, GWL_STYLE, GW_OWNER,
+        WS_CHILD,
+    };
+
+    let handle = HWND(hwnd as *mut std::ffi::c_void);
+    // SAFETY: window queries on a handle the caller just read from the OS; a
+    // window that has since closed reports zero and is rejected below.
+    unsafe {
+        if !IsWindowVisible(handle).as_bool() {
+            return Err(Refusal::NotAGame);
+        }
+        // Owned windows are dialogs and tool windows, never the game itself.
+        if GetWindow(handle, GW_OWNER).is_ok_and(|o| !o.is_invalid()) {
+            return Err(Refusal::NotAGame);
+        }
+        if GetWindowLongPtrW(handle, GWL_STYLE) & WS_CHILD.0 as isize != 0 {
+            return Err(Refusal::NotAGame);
+        }
+        let mut rect = Default::default();
+        if GetWindowRect(handle, &mut rect).is_err() {
+            return Err(Refusal::NotAGame);
+        }
+        if rect.right - rect.left < MIN_GAME_SIZE.0 || rect.bottom - rect.top < MIN_GAME_SIZE.1 {
+            return Err(Refusal::NotAGame);
+        }
+
+        let mut pid = 0;
+        GetWindowThreadProcessId(handle, Some(&mut pid));
+        if pid == 0 || pid == std::process::id() {
+            return Err(Refusal::OwnProcess);
+        }
+        probe_process(pid, hwnd)
+    }
+}
+
+/// The process half of [`probe_window`], split out so a pid can be probed
+/// directly (the headless harness does).
+pub fn probe_process(pid: u32, hwnd: isize) -> Result<Candidate, Refusal> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN;
+    use windows::Win32::System::Threading::{
+        IsWow64Process2, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+
+    // SAFETY: the handle is closed on every path out of this block.
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, false, pid) else {
+            // Protected or running elevated. Not something to work around.
+            return Err(Refusal::AccessDenied);
+        };
+        let finish = |result: Result<Candidate, Refusal>| {
+            let _ = CloseHandle(process);
+            result
+        };
+
+        // A 32-bit game reports a non-zero WOW64 machine. Only x64 is supported,
+        // and saying so plainly beats failing later for no visible reason.
+        let mut wow64 = IMAGE_FILE_MACHINE_UNKNOWN;
+        let mut native = IMAGE_FILE_MACHINE_UNKNOWN;
+        if IsWow64Process2(process, &mut wow64, Some(&mut native)).is_ok() && wow64 != IMAGE_FILE_MACHINE_UNKNOWN {
+            return finish(Err(Refusal::NotX64));
+        }
+
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let exe = match QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        ) {
+            Ok(()) => {
+                let path = String::from_utf16_lossy(&buf[..len as usize]);
+                path.rsplit('\\').next().unwrap_or(&path).to_string()
+            }
+            Err(_) => return finish(Err(Refusal::AccessDenied)),
+        };
+        if is_excluded(&exe) {
+            return finish(Err(Refusal::Excluded));
+        }
+
+        let modules = module_names(process);
+        let (api, anti_cheat) = classify_modules(&modules);
+        // The anti-cheat answer wins over everything else, including "we could
+        // not work out the renderer". There is no override for this.
+        if let Some(ac) = anti_cheat {
+            return finish(Err(Refusal::AntiCheat(ac)));
+        }
+        if api == GfxApi::Unknown {
+            return finish(Err(if is_d3d9_only(&modules) { Refusal::D3d9Only } else { Refusal::NotAGame }));
+        }
+        finish(Ok(Candidate { pid, hwnd, exe, api }))
+    }
+}
+
+/// The base names of every 64-bit module loaded in `process`.
+///
+/// # Safety
+/// `process` must be a live handle with `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`.
+unsafe fn module_names(process: windows::Win32::Foundation::HANDLE) -> Vec<String> {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::ProcessStatus::{EnumProcessModulesEx, GetModuleBaseNameW, LIST_MODULES_64BIT};
+
+    let mut modules = vec![HMODULE::default(); 1024];
+    let mut needed = 0u32;
+    // SAFETY: the buffer and its byte size agree; failure leaves `needed` unset
+    // and is treated as "no modules", which simply means "not a game".
+    let ok = unsafe {
+        EnumProcessModulesEx(
+            process,
+            modules.as_mut_ptr(),
+            (modules.len() * size_of::<HMODULE>()) as u32,
+            &mut needed,
+            LIST_MODULES_64BIT,
+        )
+    };
+    if ok.is_err() {
+        return Vec::new();
+    }
+    let count = (needed as usize / size_of::<HMODULE>()).min(modules.len());
+    let mut names = Vec::with_capacity(count);
+    for module in &modules[..count] {
+        let mut buf = [0u16; 260];
+        // SAFETY: a module handle from the enumeration above.
+        let len = unsafe { GetModuleBaseNameW(process, Some(*module), &mut buf) } as usize;
+        if len > 0 {
+            names.push(String::from_utf16_lossy(&buf[..len]));
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

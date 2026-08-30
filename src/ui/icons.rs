@@ -10,6 +10,7 @@ pub(super) const FA_SOLID: &[u8] = include_bytes!("../../assets/fonts/fa-solid-9
 pub const REGION: &str = "\u{f5cb}"; // vector-square
 pub const MONITOR: &str = "\u{f390}"; // desktop
 pub const WINDOW: &str = "\u{f2d0}"; // window-maximize
+pub const GAMEPAD: &str = "\u{f11b}"; // gamepad
 
 // Inputs
 pub const SPEAKER: &str = "\u{f028}"; // volume-high

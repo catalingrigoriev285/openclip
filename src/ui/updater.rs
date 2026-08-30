@@ -126,6 +126,13 @@ impl App {
         if !matches!(self.state, State::Idle) || rel.asset.is_none() || !update::install_dir_writable() {
             return;
         }
+        // The hook DLL is mapped into every game it was injected into and cannot
+        // be swapped underneath them. Refusing here removes the whole class of
+        // exe-and-hook-from-different-builds problem.
+        if self.game_armed() {
+            self.message = Some((crate::t!(MSG_GAME_HOOKED_CANNOT_UPDATE).into(), true));
+            return;
+        }
         let rel = rel.clone();
         let progress = Arc::new(Progress::default());
         let (tx, rx) = mpsc::channel();
@@ -239,7 +246,7 @@ impl App {
             _ => None,
         };
         let downloading = matches!(self.update, UpdateState::Downloading { .. });
-        let idle = matches!(self.state, State::Idle);
+        let idle = matches!(self.state, State::Idle) && !self.game_armed();
         let local = update::local_version();
         let mut close = false;
         let mut action = Action::None;
