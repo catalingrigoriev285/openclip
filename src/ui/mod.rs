@@ -589,6 +589,11 @@ impl App {
             use crate::game::WatchState;
             match &self.game.state {
                 WatchState::Hooked { exe, api, session } => {
+                    // The API the hook actually attached to, not the guess the
+                    // module scan made before injecting — a Java game with the
+                    // Vulkan loader pulled in by a driver is still OpenGL.
+                    let attached = session.api();
+                    let api = if attached == openclip_overlay::abi::GfxApi::Unknown { *api } else { attached };
                     t!(GAME_HOOKED_LABEL, exe, api.label(), format!("{:.0}", session.present_fps()))
                 }
                 WatchState::Waiting => t!(GAME_WAITING).into(),

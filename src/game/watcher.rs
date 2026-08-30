@@ -27,6 +27,10 @@ use super::{inject, HookSession};
 const POLL: Duration = Duration::from_millis(400);
 /// How long to give the hook to report itself after injection.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a hooked game may go without presenting before the watcher decides
+/// it has exited and starts looking again. Generous on purpose: a minimised or
+/// loading game presents nothing for a while and is still very much there.
+const GAME_GONE_AFTER: Duration = Duration::from_secs(10);
 
 /// What the watcher has to say. Consumed by the GUI exactly like
 /// [`crate::ui::updater::UpdateState`]'s channel.
@@ -157,7 +161,7 @@ impl GameWatcher {
         // A hooked game that stopped presenting has exited or hung; go back to
         // waiting so the next one is picked up.
         if let WatchState::Hooked { session, .. } = &self.state
-            && !session.is_alive(Duration::from_secs(5))
+            && !session.is_alive(GAME_GONE_AFTER)
         {
             self.state = WatchState::Waiting;
         }
@@ -190,10 +194,27 @@ fn watch(
     // Windows already looked at and decided about, so the same refusal is not
     // re-sent (and the same game not re-probed) four times a second.
     let mut seen: HashSet<isize> = HashSet::new();
-    let mut hooked: Option<u32> = None;
+    let mut hooked: Option<HookSession> = None;
 
     while !stop.load(Ordering::SeqCst) {
         std::thread::sleep(POLL);
+
+        // A game that is still presenting keeps the hook. Alt-tabbing out of a
+        // game to read a wiki, reply to a message or check a terminal must not
+        // hand the counter to whatever came forward instead — on Windows 11
+        // nearly every window is a Direct3D one, so without this the hook
+        // follows the user around the desktop and never stays on the game.
+        if let Some(session) = &hooked {
+            if session.is_alive(GAME_GONE_AFTER) {
+                continue;
+            }
+            log::info!("game: pid {} stopped presenting; watching again", session.pid());
+            hooked = None;
+            seen.clear();
+            let _ = tx.send(WatchEvent::Waiting);
+            repaint();
+        }
+
         // SAFETY: a plain query; a null result just means nothing is focused.
         let hwnd = unsafe { GetForegroundWindow() }.0 as isize;
         if hwnd == 0 || seen.contains(&hwnd) {
@@ -222,14 +243,13 @@ fn watch(
         if ignored.lock().unwrap().contains(&candidate.exe.to_ascii_lowercase()) {
             continue;
         }
-        if hooked == Some(candidate.pid) {
-            continue;
-        }
 
         match attach(&candidate) {
             Ok(session) => {
                 log::info!("game: hooked {} (pid {}, {})", candidate.exe, candidate.pid, candidate.api.label());
-                hooked = Some(candidate.pid);
+                // Kept non-owningly here purely so the loop can tell whether the
+                // game is still alive; the owning handle goes to the GUI.
+                hooked = HookSession::open(candidate.pid).ok();
                 let _ = tx.send(WatchEvent::Hooked {
                     exe: candidate.exe,
                     api: candidate.api,

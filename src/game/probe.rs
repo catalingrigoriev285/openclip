@@ -83,6 +83,18 @@ const EXCLUDED: &[&str] = &[
     "lockapp.exe",
     "taskmgr.exe",
     "systemsettings.exe",
+    "notepad.exe",
+    "mspaint.exe",
+    "snippingtool.exe",
+    "widgets.exe",
+    // Terminals and shells. Everything on Windows 11 renders through Direct3D
+    // now, so a terminal looks exactly like a game to the module check.
+    "windowsterminal.exe",
+    "openconsole.exe",
+    "conhost.exe",
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
     // Browsers
     "chrome.exe",
     "msedge.exe",
@@ -97,9 +109,24 @@ const EXCLUDED: &[&str] = &[
     "spotify.exe",
     "teams.exe",
     "obs64.exe",
+    "obs32.exe",
+    "cursor.exe",
+    "windsurf.exe",
+    "notion.exe",
+    "signal.exe",
+    "whatsapp.exe",
+    "telegram.exe",
+    "figma.exe",
     // Us
     "openclip.exe",
 ];
+
+/// Directories whose contents are never a game.
+///
+/// Windows' own shell, terminal and settings apps all render with Direct3D and
+/// all have big top-level windows, so a name list alone can never keep up with
+/// them. Anything shipped inside `%SystemRoot%` is system UI by definition.
+const EXCLUDED_DIRS: &[&str] = &["\\Windows\\System32\\", "\\Windows\\SysWOW64\\", "\\Windows\\SystemApps\\"];
 
 /// Substrings that identify an anti-cheat module, and what to call it.
 const ANTI_CHEAT: &[(&str, AntiCheat)] = &[
@@ -120,10 +147,20 @@ const ANTI_CHEAT: &[(&str, AntiCheat)] = &[
     ("treyarch_anticheat", AntiCheat::Other(String::new())),
 ];
 
-/// Whether `exe` is a known non-game. Case-insensitive.
+/// Whether `exe` is a known non-game. Case-insensitive; takes either a bare
+/// file name or a full path, and checks the directory too when given one.
+///
+/// The directory check is what keeps up with Windows itself: its shell,
+/// terminal and settings apps all render with Direct3D and all have big
+/// top-level windows, so a list of names alone would always be one release
+/// behind.
 pub fn is_excluded(exe: &str) -> bool {
-    let name = exe.rsplit(['\\', '/']).next().unwrap_or(exe).to_ascii_lowercase();
-    EXCLUDED.contains(&name.as_str())
+    let lower = exe.to_ascii_lowercase();
+    let name = lower.rsplit(['\\', '/']).next().unwrap_or(lower.as_str());
+    if EXCLUDED.contains(&name) {
+        return true;
+    }
+    EXCLUDED_DIRS.iter().any(|d| lower.contains(&d.to_ascii_lowercase()))
 }
 
 /// What a process's loaded modules say about it.
@@ -146,17 +183,29 @@ pub fn classify_modules(modules: &[String]) -> (GfxApi, Option<AntiCheat>) {
     });
 
     let has = |name: &str| lower.iter().any(|m| m == name);
-    // Vulkan first: a Vulkan game often also has dxgi loaded for presentation
-    // plumbing, and guessing D3D there would mislabel it. D3D12 before D3D11 for
-    // the same reason — a D3D12 game routinely loads d3d11 for video playback.
-    let api = if has("vulkan-1.dll") {
-        GfxApi::Vulkan
-    } else if has("d3d12.dll") {
+    // Ordered by how much each module actually proves. This is only a guess to
+    // label the target with — the hook overwrites it with the API it really
+    // attached to as soon as the game presents a frame.
+    //
+    // `d3d12core.dll` and `opengl32.dll` are the two strong signals: nothing
+    // loads either without meaning to use it. `vulkan-1.dll` is a weak one and
+    // deliberately ranks below OpenGL — the Vulkan *loader* is pulled into all
+    // sorts of processes by graphics drivers and by other capture tools'
+    // implicit layers, so a Minecraft that has it loaded is still an OpenGL
+    // game. `dxgi.dll` is weakest of all: on Windows 11 essentially every
+    // window is composited through it.
+    let api = if has("d3d12core.dll") {
         GfxApi::D3D12
-    } else if has("d3d11.dll") || has("dxgi.dll") {
-        GfxApi::D3D11
     } else if has("opengl32.dll") {
         GfxApi::OpenGl
+    } else if has("d3d12.dll") {
+        GfxApi::D3D12
+    } else if has("vulkan-1.dll") {
+        GfxApi::Vulkan
+    } else if has("d3d11.dll") {
+        GfxApi::D3D11
+    } else if has("dxgi.dll") {
+        GfxApi::D3D11
     } else {
         GfxApi::Unknown
     };
@@ -250,21 +299,21 @@ pub fn probe_process(pid: u32, hwnd: isize) -> Result<Candidate, Refusal> {
 
         let mut buf = [0u16; 260];
         let mut len = buf.len() as u32;
-        let exe = match QueryFullProcessImageNameW(
+        let path = match QueryFullProcessImageNameW(
             process,
             PROCESS_NAME_WIN32,
             windows::core::PWSTR(buf.as_mut_ptr()),
             &mut len,
         ) {
-            Ok(()) => {
-                let path = String::from_utf16_lossy(&buf[..len as usize]);
-                path.rsplit('\\').next().unwrap_or(&path).to_string()
-            }
+            Ok(()) => String::from_utf16_lossy(&buf[..len as usize]),
             Err(_) => return finish(Err(Refusal::AccessDenied)),
         };
-        if is_excluded(&exe) {
+        // The full path, not just the name: it is what lets the directory rules
+        // in `is_excluded` keep Windows' own D3D-rendered apps out.
+        if is_excluded(&path) {
             return finish(Err(Refusal::Excluded));
         }
+        let exe = path.rsplit('\\').next().unwrap_or(&path).to_string();
 
         let modules = module_names(process);
         let (api, anti_cheat) = classify_modules(&modules);
@@ -334,6 +383,29 @@ mod tests {
         assert_eq!(classify_modules(&mods(&["d3d11.dll", "d3d12.dll", "dxgi.dll"])).0, GfxApi::D3D12);
         // So does a Vulkan game, and there the D3D modules are not the renderer.
         assert_eq!(classify_modules(&mods(&["vulkan-1.dll", "dxgi.dll", "d3d11.dll"])).0, GfxApi::Vulkan);
+    }
+
+    #[test]
+    fn opengl_beats_a_merely_loaded_vulkan_loader() {
+        // Minecraft: LWJGL renders with OpenGL, but `vulkan-1.dll` is routinely
+        // pulled into the process by the graphics driver or by another capture
+        // tool's implicit layer. Ranking Vulkan first labelled it Vulkan and
+        // hooked nothing, because the loader is not the renderer.
+        let minecraft = mods(&["opengl32.dll", "nvoglv64.dll", "vulkan-1.dll", "dxgi.dll"]);
+        assert_eq!(classify_modules(&minecraft).0, GfxApi::OpenGl);
+    }
+
+    #[test]
+    fn windows_own_direct3d_apps_are_excluded_by_directory() {
+        // Windows Terminal, Notepad and the shell all render with Direct3D and
+        // all have large top-level windows: without the directory rule the
+        // watcher hooks whichever of them the user alt-tabs to.
+        assert!(is_excluded(r"C:\Windows\System32\WindowsTerminal.exe"));
+        assert!(is_excluded(r"C:\WINDOW\\\Y\TEM32\notepad.exe"));
+        assert!(is_excluded(r"C:\Windows\SystemApps\Microsoft.Windows.Search\SearchHost.exe"));
+        // A game that merely lives on the system drive is not.
+        assert!(!is_excluded(r"D:\Steam\steamapps\common\Game\game.exe"));
+        assert!(!is_excluded(r"C:\Program Files\Game\game.exe"));
     }
 
     #[test]
