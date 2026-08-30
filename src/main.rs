@@ -8,6 +8,14 @@ const APP_ICON_PNG: &[u8] = openclip::video::watermark::LOGO_PNG;
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // A previous self-update may have left the old game-capture DLL renamed
+    // aside, because a game still had it mapped and it could not be deleted
+    // then. It usually can be now.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        openclip::update::sweep_stale_sidecars(dir);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("openclip")

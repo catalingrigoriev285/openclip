@@ -33,6 +33,9 @@ jobs:
           - name: windows-x86_64
             os: windows-latest
             bin: openclip.exe
+            # The game-capture hook, loaded into games. It shares a compiled-in
+            # ABI version with the exe, so the two must ship together.
+            hook: openclip_hook64.dll
             archive: zip
           # - name: linux-x86_64
           #   os: ubuntu-latest
@@ -90,8 +93,11 @@ jobs:
       #   if: runner.os == 'macOS'
       #   run: brew install autoconf automake libtool
 
+      - name: Test
+        run: cargo test --workspace --locked
+
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --workspace
 
       - name: Package
         shell: bash
@@ -105,6 +111,16 @@ jobs:
           mkdir -p "dist/$name"
           cp "target/release/${{ matrix.bin }}" LICENSE README.md "dist/$name/"
           cp assets/fonts/FONT-AWESOME-LICENSE.txt "dist/$name/"
+          hook="${{ matrix.hook }}"
+          if [ -n "$hook" ]; then
+            # Fail loudly: a silently missing DLL would ship a Game mode that
+            # only fails at the moment someone tries to use it.
+            if [ ! -f "target/release/$hook" ]; then
+              echo "::error::$hook was not built"
+              exit 1
+            fi
+            cp "target/release/$hook" "dist/$name/"
+          fi
           cd dist
           if [ "${{ matrix.archive }}" = zip ]; then
             7z a -tzip "$name.zip" "$name" > /dev/null

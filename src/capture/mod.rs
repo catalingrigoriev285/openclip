@@ -11,6 +11,8 @@
 pub mod monitors;
 
 #[cfg(windows)]
+pub mod hook;
+#[cfg(windows)]
 pub mod windows;
 #[cfg(not(windows))]
 pub mod xcap_backend;
@@ -77,6 +79,12 @@ pub enum Source {
     Window { id: u32 },
     /// A sub-rectangle of a monitor.
     Region { monitor_id: u32, rect: Rect },
+    /// A game openclip's hook is already loaded into, identified by process id.
+    ///
+    /// Only ever produced once the hook has reported itself — the in-game
+    /// counter showing is the user-visible precondition — so the pid is always
+    /// one with a live control block behind it.
+    Game { pid: u32 },
 }
 
 /// Recycles frame buffers between the consumer and the capture backend so a

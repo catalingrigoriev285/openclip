@@ -7,7 +7,7 @@
 //! ```sh
 //! cargo run --example inject_test -- --pid 1234
 //! cargo run --example inject_test -- --exe gfx_sandbox     # match by window title
-//! cargo run --example inject_test -- --exe game --record   # also flip to "recording" (red)
+//! cargo run --example inject_test -- --pid 1234 --record out.mp4 --seconds 5
 //! ```
 
 #[cfg(not(windows))]
@@ -25,9 +25,16 @@ fn main() -> anyhow::Result<()> {
 mod win {
     use std::time::{Duration, Instant};
 
+    use std::path::PathBuf;
+
     use anyhow::{bail, Result};
+    use openclip::capture::Source;
     use openclip::game::probe::{classify_modules, is_excluded};
     use openclip::game::{inject, HookSession};
+    use openclip::pipeline::{RecordConfig, Recorder};
+    use openclip::settings::FormatSettings;
+    use openclip::video::mouse_fx::MouseFx;
+    use openclip::video::watermark::Watermark;
     use openclip_overlay::abi::OverlaySettings;
     use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -39,13 +46,15 @@ mod win {
 
         let mut pid = None;
         let mut needle = None;
-        let mut record = false;
+        let mut record: Option<PathBuf> = None;
+        let mut stop_after: Option<u64> = None;
         let mut it = std::env::args().skip(1);
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--pid" => pid = it.next().and_then(|v| v.parse::<u32>().ok()),
                 "--exe" => needle = it.next(),
-                "--record" => record = true,
+                "--record" => record = it.next().map(PathBuf::from),
+                "--seconds" => stop_after = it.next().and_then(|v| v.parse().ok()),
                 other => eprintln!("ignoring unknown flag {other}"),
             }
         }
@@ -84,15 +93,53 @@ mod win {
         let v = session.hook_version().expect("just reported");
         println!("hook {}.{}.{} attached", v.0, v.1, v.2);
 
-        if record {
-            println!("switching the counter to recording (red)");
-            session.set_capturing(true);
+        // `--record <file>` runs the whole pipeline over the hook's frames, so
+        // the game path can be exercised end to end without the GUI.
+        let mut recorder = None;
+        if let Some(out) = record.clone() {
+            let mut format = FormatSettings { fps: 60, ..Default::default() };
+            let notes = format.normalize(&[]);
+            if !notes.is_empty() {
+                println!("format adjusted: {}", notes.join(" "));
+            }
+            println!("recording to {}", out.display());
+            recorder = Some(Recorder::start(
+                RecordConfig {
+                    source: Source::Game { pid },
+                    format,
+                    // The cursor is somewhere on the desktop, not in the game's
+                    // back buffer, so mouse effects would land in a random spot.
+                    mouse_fx: MouseFx { cursor_size: 0, click_effect: false, highlight: false, ..Default::default() },
+                    watermark: Watermark { enabled: false, ..Default::default() },
+                    system_audio: false,
+                    microphone: None,
+                    output: out,
+                },
+                None,
+            )?);
         }
 
         // Ctrl-C is the way out; print a line a second until then.
         let start = Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(1));
+            if let Some(r) = &recorder {
+                let s = r.stats();
+                println!(
+                    "        recorded {}×{}  {} frames  {} dropped  {} bytes{}",
+                    s.width.load(std::sync::atomic::Ordering::Relaxed),
+                    s.height.load(std::sync::atomic::Ordering::Relaxed),
+                    s.frames_encoded.load(std::sync::atomic::Ordering::Relaxed),
+                    s.frames_dropped.load(std::sync::atomic::Ordering::Relaxed),
+                    s.bytes_written.load(std::sync::atomic::Ordering::Relaxed),
+                    s.error().map(|e| format!("  ERROR {e}")).unwrap_or_default(),
+                );
+                if let Some(secs) = stop_after
+                    && start.elapsed() >= Duration::from_secs(secs)
+                {
+                    break;
+                }
+            }
             let c = session.control();
             println!(
                 "{:5.1}s  api {:<12} present {:>7}  {:6.1} fps  alive {}  error {:?} {}",
@@ -108,6 +155,12 @@ mod win {
                 println!("the target stopped presenting; giving up");
                 break;
             }
+        }
+        if let Some(r) = recorder {
+            let out = r.output().to_path_buf();
+            r.stop()?;
+            let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+            println!("wrote {} ({size} bytes)", out.display());
         }
         Ok(())
     }

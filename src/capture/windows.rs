@@ -16,7 +16,10 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE,
     D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM,
+    DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL};
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
@@ -115,20 +118,44 @@ impl GraphicsCaptureApiHandler for Handler {
     }
 }
 
+/// The [`PixelFormat`] a DXGI surface maps to, or `None` for one the pipeline
+/// cannot take. HDR and 10-bit back buffers land here — a game using one is
+/// refused with a note rather than recorded with mangled colour.
+pub(crate) fn pixel_format(format: DXGI_FORMAT) -> Option<PixelFormat> {
+    match format {
+        DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB => Some(PixelFormat::Bgra),
+        DXGI_FORMAT_R8G8B8A8_UNORM | DXGI_FORMAT_R8G8B8A8_UNORM_SRGB => Some(PixelFormat::Rgba),
+        _ => None,
+    }
+}
+
 /// Double-buffered GPU → CPU readback.
-struct Readback {
+///
+/// Shared with the game-capture backend, which reads the hook's shared texture
+/// exactly the same way Windows.Graphics.Capture's surface is read here.
+pub(crate) struct Readback {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     staging: [Option<ID3D11Texture2D>; 2],
     size: (u32, u32),
     format: DXGI_FORMAT,
+    /// Byte order of `format`, resolved once when the staging textures are made.
+    pixels: PixelFormat,
     /// Staging slot holding a copy that has not been read yet, with its timestamp.
     pending: Option<(usize, Duration)>,
 }
 
 impl Readback {
-    fn new(device: ID3D11Device, context: ID3D11DeviceContext) -> Self {
-        Self { device, context, staging: [None, None], size: (0, 0), format: DXGI_FORMAT(0), pending: None }
+    pub(crate) fn new(device: ID3D11Device, context: ID3D11DeviceContext) -> Self {
+        Self {
+            device,
+            context,
+            staging: [None, None],
+            size: (0, 0),
+            format: DXGI_FORMAT(0),
+            pixels: PixelFormat::Bgra,
+            pending: None,
+        }
     }
 
     fn ensure(&mut self, w: u32, h: u32, format: DXGI_FORMAT) -> Result<()> {
@@ -154,6 +181,8 @@ impl Readback {
         }
         self.size = (w, h);
         self.format = format;
+        self.pixels = pixel_format(format)
+            .ok_or_else(|| anyhow!("unsupported surface format {:?}; 8-bit BGRA or RGBA only", format.0))?;
         self.pending = None;
         log::debug!("readback staging textures {w}×{h}");
         Ok(())
@@ -161,7 +190,7 @@ impl Readback {
 
     /// Queues the copy of `bx` from `src` and returns the frame queued by the
     /// previous call (if any), copied into a pooled buffer.
-    fn submit(
+    pub(crate) fn submit(
         &mut self,
         src: &ID3D11Texture2D,
         format: DXGI_FORMAT,
@@ -195,7 +224,7 @@ impl Readback {
             }
             self.context.Unmap(tex, 0);
         }
-        Ok(Some(RawFrame { data, width: w, height: h, stride: w * 4, format: PixelFormat::Bgra, pts: read_pts, mouse: None }))
+        Ok(Some(RawFrame { data, width: w, height: h, stride: w * 4, format: self.pixels, pts: read_pts, mouse: None }))
     }
 }
 
@@ -212,6 +241,8 @@ pub fn start(config: CaptureConfig, epoch: Instant, sink: FrameSink) -> Result<C
             }
             launch(w, None, &config, epoch, stop, sink)
         }
+        // Frames come from the hook inside the game, not from this backend.
+        Source::Game { .. } => super::hook::start(config, epoch, sink),
     }
 }
 

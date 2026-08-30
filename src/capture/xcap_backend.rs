@@ -31,6 +31,10 @@ pub fn start(config: CaptureConfig, epoch: Instant, sink: FrameSink) -> Result<C
             spawn_monitor(*monitor_id, crop, config.fps, epoch, stop.clone(), sink)?
         }
         Source::Window { id } => spawn_window(*id, config.fps, epoch, stop.clone(), sink)?,
+        // Game capture needs a hook loaded into the target process, which only
+        // exists on Windows. Failing here keeps `start` synchronous, like every
+        // other setup error on this backend.
+        Source::Game { .. } => return Err(anyhow!("game recording is only available on Windows")),
     };
     let thread = Arc::new(Mutex::new(Some(thread)));
     let stopper = {

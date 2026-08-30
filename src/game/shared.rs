@@ -13,11 +13,18 @@ use openclip_overlay::abi::{self, Control, GfxApi, HookError, OverlaySettings, H
 use windows::core::HSTRING;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::{
-    CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+    CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
+    MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::Foundation::WAIT_OBJECT_0;
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Threading::SYNCHRONIZATION_ACCESS_RIGHTS;
+
+/// `SYNCHRONIZE` — enough to wait on the hook's frame event, nothing more.
+const SYNCHRONIZATION_SYNCHRONIZE: SYNCHRONIZATION_ACCESS_RIGHTS = SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+};
 
 /// A control block openclip owns, for one target process.
 pub struct HookSession {
@@ -29,6 +36,12 @@ pub struct HookSession {
     ready: HANDLE,
     /// Signalled by us to ask the hook to detach.
     stop: HANDLE,
+    /// Whether this handle owns the hook's lifetime.
+    ///
+    /// The watcher creates the block and owns it; the capture backend opens the
+    /// *same* block to publish frames through and must not tell the hook to
+    /// detach when a recording ends — the counter is meant to stay on screen.
+    owns: bool,
 }
 
 // The mapping outlives every borrow, and all mutable fields are atomics.
@@ -74,7 +87,36 @@ impl HookSession {
             let stop = CreateEventW(None, true, false, &HSTRING::from(abi::stop_event_name(pid)))
                 .context("creating the hook stop event")?;
 
-            Ok(Self { pid, mapping, view, control, ready, stop })
+            Ok(Self { pid, mapping, view, control, ready, stop, owns: true })
+        }
+    }
+
+    /// Attaches to a control block someone else created, for the same game.
+    ///
+    /// Used by the capture backend: it needs to set `capturing` and read frames
+    /// through the block the watcher already owns, without taking over its
+    /// lifetime. Fails when the game is not hooked.
+    pub fn open(pid: u32) -> Result<Self> {
+        // SAFETY: opening existing named objects; every handle is closed on drop.
+        unsafe {
+            let mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS.0, false, &HSTRING::from(abi::control_name(pid)))
+                .context("this game is not hooked")?;
+            let view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size_of::<Control>());
+            if view.Value.is_null() {
+                let _ = CloseHandle(mapping);
+                return Err(anyhow!("mapping the hook control block failed"));
+            }
+            let control = view.Value as *mut Control;
+            if !(*control).is_compatible() {
+                let _ = UnmapViewOfFile(view);
+                let _ = CloseHandle(mapping);
+                return Err(anyhow!("the hook component is a different version"));
+            }
+            let ready = OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, false, &HSTRING::from(abi::ready_event_name(pid)))
+                .context("opening the hook frame event")?;
+            let stop = OpenEventW(EVENT_MODIFY_STATE, false, &HSTRING::from(abi::stop_event_name(pid)))
+                .unwrap_or_default();
+            Ok(Self { pid, mapping, view, control, ready, stop, owns: false })
         }
     }
 
@@ -171,7 +213,12 @@ impl HookSession {
 
 impl Drop for HookSession {
     fn drop(&mut self) {
-        self.request_stop();
+        if self.owns {
+            self.request_stop();
+        } else {
+            // A recording ended; the counter goes back to green rather than away.
+            self.set_capturing(false);
+        }
         // SAFETY: every handle was created here and is closed exactly once.
         unsafe {
             let _ = UnmapViewOfFile(self.view);

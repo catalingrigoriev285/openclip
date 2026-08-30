@@ -166,6 +166,9 @@ pub fn source_origin(source: &super::Source) -> Result<(i32, i32)> {
             let w = find_window(*id)?;
             Ok((w.x()?, w.y()?))
         }
+        // A game frame comes from its own back buffer, not from anywhere on the
+        // desktop, so there is no origin to map global mouse coordinates through.
+        super::Source::Game { .. } => Ok((0, 0)),
     }
 }
 
@@ -175,5 +178,8 @@ pub fn screenshot_source(source: &super::Source) -> Result<RawFrame> {
         super::Source::Monitor { id } => screenshot_monitor(*id),
         super::Source::Window { id } => screenshot_window(*id),
         super::Source::Region { monitor_id, rect } => screenshot_region(*monitor_id, *rect),
+        // There is no way to sample a game's back buffer from outside; a preview
+        // or snapshot has to come from the hook's own frames instead.
+        super::Source::Game { .. } => Err(anyhow!("a game cannot be captured as a still")),
     }
 }

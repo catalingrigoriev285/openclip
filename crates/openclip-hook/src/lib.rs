@@ -41,6 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::CallNextHookEx;
 mod d3d11;
 mod ipc;
 mod logging;
+mod publish;
 mod vtable;
 mod worker;
 

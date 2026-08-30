@@ -30,6 +30,15 @@ pub const RELEASES_URL: &str = "https://github.com/catalingrigoriev285/openclip/
 const API_URL: &str = "https://api.github.com/repos/catalingrigoriev285/openclip/releases/latest";
 /// File name of the binary inside the release archive.
 pub const BIN_NAME: &str = if cfg!(windows) { "openclip.exe" } else { "openclip" };
+/// The game-capture hook shipped beside the executable, when this platform has
+/// one. It must be replaced together with the exe: the two share a compiled-in
+/// ABI version, and a stale DLL refuses to hook rather than misbehaving.
+pub const HOOK_NAME: Option<&str> = if cfg!(all(windows, target_arch = "x86_64")) {
+    Some("openclip_hook64.dll")
+} else {
+    None
+};
+
 /// Environment variable that overrides the running version (manual testing of
 /// the update flow against a real release).
 pub const PRETEND_VERSION_ENV: &str = "OPENCLIP_UPDATE_PRETEND_VERSION";
@@ -255,13 +264,31 @@ pub fn download_and_install(release: &Release, progress: &Progress) -> anyhow::R
     // Same folder (and volume) as the executable so the final rename is atomic.
     let archive = dir.join(format!(".openclip-update-{}.{ext}", std::process::id()));
     let new_exe = dir.join(format!("{exe_name}.new"));
-    let _cleanup = Cleanup(vec![archive.clone(), new_exe.clone()]);
+    let new_hook = HOOK_NAME.map(|n| dir.join(format!("{n}.new")));
+    let mut temporary = vec![archive.clone(), new_exe.clone()];
+    temporary.extend(new_hook.clone());
+    let _cleanup = Cleanup(temporary);
 
     download_to(asset, &archive, progress)?;
     if progress.cancel.load(Ordering::Relaxed) {
         bail!("cancelled");
     }
-    extract_binary(&archive, &new_exe)?;
+
+    let mut wanted: Vec<(&str, &Path)> = vec![(BIN_NAME, new_exe.as_path())];
+    if let (Some(name), Some(path)) = (HOOK_NAME, new_hook.as_deref()) {
+        wanted.push((name, path));
+    }
+    let found = extract_files(&archive, &wanted)?;
+
+    // The sidecar goes first. If it cannot be replaced the whole update is
+    // abandoned, rather than leaving an executable and a hook from different
+    // builds — which the ABI check would then refuse to run together.
+    if let (Some(name), Some(new)) = (HOOK_NAME, new_hook.as_deref())
+        && found.iter().any(|f| f == name)
+    {
+        replace_sidecar(&dir.join(name), new).context("replacing the game-capture component")?;
+    }
+
     self_replace::self_replace(&new_exe).context("replacing the executable")?;
     log::info!("update: installed {} over {}", release.version, exe.display());
     Ok(exe)
@@ -306,51 +333,114 @@ fn download_to(asset: &Asset, dest: &Path, progress: &Progress) -> anyhow::Resul
     Ok(())
 }
 
-/// Pulls [`BIN_NAME`] out of the release archive into `dest` (Windows: zip).
+/// Pulls the named files out of the release archive (Windows: zip).
+///
+/// Returns the names it actually found. Only [`BIN_NAME`] is required — an
+/// archive built before the hook existed simply has no DLL in it, and that must
+/// not fail the update.
 #[cfg(windows)]
-fn extract_binary(archive: &Path, dest: &Path) -> anyhow::Result<()> {
+fn extract_files(archive: &Path, wanted: &[(&str, &Path)]) -> anyhow::Result<Vec<String>> {
     let file = File::open(archive)?;
     let mut zip = zip::ZipArchive::new(file).context("reading the zip archive")?;
+    let mut found = Vec::new();
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;
         if !entry.is_file() {
             continue;
         }
         let Some(path) = entry.enclosed_name() else { continue };
-        if path.file_name().and_then(|n| n.to_str()) != Some(BIN_NAME) {
-            continue;
-        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+        let Some((_, dest)) = wanted.iter().find(|(want, _)| *want == name) else { continue };
         let mut out = File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
-        io::copy(&mut entry, &mut out).context("extracting the binary")?;
+        io::copy(&mut entry, &mut out).with_context(|| format!("extracting {name}"))?;
         out.flush()?;
-        return Ok(());
+        found.push(name);
     }
-    bail!("{BIN_NAME} not found in {}", archive.display())
+    if !found.iter().any(|n| n == BIN_NAME) {
+        bail!("{BIN_NAME} not found in {}", archive.display());
+    }
+    Ok(found)
 }
 
-/// Pulls [`BIN_NAME`] out of the release archive into `dest` (Unix: tar.gz).
+/// Pulls the named files out of the release archive (Unix: tar.gz).
+///
+/// See the Windows twin for why only [`BIN_NAME`] is required.
 #[cfg(unix)]
-fn extract_binary(archive: &Path, dest: &Path) -> anyhow::Result<()> {
+fn extract_files(archive: &Path, wanted: &[(&str, &Path)]) -> anyhow::Result<Vec<String>> {
     use std::os::unix::fs::PermissionsExt;
     let file = File::open(archive)?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut found = Vec::new();
     for entry in tar.entries().context("reading the tar archive")? {
         let mut entry = entry?;
         if !entry.header().entry_type().is_file() {
             continue;
         }
-        let is_bin = entry.path()?.file_name().and_then(|n| n.to_str()) == Some(BIN_NAME);
-        if !is_bin {
-            continue;
-        }
+        let name = entry.path()?.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_owned();
+        let Some((_, dest)) = wanted.iter().find(|(want, _)| *want == name) else { continue };
         let mut out = File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
-        io::copy(&mut entry, &mut out).context("extracting the binary")?;
+        io::copy(&mut entry, &mut out).with_context(|| format!("extracting {name}"))?;
         out.flush()?;
         drop(out);
         fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
-        return Ok(());
+        found.push(name);
     }
-    bail!("{BIN_NAME} not found in {}", archive.display())
+    if !found.iter().any(|n| n == BIN_NAME) {
+        bail!("{BIN_NAME} not found in {}", archive.display());
+    }
+    Ok(found)
+}
+
+/// Replaces a file that may be mapped into this or another process.
+///
+/// The hook DLL is loaded into openclip itself (`SetWindowsHookEx` requires it)
+/// and stays permanently mapped into every game it was injected into, so it
+/// cannot be overwritten or deleted. Windows *does* allow renaming a mapped file
+/// within its own volume — that only rewrites the directory entry — so the live
+/// file is moved aside, the new one takes its place, and the old one is deleted
+/// when it eventually becomes deletable ([`sweep_stale_sidecars`]).
+pub fn replace_sidecar(live: &Path, new: &Path) -> anyhow::Result<()> {
+    if live.exists() {
+        let aside = live.with_extension(format!("old-{}", std::process::id()));
+        rename_aside(live, &aside).with_context(|| format!("moving {} aside", live.display()))?;
+        // Expected to fail while a game still has it mapped; the sweep gets it.
+        let _ = fs::remove_file(&aside);
+    }
+    fs::rename(new, live).with_context(|| format!("installing {}", live.display()))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn rename_aside(live: &Path, aside: &Path) -> anyhow::Result<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
+    // SAFETY: two paths from the same directory; failures are returned.
+    unsafe {
+        MoveFileExW(&HSTRING::from(live.as_os_str()), &HSTRING::from(aside.as_os_str()), MOVEFILE_REPLACE_EXISTING)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn rename_aside(live: &Path, aside: &Path) -> anyhow::Result<()> {
+    fs::rename(live, aside)?;
+    Ok(())
+}
+
+/// Deletes sidecars left behind by an earlier update, once nothing has them
+/// mapped any more. Called at start-up; failures are ignored by design.
+pub fn sweep_stale_sidecars(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_stale = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.starts_with("old-"));
+        if is_stale && fs::remove_file(&path).is_ok() {
+            log::debug!("update: removed leftover {}", path.display());
+        }
+    }
 }
 
 /// Starts the (freshly installed) executable detached; the caller then exits.
@@ -483,14 +573,73 @@ mod tests {
         w.finish().unwrap();
 
         let dest = dir.join("openclip.exe.new");
-        extract_binary(&archive, &dest).unwrap();
+        let found = extract_files(&archive, &[("openclip.exe", dest.as_path())]).unwrap();
+        assert_eq!(found, vec!["openclip.exe".to_string()]);
         assert_eq!(fs::read(&dest).unwrap(), b"MZ new binary");
 
         let mut w = zip::ZipWriter::new(File::create(&archive).unwrap());
         w.start_file("openclip-9.9.9-windows-x86_64/README.md", opts).unwrap();
         w.write_all(b"readme").unwrap();
         w.finish().unwrap();
-        assert!(extract_binary(&archive, &dest).is_err(), "archive without the binary is rejected");
+        assert!(extract_files(&archive, &[("openclip.exe", dest.as_path())]).is_err(), "an archive without the binary is rejected");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extracts_the_hook_alongside_the_binary_but_does_not_require_it() {
+        use zip::write::SimpleFileOptions;
+        let dir = scratch_dir("zip-hook");
+        let archive = dir.join("release.zip");
+        let opts = SimpleFileOptions::default();
+        let (exe, hook) = (dir.join("openclip.exe.new"), dir.join("hook.dll.new"));
+        let wanted: &[(&str, &Path)] = &[("openclip.exe", exe.as_path()), ("openclip_hook64.dll", hook.as_path())];
+
+        // Both present: both come out.
+        let mut w = zip::ZipWriter::new(File::create(&archive).unwrap());
+        w.start_file("openclip-9.9.9-windows-x86_64/openclip.exe", opts).unwrap();
+        w.write_all(b"MZ exe").unwrap();
+        w.start_file("openclip-9.9.9-windows-x86_64/openclip_hook64.dll", opts).unwrap();
+        w.write_all(b"MZ dll").unwrap();
+        w.finish().unwrap();
+        let found = extract_files(&archive, wanted).unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(fs::read(&hook).unwrap(), b"MZ dll");
+
+        // An older release has no hook in it; that must still update the exe.
+        let mut w = zip::ZipWriter::new(File::create(&archive).unwrap());
+        w.start_file("openclip-9.9.9-windows-x86_64/openclip.exe", opts).unwrap();
+        w.write_all(b"MZ exe").unwrap();
+        w.finish().unwrap();
+        let found = extract_files(&archive, wanted).unwrap();
+        assert_eq!(found, vec!["openclip.exe".to_string()]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn replaces_a_sidecar_and_sweeps_what_it_left_behind() {
+        let dir = scratch_dir("sidecar");
+        let live = dir.join("openclip_hook64.dll");
+        let new = dir.join("openclip_hook64.dll.new");
+        fs::write(&live, b"old").unwrap();
+        fs::write(&new, b"new").unwrap();
+
+        replace_sidecar(&live, &new).unwrap();
+        assert_eq!(fs::read(&live).unwrap(), b"new");
+        assert!(!new.exists(), "the staged file is consumed");
+
+        // Nothing was mapped here, so the old copy went straight away — but the
+        // sweep must be safe to run over a directory either way.
+        fs::write(dir.join("openclip_hook64.old-123"), b"stale").unwrap();
+        sweep_stale_sidecars(&dir);
+        assert!(!dir.join("openclip_hook64.old-123").exists(), "leftovers are swept");
+        assert!(live.exists(), "the live file is never swept");
+
+        // Installing where nothing exists yet is not an error.
+        let fresh = dir.join("brand_new.dll");
+        fs::write(dir.join("brand_new.dll.new"), b"fresh").unwrap();
+        replace_sidecar(&fresh, &dir.join("brand_new.dll.new")).unwrap();
+        assert_eq!(fs::read(&fresh).unwrap(), b"fresh");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -512,7 +661,7 @@ mod tests {
         tar.into_inner().unwrap().finish().unwrap();
 
         let dest = dir.join("openclip.new");
-        extract_binary(&archive, &dest).unwrap();
+        extract_files(&archive, &[("openclip", dest.as_path())]).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"\x7fELF new binary");
         assert_eq!(fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o755);
         fs::remove_dir_all(&dir).unwrap();

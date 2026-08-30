@@ -26,6 +26,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_U
 use windows::Win32::Graphics::Dxgi::{IDXGISwapChain, IDXGISwapChain1, DXGI_PRESENT_TEST, DXGI_SWAP_CHAIN_DESC};
 
 use crate::logging::hlog;
+use crate::publish::{self, Publisher};
 use crate::vtable;
 use crate::worker;
 
@@ -164,8 +165,11 @@ unsafe extern "system" fn resize_buffers_hook(
     // fail with DXGI_ERROR_INVALID_CALL, which black-screens the game — the
     // single most common way an overlay breaks one.
     guard(|| {
-        if let Ok(mut r) = RENDERER.lock() {
-            *r = None;
+        if let Ok(mut guard) = RENDERER.lock() {
+            if let Some(r) = guard.as_mut() {
+                r.release_swapchain_resources();
+            }
+            *guard = None;
         }
     });
     let originals = ORIGINALS.get().expect("installed before the hook can run");
@@ -202,14 +206,14 @@ fn on_present(swap: *mut c_void) {
     control.heartbeat_qpc.store(now as u64, Ordering::Relaxed);
     control.api.store(GfxApi::D3D11 as u32, Ordering::Relaxed);
 
-    if control.armed.load(Ordering::Relaxed) == 0 {
-        return;
-    }
+    let armed = control.armed.load(Ordering::Relaxed) != 0;
+    let capturing = control.capturing.load(Ordering::Relaxed) != 0;
     let settings = control.overlay_settings();
-    if !settings.enabled {
+    let wants_badge = armed && settings.enabled;
+    if !wants_badge && !capturing {
         return;
     }
-    let state = if control.capturing.load(Ordering::Relaxed) != 0 { HookState::Recording } else { HookState::Ready };
+    let state = if capturing { HookState::Recording } else { HookState::Ready };
 
     // SAFETY: `swap` is the live swapchain the game just called Present on; the
     // borrow does not take a reference, so nothing is released underneath it.
@@ -226,11 +230,37 @@ fn on_present(swap: *mut c_void) {
             }
         }
     }
-    if let Some(r) = guard.as_mut()
-        && let Err(e) = r.draw(swap, fps, state, settings)
-    {
-        hlog!("d3d11: overlay draw failed: {e}");
-        *guard = None; // rebuild next frame; the device may have been reset
+    let Some(r) = guard.as_mut() else { return };
+
+    // Publish before drawing, so the recorded frame is clean and the counter is
+    // only on screen. `burn_in` is the request to have it in the file too, and
+    // then it has to be painted first.
+    let mut failed = None;
+    let mut published = false;
+    if capturing && !settings.burn_in {
+        match r.publish(control, swap, now) {
+            Ok(sent) => published = sent,
+            Err(e) => failed = Some(e),
+        }
+    }
+    if wants_badge && failed.is_none() {
+        failed = r.draw(fps, state, settings).err();
+    }
+    if capturing && settings.burn_in && failed.is_none() {
+        match r.publish(control, swap, now) {
+            Ok(sent) => published = sent,
+            Err(e) => failed = Some(e),
+        }
+    }
+    if published {
+        shared.signal_ready();
+    }
+
+    if let Some(e) = failed {
+        hlog!("d3d11: {e}");
+        // The device may have been reset under us; rebuild on the next frame
+        // rather than carrying on with objects that belong to a dead device.
+        *guard = None;
     }
 }
 
@@ -290,6 +320,11 @@ struct Renderer {
     texture: Option<(u32, u32, ID3D11Texture2D, ID3D11ShaderResourceView)>,
     /// What the uploaded texture currently shows.
     shown: Option<(String, [u8; 3])>,
+    /// Hands the back buffer to openclip; `None` until it is first needed.
+    publisher: Option<Publisher>,
+    /// Set once a back-buffer format has been refused, so the note is not
+    /// rewritten on every present.
+    format_refused: bool,
 }
 
 impl Renderer {
@@ -358,17 +393,52 @@ impl Renderer {
                 badge: FpsBadge::new().ok_or_else(|| windows::core::Error::from(HRESULT(-1)))?,
                 texture: None,
                 shown: None,
+                publisher: None,
+                format_refused: false,
             })
         }
     }
 
-    fn draw(
+    /// Copies the back buffer into openclip's shared texture.
+    ///
+    /// `Ok(false)` means the frame was deliberately skipped — the rate limiter
+    /// dropped it, openclip was still reading the slot, or the format is one the
+    /// pipeline cannot take. None of those is an error worth tearing down for.
+    fn publish(
         &mut self,
-        _swap: &IDXGISwapChain,
-        fps: f32,
-        state: HookState,
-        settings: OverlaySettings,
-    ) -> windows::core::Result<()> {
+        control: &openclip_overlay::abi::Control,
+        swap: &IDXGISwapChain,
+        now: i64,
+    ) -> windows::core::Result<bool> {
+        // SAFETY: the swapchain's own back buffer; the reference is dropped
+        // before this returns, which `ResizeBuffers` depends on.
+        let back: ID3D11Texture2D = unsafe { swap.GetBuffer(0) }?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { back.GetDesc(&mut desc) };
+
+        if !openclip_overlay::abi::format_supported(desc.Format.0 as u32) {
+            if !self.format_refused {
+                self.format_refused = true;
+                publish::report_unsupported_format(control, desc.Format);
+                hlog!("d3d11: back buffer format {} cannot be recorded", desc.Format.0);
+            }
+            return Ok(false);
+        }
+
+        let publisher = self
+            .publisher
+            .get_or_insert_with(|| Publisher::new(self.device.clone(), self.context.clone()));
+        publisher.publish(control, &back, now)
+    }
+
+    /// Releases everything that references the swapchain's buffers.
+    fn release_swapchain_resources(&mut self) {
+        if let Some(p) = &mut self.publisher {
+            p.release();
+        }
+    }
+
+    fn draw(&mut self, fps: f32, state: HookState, settings: OverlaySettings) -> windows::core::Result<()> {
         let (fw, fh) = self.size;
         let overlay = fps::FpsOverlay {
             enabled: settings.enabled,

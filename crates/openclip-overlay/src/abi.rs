@@ -280,6 +280,32 @@ impl Control {
     }
 }
 
+// The four `DXGI_FORMAT` values the recording pipeline can take, as raw numbers
+// because this module deliberately does not depend on the `windows` crate — it
+// has to compile and be tested on every platform. openclip's own
+// `capture::windows::pixel_format` maps the same set through the typed
+// constants, and a test there asserts the two agree.
+const DXGI_FORMAT_R8G8B8A8_UNORM: u32 = 28;
+const DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: u32 = 29;
+const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
+const DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: u32 = 91;
+
+/// Whether a back buffer in this format can be recorded.
+///
+/// HDR and 10-bit surfaces (`R10G10B10A2_UNORM`, `R16G16B16A16_FLOAT`) are
+/// common in recent titles and are **not** in this set: `crate::video::PixelFormat`
+/// has no 16-bit variant, so recording one would mean silently mangling its
+/// colour. The hook refuses instead and says so.
+pub fn format_supported(dxgi_format: u32) -> bool {
+    matches!(
+        dxgi_format,
+        DXGI_FORMAT_R8G8B8A8_UNORM
+            | DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+            | DXGI_FORMAT_B8G8R8A8_UNORM
+            | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+    )
+}
+
 /// Writes `text` into a fixed NUL-terminated ASCII field, truncating to fit.
 pub fn write_cstr(dst: &mut [u8], text: &str) {
     dst.fill(0);
@@ -406,6 +432,17 @@ mod tests {
         assert_ne!(texture_name(20, 0, 7), texture_name(20, 1, 7));
         // A pid long enough to be implausible still fits the field.
         assert!(control_name(u32::MAX).len() < NAME_MAX);
+    }
+
+    #[test]
+    fn only_eight_bit_bgra_and_rgba_are_recordable() {
+        for f in [28, 29, 87, 91] {
+            assert!(format_supported(f), "format {f} should be recordable");
+        }
+        // R10G10B10A2_UNORM and R16G16B16A16_FLOAT — the common HDR back buffers.
+        for f in [24, 10, 0] {
+            assert!(!format_supported(f), "format {f} should be refused");
+        }
     }
 
     #[test]

@@ -544,6 +544,12 @@ strings! {
     NOTE_CAPTURE_CURSOR_UNSUPPORTED => "this Windows version cannot hide the cursor in the capture",
         "această versiune de Windows nu poate ascunde cursorul în captură",
         "эта версия Windows не может скрыть курсор в записи";
+    NOTE_GAME_SLOW_TRANSPORT => "this game's frames go through system memory, which costs frame rate",
+        "cadrele acestui joc trec prin memoria de sistem, ceea ce costă cadre pe secundă",
+        "кадры этой игры идут через системную память, что снижает частоту кадров";
+    NOTE_GAME_DIFFERENT_ADAPTER => "the game runs on another GPU; capture may be slower",
+        "jocul rulează pe alt GPU; captura poate fi mai lentă",
+        "игра работает на другом GPU; захват может быть медленнее";
     NOTE_SOURCE_RESIZED => "the source changed size; fitted into {0}×{1}",
         "sursa și-a schimbat dimensiunea; încadrată în {0}×{1}",
         "источник изменил размер; вписан в {0}×{1}";

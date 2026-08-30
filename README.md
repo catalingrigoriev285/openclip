@@ -19,6 +19,7 @@ Windows · Linux · macOS — no installer, no runtime dependencies
 A small, self-contained screen recorder written in Rust with an [egui](https://github.com/emilk/egui) GUI.
 
 - Records a **whole monitor**, a **single window**, or a **dragged region**
+- **Game recording** (Windows, 64-bit games): openclip's hook takes frames from the game's own back buffer — so it works in exclusive fullscreen and costs the game less than desktop capture — and draws a frame-rate counter into the game's picture, **green** when armed and **red** while recording
 - Captures **system audio** (what you hear) and/or a **microphone**
 - **Live preview** of what is being recorded
 - Writes standard **MP4** or **AVI** files that play in VLC, Windows Media Player / Movies & TV, Chrome/Edge and ffmpeg-based tools
@@ -55,7 +56,7 @@ git tag v0.2.0 && git push origin main v0.2.0
 
 Running the workflow manually (Actions → Release → Run workflow) only builds and uploads the archives as artifacts, which is handy for checking a build before tagging.
 
-The in-app updater relies on this layout: it looks for the asset named `openclip-<version>-<target>.<zip|tar.gz>` on the latest release and takes `openclip[.exe]` out of the folder inside. `cargo run --example check_update` prints what the updater sees; with `OPENCLIP_UPDATE_PRETEND_VERSION=0.1.0` and `-- --install` it runs the whole download → verify → replace path on the example's own executable.
+The in-app updater relies on this layout: it looks for the asset named `openclip-<version>-<target>.<zip|tar.gz>` on the latest release and takes `openclip[.exe]` — and, on Windows, `openclip_hook64.dll` — out of the folder inside. The DLL is replaced first and a failure there abandons the update, because the two share a compiled-in ABI version and must never end up from different builds. An archive from before the hook existed simply has no DLL and still updates cleanly. `cargo run --example check_update` prints what the updater sees; with `OPENCLIP_UPDATE_PRETEND_VERSION=0.1.0` and `-- --install` it runs the whole download → verify → replace path on the example's own executable.
 
 ## Usage
 
