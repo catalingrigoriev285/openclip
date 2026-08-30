@@ -57,6 +57,11 @@ const ROW_H: f32 = 70.0;
 /// Poster tile in a library row, 16:9 so landscape recordings fill it.
 const THUMB_W: f32 = 96.0;
 const THUMB_H: f32 = 54.0;
+/// Mouse tab: settings column, gap and preview column widths. Below their sum
+/// the two are stacked instead of placed side by side.
+const FX_SETTINGS_W: f32 = 400.0;
+const FX_GAP: f32 = 16.0;
+const FX_PREVIEW_W: f32 = 224.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
@@ -1062,7 +1067,7 @@ impl App {
                     if icon_button(ui, icons::REFRESH, t!(REFRESH_SOURCES_TIP)).clicked() {
                         self.refresh_sources();
                     }
-                    let combo_w = (ui.available_width() - 40.0).clamp(160.0, 360.0);
+                    let combo_w = combo_width(ui);
                     match self.source_kind {
                         SourceKind::Monitor => {
                             let label = self
@@ -1070,11 +1075,16 @@ impl App {
                                 .get(self.monitor_idx)
                                 .map(|m| m.label())
                                 .unwrap_or_else(|| t!(NO_MONITORS).into());
-                            egui::ComboBox::from_id_salt("monitor").width(combo_w).selected_text(label).show_ui(ui, |ui| {
-                                for (i, m) in self.monitors.iter().enumerate() {
-                                    ui.selectable_value(&mut self.monitor_idx, i, m.label());
-                                }
-                            });
+                            egui::ComboBox::from_id_salt("monitor")
+                                .width(combo_w)
+                                .truncate()
+                                .selected_text(label)
+                                .show_ui(ui, |ui| {
+                                    truncate_items(ui);
+                                    for (i, m) in self.monitors.iter().enumerate() {
+                                        ui.selectable_value(&mut self.monitor_idx, i, m.label());
+                                    }
+                                });
                         }
                         SourceKind::Window => {
                             let label = self
@@ -1082,11 +1092,17 @@ impl App {
                                 .get(self.window_idx)
                                 .map(|w| w.label())
                                 .unwrap_or_else(|| t!(NO_WINDOWS).into());
-                            egui::ComboBox::from_id_salt("window").width(combo_w).selected_text(label).show_ui(ui, |ui| {
-                                for (i, w) in self.windows.iter().enumerate() {
-                                    ui.selectable_value(&mut self.window_idx, i, w.label());
-                                }
-                            });
+                            egui::ComboBox::from_id_salt("window")
+                                .width(combo_w)
+                                .truncate()
+                                .selected_text(label)
+                                .show_ui(ui, |ui| {
+                                    truncate_items(ui);
+                                    for (i, w) in self.windows.iter().enumerate() {
+                                        let resp = ui.selectable_value(&mut self.window_idx, i, w.label());
+                                        resp.on_hover_text(w.label());
+                                    }
+                                });
                         }
                         SourceKind::Region => {
                             if tinted_button_small(ui, t!(SELECT_REGION)).clicked() {
@@ -1253,8 +1269,9 @@ impl App {
                 card.row(t!(ROW_DEVICE), |ui| {
                     ui.add_enabled_ui(self.mic_enabled && !self.mics.is_empty(), |ui| {
                         let label = self.mics.get(self.mic_idx).cloned().unwrap_or_else(|| t!(NO_INPUT_DEVICES).into());
-                        let w = (ui.available_width() - 8.0).clamp(160.0, 360.0);
-                        egui::ComboBox::from_id_salt("mic").width(w).selected_text(label).show_ui(ui, |ui| {
+                        let w = combo_width(ui);
+                        egui::ComboBox::from_id_salt("mic").width(w).truncate().selected_text(label).show_ui(ui, |ui| {
+                            truncate_items(ui);
                             for (i, m) in self.mics.iter().enumerate() {
                                 ui.selectable_value(&mut self.mic_idx, i, m);
                             }
@@ -1303,64 +1320,37 @@ impl App {
     fn video_mouse_tab(&mut self, ui: &mut egui::Ui) {
         let current = self.mouse_fx.read().unwrap().clone();
         let mut fx = current.clone();
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(400.0);
-                section_header(ui, t!(SECTION_MOUSE_FX));
-                Card::show(ui, |card| {
-                    switch_row(card, t!(CHK_SHOW_CURSOR), &mut fx.show_cursor);
-                    card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
-                        ui.add_enabled_ui(fx.show_cursor, |ui| {
-                            size_combo(ui, "cursor_size", &mut fx.cursor_size);
-                            if fx.cursor_size != 100 {
-                                ui.label(secondary(t!(APP_DRAWN)).small());
-                            }
-                        });
-                    });
+        // Side by side only while both columns fit; in a narrow window the
+        // preview column would be clipped by the panel, so stack it below.
+        if ui.available_width() >= FX_SETTINGS_W + FX_GAP + FX_PREVIEW_W {
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(FX_SETTINGS_W);
+                    mouse_fx_cards(ui, &mut fx);
                 });
-                Card::show(ui, |card| {
-                    switch_row(card, t!(CHK_CLICK_EFFECT), &mut fx.click_effect);
-                    card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
-                        ui.add_enabled_ui(fx.click_effect, |ui| size_combo(ui, "click_size", &mut fx.click_size));
-                    });
-                    card.row(t!(ROW_LEFT_CLICK_COLOR).trim(), |ui| {
-                        ui.add_enabled_ui(fx.click_effect, |ui| color_swatch(ui, &mut fx.left_color));
-                    });
-                    card.row(t!(ROW_RIGHT_CLICK_COLOR).trim(), |ui| {
-                        ui.add_enabled_ui(fx.click_effect, |ui| color_swatch(ui, &mut fx.right_color));
-                    });
-                });
-                Card::show(ui, |card| {
-                    switch_row(card, t!(CHK_HIGHLIGHT), &mut fx.highlight);
-                    card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
-                        ui.add_enabled_ui(fx.highlight, |ui| size_combo(ui, "highlight_size", &mut fx.highlight_size));
-                    });
-                    card.row(t!(ROW_HIGHLIGHT_COLOR).trim(), |ui| {
-                        ui.add_enabled_ui(fx.highlight, |ui| color_swatch(ui, &mut fx.highlight_color));
-                    });
-                    card.row(t!(ROW_OPACITY).trim(), |ui| {
-                        ui.add_enabled_ui(fx.highlight, |ui| {
-                            ui.add(egui::DragValue::new(&mut fx.highlight_opacity).range(0..=100).suffix(" %"));
-                            ui.add(egui::Slider::new(&mut fx.highlight_opacity, 0..=100).show_value(false));
-                        });
-                    });
+                ui.add_space(FX_GAP);
+                ui.vertical(|ui| {
+                    ui.set_width(FX_PREVIEW_W);
+                    self.mouse_fx_preview_card(ui, &fx);
                 });
             });
-            ui.add_space(16.0);
-            ui.vertical(|ui| {
-                ui.set_width(224.0);
-                section_header(ui, t!(TAB_PREVIEW));
-                Card::show(ui, |card| {
-                    card.custom(|ui| {
-                        self.fx_preview(ui, &fx);
-                        ui.label(secondary(t!(FX_PREVIEW_HINT)).small());
-                    });
-                });
-            });
-        });
+        } else {
+            mouse_fx_cards(ui, &mut fx);
+            self.mouse_fx_preview_card(ui, &fx);
+        }
         if fx != current {
             *self.mouse_fx.write().unwrap() = fx;
         }
+    }
+
+    fn mouse_fx_preview_card(&mut self, ui: &mut egui::Ui, fx: &MouseFx) {
+        section_header(ui, t!(TAB_PREVIEW));
+        Card::show(ui, |card| {
+            card.custom(|ui| {
+                self.fx_preview(ui, fx);
+                ui.label(secondary(t!(FX_PREVIEW_HINT)).small());
+            });
+        });
     }
 
     /// Checkerboard square showing the cursor, halo and (on click) ripples.
@@ -1658,6 +1648,64 @@ fn counters_tooltip(ui: &mut egui::Ui, s: &Stats, elapsed: Duration) {
             t!(COUNTER_OF_BUDGET, format!("{:.1}", get(&s.slot_us) as f64 / 1e3), budget_us / 1000),
         );
     });
+}
+
+/// The mouse-effect settings cards (everything but the live preview).
+fn mouse_fx_cards(ui: &mut egui::Ui, fx: &mut MouseFx) {
+    section_header(ui, t!(SECTION_MOUSE_FX));
+    Card::show(ui, |card| {
+        switch_row(card, t!(CHK_SHOW_CURSOR), &mut fx.show_cursor);
+        card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
+            ui.add_enabled_ui(fx.show_cursor, |ui| {
+                size_combo(ui, "cursor_size", &mut fx.cursor_size);
+                if fx.cursor_size != 100 {
+                    ui.label(secondary(t!(APP_DRAWN)).small());
+                }
+            });
+        });
+    });
+    Card::show(ui, |card| {
+        switch_row(card, t!(CHK_CLICK_EFFECT), &mut fx.click_effect);
+        card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
+            ui.add_enabled_ui(fx.click_effect, |ui| size_combo(ui, "click_size", &mut fx.click_size));
+        });
+        card.row(t!(ROW_LEFT_CLICK_COLOR).trim(), |ui| {
+            ui.add_enabled_ui(fx.click_effect, |ui| color_swatch(ui, &mut fx.left_color));
+        });
+        card.row(t!(ROW_RIGHT_CLICK_COLOR).trim(), |ui| {
+            ui.add_enabled_ui(fx.click_effect, |ui| color_swatch(ui, &mut fx.right_color));
+        });
+    });
+    Card::show(ui, |card| {
+        switch_row(card, t!(CHK_HIGHLIGHT), &mut fx.highlight);
+        card.row(t!(ROW_SIZE_INDENT).trim(), |ui| {
+            ui.add_enabled_ui(fx.highlight, |ui| size_combo(ui, "highlight_size", &mut fx.highlight_size));
+        });
+        card.row(t!(ROW_HIGHLIGHT_COLOR).trim(), |ui| {
+            ui.add_enabled_ui(fx.highlight, |ui| color_swatch(ui, &mut fx.highlight_color));
+        });
+        card.row(t!(ROW_OPACITY).trim(), |ui| {
+            ui.add_enabled_ui(fx.highlight, |ui| {
+                ui.add(egui::DragValue::new(&mut fx.highlight_opacity).range(0..=100).suffix(" %"));
+                ui.add(egui::Slider::new(&mut fx.highlight_opacity, 0..=100).show_value(false));
+            });
+        });
+    });
+}
+
+/// Width for a combo that has to stay inside its card row. `ComboBox::width`
+/// is only a *minimum*: with the default (Extend) wrap mode a long window
+/// title or device name grows the button past the row, so pair this with
+/// `ComboBox::truncate`.
+fn combo_width(ui: &egui::Ui) -> f32 {
+    let avail = ui.available_width();
+    (avail - 8.0).min(360.0).clamp(60.0, avail.max(60.0))
+}
+
+/// Truncates the entries of a combo popup too — egui opens the menu with
+/// `Extend`, so long titles would widen the popup instead of the button.
+fn truncate_items(ui: &mut egui::Ui) {
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
 }
 
 fn size_combo(ui: &mut egui::Ui, id: &str, value: &mut u32) {
