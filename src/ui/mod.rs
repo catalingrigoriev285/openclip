@@ -1717,14 +1717,22 @@ impl App {
             // An install that self-updated from a build older than the hook has
             // no DLL at all, and being up to date is never offered another
             // download. This row is the way back.
+            //
+            // `custom` + `horizontal_wrapped`, not `row_inline`: these strings
+            // are whole sentences and the localized ones are longer still. A
+            // fixed-height row would size itself to the text and push the card
+            // — and, through `set_width(available_width)`, every other card on
+            // the page — off the right-hand edge of the window.
             if let Some((text, colour)) = self.repair_status() {
                 let offer = self.repair.wanted();
                 let mut fix = false;
-                card.row_inline("", |ui| {
-                    ui.label(RichText::new(text).color(colour));
-                    if offer {
-                        fix = tinted_button_small(ui, t!(HOOK_REPAIR_BUTTON)).clicked();
-                    }
+                card.custom(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(text).color(colour));
+                        if offer {
+                            fix = tinted_button_small(ui, t!(HOOK_REPAIR_BUTTON)).clicked();
+                        }
+                    });
                 });
                 if fix {
                     self.retry_sidecar_repair(&ctx);

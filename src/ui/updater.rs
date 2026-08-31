@@ -345,14 +345,18 @@ impl App {
             switch_row(card, t!(UPDATES_CHECKBOX), &mut self.check_updates);
             card.row_inline("", |ui| self.update_check_row(ui));
             // Reachable without arming Game mode, which is the state an install
-            // with no sidecar is stuck in.
+            // with no sidecar is stuck in. Wrapped rather than laid out on a
+            // fixed-height row: these are sentences, and a row sized to its text
+            // pushes the whole page wider than the window.
             if let Some((text, colour)) = self.repair_status() {
                 let offer = self.repair.wanted();
-                card.row_inline("", |ui| {
-                    ui.label(RichText::new(text).color(colour));
-                    if offer {
-                        fix = tinted_button_small(ui, t!(HOOK_REPAIR_BUTTON)).clicked();
-                    }
+                card.custom(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(text).color(colour));
+                        if offer {
+                            fix = tinted_button_small(ui, t!(HOOK_REPAIR_BUTTON)).clicked();
+                        }
+                    });
                 });
             }
         });

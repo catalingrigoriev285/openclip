@@ -24,8 +24,14 @@ pub fn section_header(ui: &mut Ui, title: &str) {
 
 /// Small grey note under a card.
 pub fn footnote(ui: &mut Ui, text: &str) {
-    ui.horizontal(|ui| {
+    // `horizontal` lays out with wrap mode `Extend`, so a note longer than the
+    // panel ran off the right-hand edge of the window instead of flowing onto a
+    // second line — and, because the page then sized itself to the widest
+    // thing on it, took the cards with it. These are whole sentences, and the
+    // localized ones are longer than the English, so they have to wrap.
+    ui.horizontal_wrapped(|ui| {
         ui.add_space(PAD);
+        ui.set_max_width((ui.available_width() - PAD).max(1.0));
         ui.label(RichText::new(text).size(12.0).color(LABEL_2));
     });
 }

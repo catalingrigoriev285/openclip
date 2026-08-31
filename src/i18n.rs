@@ -422,9 +422,9 @@ strings! {
         "Не удалось начать запись: {0}";
     MSG_RECORDING_FAILED => "Recording failed: {0}", "Înregistrarea a eșuat: {0}", "Ошибка записи: {0}";
     MSG_SNAPSHOT_FAILED => "Snapshot failed: {0}", "Captura a eșuat: {0}", "Не удалось сделать снимок: {0}";
-    MSG_HOOK_REPAIRED => "Game-capture component restored. Restart openclip to use Game mode.",
-        "Componenta pentru captura jocurilor a fost restaurată. Repornește openclip pentru modul Joc.",
-        "Компонент захвата игр восстановлен. Перезапустите openclip, чтобы включить игровой режим.";
+    MSG_HOOK_REPAIRED => "Game-capture component restored — restart openclip",
+        "Componenta pentru captura jocurilor a fost restaurată — repornește openclip",
+        "Компонент захвата игр восстановлен — перезапустите openclip";
     MSG_PICKER_FAILED => "Region picker: {0}", "Selectorul de regiune: {0}", "Выбор области: {0}";
     MSG_DELETED => "Deleted {0}", "Șters: {0}", "Удалено: {0}";
     MSG_DELETE_FAILED => "Could not delete: {0}", "Nu s-a putut șterge: {0}", "Не удалось удалить: {0}";
