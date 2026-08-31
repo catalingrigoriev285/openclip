@@ -106,14 +106,23 @@ pub fn is_newer(remote: &Version, local: &Version) -> bool {
     remote > local
 }
 
+/// Queries GitHub for the latest release, whatever version it is.
+///
+/// [`check`] is this plus the "is it newer" gate. The ungated form is what
+/// [`repair_sidecar`] needs: a build that is already up to date is exactly the
+/// one that can be missing its hook DLL, and it never receives a `Release`.
+pub fn latest() -> anyhow::Result<Release> {
+    let json = fetch_latest_json()?;
+    let release = parse_release(&json)?;
+    log::info!("update check: latest release is {} (running {})", release.version, local_version());
+    Ok(release)
+}
+
 /// Queries GitHub for the latest release. `Ok(None)` means the running build is
 /// up to date (`/releases/latest` never returns drafts or pre-releases).
 pub fn check() -> anyhow::Result<Option<Release>> {
-    let local = local_version();
-    let json = fetch_latest_json()?;
-    let release = parse_release(&json)?;
-    log::info!("update check: latest release is {} (running {local})", release.version);
-    Ok(is_newer(&release.version, &local).then_some(release))
+    let release = latest()?;
+    Ok(is_newer(&release.version, &local_version()).then_some(release))
 }
 
 fn fetch_latest_json() -> anyhow::Result<String> {
@@ -223,6 +232,24 @@ fn parse_digest(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// The directory the executable lives in.
+fn install_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+}
+
+/// The sidecar that should sit beside the executable but does not.
+///
+/// Only ever `Some` on a platform that has one. This is not a hypothetical:
+/// the updater shipped before the hook did, and it extracted the executable
+/// alone, so every install that reached the current build through the in-app
+/// updater has a hook-less folder. Being up to date, those installs are never
+/// offered another download — [`repair_sidecar`] is the way back.
+pub fn sidecar_missing() -> Option<&'static str> {
+    let name = HOOK_NAME?;
+    let dir = install_dir()?;
+    (!dir.join(name).is_file()).then_some(name)
+}
+
 /// Whether the executable can be replaced in place (its folder is writable).
 /// Probed once per process; the UI asks every frame while the dialog is open.
 pub fn install_dir_writable() -> bool {
@@ -278,20 +305,58 @@ pub fn download_and_install(release: &Release, progress: &Progress) -> anyhow::R
     if let (Some(name), Some(path)) = (HOOK_NAME, new_hook.as_deref()) {
         wanted.push((name, path));
     }
-    let found = extract_files(&archive, &wanted)?;
+    let found = extract_files(&archive, &wanted, BIN_NAME)?;
 
     // The sidecar goes first. If it cannot be replaced the whole update is
     // abandoned, rather than leaving an executable and a hook from different
     // builds — which the ABI check would then refuse to run together.
-    if let (Some(name), Some(new)) = (HOOK_NAME, new_hook.as_deref())
-        && found.iter().any(|f| f == name)
-    {
-        replace_sidecar(&dir.join(name), new).context("replacing the game-capture component")?;
+    if let (Some(name), Some(new)) = (HOOK_NAME, new_hook.as_deref()) {
+        if found.iter().any(|f| f == name) {
+            replace_sidecar(&dir.join(name), new).context("replacing the game-capture component")?;
+        } else {
+            // Not fatal: an archive built before the hook existed simply has no
+            // DLL in it. Worth saying out loud, though — silence here is how an
+            // install ends up with a stale sidecar and no way to tell.
+            log::warn!("update: {} holds no {name}; the installed one is left as it is", asset.name);
+        }
     }
 
     self_replace::self_replace(&new_exe).context("replacing the executable")?;
     log::info!("update: installed {} over {}", release.version, exe.display());
     Ok(exe)
+}
+
+/// Re-downloads the release archive and puts `HOOK_NAME` back beside the
+/// executable, without touching the executable itself.
+///
+/// For an install whose sidecar went missing (see [`sidecar_missing`]) but
+/// whose version is current, so no update will ever be offered. The DLL comes
+/// from `release`, so the caller must have checked that it is the *same*
+/// version as the running build: a hook and an executable from different builds
+/// are exactly what the ABI check refuses to run together.
+pub fn repair_sidecar(release: &Release, progress: &Progress) -> anyhow::Result<()> {
+    let name = HOOK_NAME.ok_or_else(|| anyhow!("this platform has no game-capture component"))?;
+    if release.version != local_version() {
+        bail!("the latest release is {}, not {} — install the update instead", release.version, local_version());
+    }
+    let asset = release.asset.as_ref().ok_or_else(|| anyhow!("no download for this platform"))?;
+    let dir = install_dir().ok_or_else(|| anyhow!("executable has no parent folder"))?;
+    let ext = if asset.name.ends_with(".zip") { "zip" } else { "tar.gz" };
+    // Same folder (and volume) as the executable so the final rename is atomic.
+    let archive = dir.join(format!(".openclip-repair-{}.{ext}", std::process::id()));
+    let new_hook = dir.join(format!("{name}.new"));
+    let _cleanup = Cleanup(vec![archive.clone(), new_hook.clone()]);
+
+    download_to(asset, &archive, progress)?;
+    if progress.cancel.load(Ordering::Relaxed) {
+        bail!("cancelled");
+    }
+    // Only the sidecar: the executable is already the right one, and replacing
+    // it here would need a restart the user did not ask for.
+    extract_files(&archive, &[(name, new_hook.as_path())], name)?;
+    replace_sidecar(&dir.join(name), &new_hook).context("restoring the game-capture component")?;
+    log::info!("update: restored {name} from {}", release.version);
+    Ok(())
 }
 
 fn download_to(asset: &Asset, dest: &Path, progress: &Progress) -> anyhow::Result<()> {
@@ -335,11 +400,12 @@ fn download_to(asset: &Asset, dest: &Path, progress: &Progress) -> anyhow::Resul
 
 /// Pulls the named files out of the release archive (Windows: zip).
 ///
-/// Returns the names it actually found. Only [`BIN_NAME`] is required — an
-/// archive built before the hook existed simply has no DLL in it, and that must
-/// not fail the update.
+/// Returns the names it actually found. Everything in `wanted` is optional
+/// except `required`: a full update needs [`BIN_NAME`] and tolerates an archive
+/// built before the hook existed, while a sidecar repair needs the sidecar and
+/// nothing else.
 #[cfg(windows)]
-fn extract_files(archive: &Path, wanted: &[(&str, &Path)]) -> anyhow::Result<Vec<String>> {
+fn extract_files(archive: &Path, wanted: &[(&str, &Path)], required: &str) -> anyhow::Result<Vec<String>> {
     let file = File::open(archive)?;
     let mut zip = zip::ZipArchive::new(file).context("reading the zip archive")?;
     let mut found = Vec::new();
@@ -356,8 +422,8 @@ fn extract_files(archive: &Path, wanted: &[(&str, &Path)]) -> anyhow::Result<Vec
         out.flush()?;
         found.push(name);
     }
-    if !found.iter().any(|n| n == BIN_NAME) {
-        bail!("{BIN_NAME} not found in {}", archive.display());
+    if !found.iter().any(|n| n == required) {
+        bail!("{required} not found in {}", archive.display());
     }
     Ok(found)
 }
@@ -366,7 +432,7 @@ fn extract_files(archive: &Path, wanted: &[(&str, &Path)]) -> anyhow::Result<Vec
 ///
 /// See the Windows twin for why only [`BIN_NAME`] is required.
 #[cfg(unix)]
-fn extract_files(archive: &Path, wanted: &[(&str, &Path)]) -> anyhow::Result<Vec<String>> {
+fn extract_files(archive: &Path, wanted: &[(&str, &Path)], required: &str) -> anyhow::Result<Vec<String>> {
     use std::os::unix::fs::PermissionsExt;
     let file = File::open(archive)?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
@@ -385,8 +451,8 @@ fn extract_files(archive: &Path, wanted: &[(&str, &Path)]) -> anyhow::Result<Vec
         fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
         found.push(name);
     }
-    if !found.iter().any(|n| n == BIN_NAME) {
-        bail!("{BIN_NAME} not found in {}", archive.display());
+    if !found.iter().any(|n| n == required) {
+        bail!("{required} not found in {}", archive.display());
     }
     Ok(found)
 }
@@ -573,7 +639,7 @@ mod tests {
         w.finish().unwrap();
 
         let dest = dir.join("openclip.exe.new");
-        let found = extract_files(&archive, &[("openclip.exe", dest.as_path())]).unwrap();
+        let found = extract_files(&archive, &[("openclip.exe", dest.as_path())], "openclip.exe").unwrap();
         assert_eq!(found, vec!["openclip.exe".to_string()]);
         assert_eq!(fs::read(&dest).unwrap(), b"MZ new binary");
 
@@ -581,7 +647,7 @@ mod tests {
         w.start_file("openclip-9.9.9-windows-x86_64/README.md", opts).unwrap();
         w.write_all(b"readme").unwrap();
         w.finish().unwrap();
-        assert!(extract_files(&archive, &[("openclip.exe", dest.as_path())]).is_err(), "an archive without the binary is rejected");
+        assert!(extract_files(&archive, &[("openclip.exe", dest.as_path())], "openclip.exe").is_err(), "an archive without the binary is rejected");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -602,7 +668,7 @@ mod tests {
         w.start_file("openclip-9.9.9-windows-x86_64/openclip_hook64.dll", opts).unwrap();
         w.write_all(b"MZ dll").unwrap();
         w.finish().unwrap();
-        let found = extract_files(&archive, wanted).unwrap();
+        let found = extract_files(&archive, wanted, "openclip.exe").unwrap();
         assert_eq!(found.len(), 2);
         assert_eq!(fs::read(&hook).unwrap(), b"MZ dll");
 
@@ -611,9 +677,57 @@ mod tests {
         w.start_file("openclip-9.9.9-windows-x86_64/openclip.exe", opts).unwrap();
         w.write_all(b"MZ exe").unwrap();
         w.finish().unwrap();
-        let found = extract_files(&archive, wanted).unwrap();
+        let found = extract_files(&archive, wanted, "openclip.exe").unwrap();
         assert_eq!(found, vec!["openclip.exe".to_string()]);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A repair takes the sidecar out on its own, and — unlike a full update —
+    /// refuses an archive that has not got one rather than reporting success
+    /// and leaving Game mode just as broken as it was.
+    #[cfg(windows)]
+    #[test]
+    fn a_repair_requires_the_sidecar_and_leaves_the_binary_alone() {
+        use zip::write::SimpleFileOptions;
+        let dir = scratch_dir("zip-repair");
+        let archive = dir.join("release.zip");
+        let opts = SimpleFileOptions::default();
+        let hook = dir.join("openclip_hook64.dll.new");
+        let wanted: &[(&str, &Path)] = &[("openclip_hook64.dll", hook.as_path())];
+
+        let mut w = zip::ZipWriter::new(File::create(&archive).unwrap());
+        w.start_file("openclip-9.9.9-windows-x86_64/openclip.exe", opts).unwrap();
+        w.write_all(b"MZ exe").unwrap();
+        w.start_file("openclip-9.9.9-windows-x86_64/openclip_hook64.dll", opts).unwrap();
+        w.write_all(b"MZ dll").unwrap();
+        w.finish().unwrap();
+
+        let found = extract_files(&archive, wanted, "openclip_hook64.dll").unwrap();
+        assert_eq!(found, vec!["openclip_hook64.dll".to_string()]);
+        assert_eq!(fs::read(&hook).unwrap(), b"MZ dll");
+        assert!(!dir.join("openclip.exe.new").exists(), "a repair must not stage the executable");
+
+        // The pre-hook archives that caused this in the first place.
+        let mut w = zip::ZipWriter::new(File::create(&archive).unwrap());
+        w.start_file("openclip-9.9.9-windows-x86_64/openclip.exe", opts).unwrap();
+        w.write_all(b"MZ exe").unwrap();
+        w.finish().unwrap();
+        let err = extract_files(&archive, wanted, "openclip_hook64.dll").unwrap_err();
+        assert!(err.to_string().contains("openclip_hook64.dll"), "the error names what is missing: {err}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The running build's own folder is the one being checked, so on a
+    /// platform with a hook this answers for the test binary beside it.
+    #[test]
+    fn sidecar_missing_only_answers_where_there_is_a_sidecar() {
+        match HOOK_NAME {
+            None => assert_eq!(sidecar_missing(), None, "no hook on this platform, nothing to miss"),
+            Some(name) => {
+                let present = install_dir().map(|d| d.join(name).is_file()).unwrap_or(false);
+                assert_eq!(sidecar_missing().is_none(), present, "must agree with what is on disk");
+            }
+        }
     }
 
     #[test]
@@ -661,7 +775,7 @@ mod tests {
         tar.into_inner().unwrap().finish().unwrap();
 
         let dest = dir.join("openclip.new");
-        extract_files(&archive, &[("openclip", dest.as_path())]).unwrap();
+        extract_files(&archive, &[("openclip", dest.as_path())], "openclip").unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"\x7fELF new binary");
         assert_eq!(fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o755);
         fs::remove_dir_all(&dir).unwrap();

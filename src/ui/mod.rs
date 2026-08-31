@@ -292,6 +292,9 @@ pub struct App {
     /// Look for a newer release on GitHub at start-up.
     check_updates: bool,
     update: updater::UpdateState,
+    /// Whether the game-capture sidecar is where it should be, and what is
+    /// being done about it if not.
+    repair: updater::RepairState,
     update_modal: bool,
     tab: Tab,
     home_tab: HomeTab,
@@ -411,6 +414,13 @@ impl App {
             language: settings.language,
             check_updates: settings.check_updates,
             update: updater::UpdateState::Idle,
+            repair: match crate::update::sidecar_missing() {
+                Some(name) => {
+                    log::warn!("{name} is not beside the executable; Game mode needs it restored");
+                    updater::RepairState::Missing
+                }
+                None => updater::RepairState::Present,
+            },
             update_modal: false,
             tab: Tab::Home,
             home_tab: HomeTab::Videos,
@@ -443,7 +453,10 @@ impl App {
                 .then(|| std::env::var_os("OPENCLIP_OPEN_VIEWER").map(PathBuf::from))
                 .flatten(),
         };
-        if app.check_updates {
+        // A missing sidecar needs the release list too, and getting Game mode
+        // working again is not something to hold back until the user happens to
+        // turn update checks on.
+        if app.check_updates || app.repair.wanted() {
             app.start_update_check(&cc.egui_ctx);
         }
         app
@@ -1694,11 +1707,28 @@ impl App {
     fn game_status_card(&mut self, ui: &mut egui::Ui) {
         section_header(ui, t!(SECTION_GAME_CAPTURE));
         let armed = self.game_armed();
+        let ctx = ui.ctx().clone();
         Card::show(ui, |card| {
             card.text_row(t!(GAME_STATUS), &self.game_label());
             #[cfg(windows)]
             if let Some(session) = self.game_session_info() {
                 card.text_row(t!(GAME_HOOK_VERSION), &session);
+            }
+            // An install that self-updated from a build older than the hook has
+            // no DLL at all, and being up to date is never offered another
+            // download. This row is the way back.
+            if let Some((text, colour)) = self.repair_status() {
+                let offer = self.repair.wanted();
+                let mut fix = false;
+                card.row_inline("", |ui| {
+                    ui.label(RichText::new(text).color(colour));
+                    if offer {
+                        fix = tinted_button_small(ui, t!(HOOK_REPAIR_BUTTON)).clicked();
+                    }
+                });
+                if fix {
+                    self.retry_sidecar_repair(&ctx);
+                }
             }
             card.row(t!(GAME_MODE_ROW), |ui| {
                 if tinted_button_small(ui, if armed { t!(GAME_DISARM) } else { t!(GAME_ARM) }).clicked() {

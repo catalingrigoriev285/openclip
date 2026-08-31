@@ -26,10 +26,9 @@ use windows::Win32::Media::MediaFoundation::{
 
 use crate::capture::FramePool;
 use crate::video::mf::{propvariant_i64, startup};
-use crate::video::preview::{make_preview_into, PreviewImage};
-use crate::video::RawFrame;
+use crate::video::preview::{rows_to_rgba_into, PreviewImage};
 
-use super::{frame_interval_from_rate, MAX_DECODE_SIDE};
+use super::frame_interval_from_rate;
 
 /// `GUID_NULL` — the default (100 ns) time format for a seek. The constant
 /// itself lives behind the `Win32_Media_KernelStreaming` feature, which this
@@ -73,26 +72,30 @@ pub struct Reader {
     audio_eos: bool,
     /// Row pitch of the decoded RGB32; negative means bottom-up.
     stride: i32,
+    /// Longest side asked of the decoder, re-applied after a format change.
+    max_side: u32,
     pub duration: Option<Duration>,
     pub video_info: Option<VideoInfo>,
     pub audio_info: Option<AudioInfo>,
 }
 
 impl Reader {
-    /// Opens `path`. Tries the advanced video processor first (it can scale the
-    /// output, which caps what a 4K file costs per frame) and falls back to the
-    /// basic converter for sources that refuse it.
-    pub fn open(path: &Path) -> Result<Reader> {
-        match Reader::open_with(path, true) {
+    /// Opens `path`, asking for frames no larger than `max_side` on their
+    /// longer side. Tries the advanced video processor first (it is the only
+    /// one that can scale, and it does so on the way out of the decoder, so
+    /// every pass after it is proportionally cheaper) and falls back to the
+    /// basic converter at native size for sources that refuse it.
+    pub fn open(path: &Path, max_side: u32) -> Result<Reader> {
+        match Reader::open_with(path, true, max_side) {
             Ok(r) => Ok(r),
             Err(e) => {
                 log::debug!("advanced video processing unavailable ({e:#}); retrying without it");
-                Reader::open_with(path, false)
+                Reader::open_with(path, false, max_side)
             }
         }
     }
 
-    fn open_with(path: &Path, advanced: bool) -> Result<Reader> {
+    fn open_with(path: &Path, advanced: bool, max_side: u32) -> Result<Reader> {
         startup()?;
         let abs = std::fs::canonicalize(path).context("resolving the file path")?;
         // Media Foundation rejects the extended-length prefix.
@@ -151,6 +154,7 @@ impl Reader {
                 video_eos: video.is_none(),
                 audio_eos: audio.is_none(),
                 stride: 0,
+                max_side,
                 duration,
                 video_info: None,
                 audio_info: None,
@@ -171,8 +175,8 @@ impl Reader {
         }
     }
 
-    /// Requests RGB32, capping the long side so a 4K file does not cost 33 MB
-    /// per frame, then reads back the geometry that was actually negotiated.
+    /// Requests RGB32, capping the long side so a big file does not cost tens
+    /// of megabytes a frame, then reads back the geometry actually negotiated.
     fn setup_video(&mut self, stream: u32, advanced: bool) -> Result<()> {
         // SAFETY: MF calls on a live reader; failures propagate as errors.
         unsafe {
@@ -181,7 +185,7 @@ impl Reader {
                 .as_ref()
                 .and_then(|t| t.GetUINT64(&MF_MT_FRAME_SIZE).ok())
                 .map(|s| ((s >> 32) as u32, (s & 0xFFFF_FFFF) as u32))
-                .and_then(|(w, h)| capped_size(w, h));
+                .and_then(|(w, h)| capped_size(w, h, self.max_side));
 
             let make = |size: Option<(u32, u32)>| -> Result<IMFMediaType> {
                 let want = MFCreateMediaType()?;
@@ -274,7 +278,21 @@ impl Reader {
 
     /// Reads one sample. Video samples whose timestamp is before `pixels_from`
     /// come back as [`Packet::VideoSkipped`] without being converted.
-    pub fn read(&mut self, pixels_from: Option<Duration>, pool: &FramePool) -> Result<Packet> {
+    ///
+    /// `audio_only` restricts the read to the audio stream. The caller uses it
+    /// when video is buffered as far ahead as it may run but the output device
+    /// still wants sound: reading every stream there would decode video frames
+    /// that the backlog then has to throw away.
+    pub fn read(
+        &mut self,
+        pixels_from: Option<Duration>,
+        pool: &FramePool,
+        audio_only: bool,
+    ) -> Result<Packet> {
+        let stream = match (audio_only, self.audio) {
+            (true, Some(i)) => i,
+            _ => MF_SOURCE_READER_ALL_STREAMS.0 as u32,
+        };
         let mut index = 0u32;
         let mut flags = 0u32;
         let mut ts = 0i64;
@@ -282,7 +300,7 @@ impl Reader {
         // SAFETY: all out-parameters are live locals for the duration of the call.
         unsafe {
             self.reader.ReadSample(
-                MF_SOURCE_READER_ALL_STREAMS.0 as u32,
+                stream,
                 0,
                 Some(&mut index),
                 Some(&mut flags),
@@ -349,11 +367,13 @@ impl Reader {
             let mut len = 0u32;
             buffer.Lock(&mut ptr, None, Some(&mut len))?;
             let src = std::slice::from_raw_parts(ptr, len as usize);
-            let frame = RawFrame::from_bgra_rows(src, info.width, info.height, self.stride);
+            // Straight from the locked buffer into a pooled RGBA image: the
+            // reader already negotiated the size it wants, so there is nothing
+            // to resample and no reason to stage the frame in a `RawFrame`
+            // first. RGB32 is BGRA in memory, hence the red/blue swap.
+            let image = rows_to_rgba_into(src, info.width, info.height, self.stride, true, pool.take());
             let _ = buffer.Unlock();
-            // `max_side` at or above the longer side makes this a straight
-            // BGRA→RGBA copy with opaque alpha and no resampling.
-            Ok(frame.map(|f| make_preview_into(&f, info.width.max(info.height), pool.take())))
+            Ok(image)
         }
     }
 
@@ -393,14 +413,15 @@ fn pcm_to_f32(sample: &IMFSample) -> Result<Vec<f32>> {
     }
 }
 
-/// Output size for a source of `w`×`h`, shrunk to [`MAX_DECODE_SIDE`] on its
-/// longer side. `None` when the source already fits and needs no scaling.
-pub fn capped_size(w: u32, h: u32) -> Option<(u32, u32)> {
+/// Output size for a source of `w`×`h`, shrunk to `max_side` on its longer
+/// side. `None` when the source already fits and needs no scaling.
+pub fn capped_size(w: u32, h: u32, max_side: u32) -> Option<(u32, u32)> {
+    let max_side = max_side.max(2);
     let long = w.max(h);
-    if w == 0 || h == 0 || long <= MAX_DECODE_SIDE {
+    if w == 0 || h == 0 || long <= max_side {
         return None;
     }
-    let scale = long as f64 / MAX_DECODE_SIDE as f64;
+    let scale = long as f64 / max_side as f64;
     // Even dimensions keep every chroma-subsampled decoder happy.
     let cw = (((w as f64 / scale).round() as u32).max(2)) & !1;
     let ch = (((h as f64 / scale).round() as u32).max(2)) & !1;
@@ -409,18 +430,19 @@ pub fn capped_size(w: u32, h: u32) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{MAX_DECODE_SIDE, MAX_PLAYBACK_SIDE};
     use super::*;
 
     #[test]
     fn capped_size_only_shrinks_oversized_sources() {
-        // 1080p and 4K already fit.
-        assert_eq!(capped_size(1920, 1080), None);
-        assert_eq!(capped_size(3840, 2160), None);
-        assert_eq!(capped_size(0, 0), None);
+        // At the snapshot ceiling, 1080p and 4K already fit.
+        assert_eq!(capped_size(1920, 1080, MAX_DECODE_SIDE), None);
+        assert_eq!(capped_size(3840, 2160, MAX_DECODE_SIDE), None);
+        assert_eq!(capped_size(0, 0, MAX_DECODE_SIDE), None);
 
         // 8K halves, staying on even dimensions.
-        assert_eq!(capped_size(7680, 4320), Some((3840, 2160)));
-        let (w, h) = capped_size(5000, 3000).unwrap();
+        assert_eq!(capped_size(7680, 4320, MAX_DECODE_SIDE), Some((3840, 2160)));
+        let (w, h) = capped_size(5000, 3000, MAX_DECODE_SIDE).unwrap();
         assert_eq!(w, MAX_DECODE_SIDE);
         assert_eq!(w % 2, 0);
         assert_eq!(h % 2, 0);
@@ -428,6 +450,20 @@ mod tests {
         assert!(((w as f64 / h as f64) - (5000.0 / 3000.0)).abs() < 0.01);
 
         // Portrait is capped on its own long side.
-        assert_eq!(capped_size(2160, 7680), Some((1080, 3840)));
+        assert_eq!(capped_size(2160, 7680, MAX_DECODE_SIDE), Some((1080, 3840)));
+    }
+
+    /// What playback actually asks for: 1440p and 4K come down to the viewer's
+    /// own size instead of being carried at full resolution, and 1080p and
+    /// below are left alone.
+    #[test]
+    fn playback_caps_everything_above_its_own_side() {
+
+        assert_eq!(capped_size(3840, 2160, MAX_PLAYBACK_SIDE), Some((1920, 1080)));
+        assert_eq!(capped_size(2560, 1440, MAX_PLAYBACK_SIDE), Some((1920, 1080)));
+        assert_eq!(capped_size(1920, 1080, MAX_PLAYBACK_SIDE), None);
+        assert_eq!(capped_size(1280, 720, MAX_PLAYBACK_SIDE), None);
+        // A portrait phone clip is capped on its height, not its width.
+        assert_eq!(capped_size(1080, 3840, MAX_PLAYBACK_SIDE), Some((540, 1920)));
     }
 }

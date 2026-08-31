@@ -16,10 +16,46 @@ pub fn make_preview(frame: &RawFrame, max_side: u32) -> PreviewImage {
     Previewer::new(frame.width, frame.height, max_side).make(frame)
 }
 
-/// [`make_preview`] reusing `buf` for the result, so a player converting thirty
-/// frames a second does not allocate several megabytes each time.
-pub fn make_preview_into(frame: &RawFrame, max_side: u32, buf: Vec<u8>) -> PreviewImage {
-    Previewer::new(frame.width, frame.height, max_side).make_into(frame, buf)
+/// Converts packed 8-bit rows straight from a decoder's buffer into an RGBA
+/// [`PreviewImage`], reusing `rgba`.
+///
+/// The player decodes at the size it displays, so nothing is resampled and the
+/// whole conversion is one pass. Going through [`RawFrame::from_bgra_rows`] and
+/// then [`Previewer::make_into`] would allocate and copy the full frame an extra
+/// time, which at thirty frames a second is the difference between smooth
+/// playback and none.
+///
+/// A negative `stride` means the rows arrive bottom-up, which is what Media
+/// Foundation's RGB32 normally does. Returns `None` if `src` is too small to
+/// hold the picture it claims to.
+pub fn rows_to_rgba_into(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    stride: i32,
+    swap_rb: bool,
+    mut rgba: Vec<u8>,
+) -> Option<PreviewImage> {
+    let pitch = stride.unsigned_abs() as usize;
+    let row = width as usize * 4;
+    if width == 0 || height == 0 || pitch < row || src.len() < pitch * height as usize {
+        return None;
+    }
+    rgba.clear();
+    rgba.resize(row * height as usize, 0);
+    for y in 0..height as usize {
+        let sy = if stride < 0 { height as usize - 1 - y } else { y };
+        let s = &src[sy * pitch..sy * pitch + row];
+        let d = &mut rgba[y * row..(y + 1) * row];
+        for (d, s) in d.as_chunks_mut::<4>().0.iter_mut().zip(s.as_chunks::<4>().0.iter()) {
+            let (r, b) = if swap_rb { (s[2], s[0]) } else { (s[0], s[2]) };
+            d[0] = r;
+            d[1] = s[1];
+            d[2] = b;
+            d[3] = 255;
+        }
+    }
+    Some(PreviewImage { width, height, rgba })
 }
 
 /// Reusable downscaler with precomputed sample positions (no per-pixel math).
@@ -154,6 +190,65 @@ mod tests {
             // Alpha is forced opaque even though the source said 3.
             assert!(fast.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
         }
+    }
+
+    /// The player's hot path. Bottom-up rows are what Media Foundation's RGB32
+    /// normally hands back, and getting the sign of the stride wrong flips the
+    /// picture rather than failing.
+    #[test]
+    fn rows_to_rgba_handles_padding_and_bottom_up_rows() {
+        let (w, h) = (5u32, 3u32);
+        let pitch = w as usize * 4 + 8;
+        let mut src = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as u8;
+                // BGRA in memory, with a non-opaque alpha to be overridden.
+                src.extend_from_slice(&[i, i.wrapping_add(70), i.wrapping_add(140), 3]);
+            }
+            src.extend_from_slice(&[0u8; 8]);
+        }
+
+        let top =
+            rows_to_rgba_into(&src, w, h, pitch as i32, true, Vec::new()).expect("top-down converts");
+        assert_eq!((top.width, top.height), (w, h));
+        assert_eq!(top.rgba.len(), (w * h * 4) as usize);
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let s = &src[y * pitch + x * 4..][..4];
+                let d = &top.rgba[(y * w as usize + x) * 4..][..4];
+                assert_eq!(d, [s[2], s[1], s[0], 255], "row {y} col {x}");
+            }
+        }
+
+        // A negative stride means the same bytes, read last row first.
+        let up = rows_to_rgba_into(&src, w, h, -(pitch as i32), true, Vec::new()).expect("bottom-up converts");
+        let row = w as usize * 4;
+        for y in 0..h as usize {
+            let flipped = &top.rgba[(h as usize - 1 - y) * row..][..row];
+            assert_eq!(&up.rgba[y * row..][..row], flipped, "row {y}");
+        }
+
+        // No red/blue swap leaves the channels alone.
+        let plain = rows_to_rgba_into(&src, w, h, pitch as i32, false, Vec::new()).unwrap();
+        assert_eq!(&plain.rgba[..4], &[src[0], src[1], src[2], 255]);
+
+        // A buffer too small for the picture it claims is refused, not read.
+        assert!(rows_to_rgba_into(&src[..pitch], w, h, pitch as i32, true, Vec::new()).is_none());
+        assert!(rows_to_rgba_into(&src, 0, h, pitch as i32, true, Vec::new()).is_none());
+        // A pitch narrower than one row cannot be right either.
+        assert!(rows_to_rgba_into(&src, w, h, 4, true, Vec::new()).is_none());
+    }
+
+    #[test]
+    fn rows_to_rgba_reuses_the_buffer_it_is_given() {
+        let (w, h) = (8u32, 4u32);
+        let src = vec![9u8; (w * h * 4) as usize];
+        let recycled = Vec::with_capacity((w * h * 4) as usize);
+        let ptr = recycled.as_ptr();
+        let out = rows_to_rgba_into(&src, w, h, (w * 4) as i32, true, recycled).unwrap();
+        assert_eq!(out.rgba.as_ptr(), ptr, "the caller's allocation should be kept");
+        assert_eq!(out.rgba.len(), (w * h * 4) as usize);
     }
 
     #[test]

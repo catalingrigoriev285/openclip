@@ -17,10 +17,40 @@ use crate::i18n::{self, key};
 use crate::t;
 use crate::update::{self, Progress, Release};
 
+/// State of the game-capture sidecar beside the executable.
+///
+/// The updater shipped before the hook did, and the version that shipped first
+/// extracted the executable alone. Every install that reached the current build
+/// through it therefore has no `openclip_hook64.dll` — and, being up to date,
+/// is never offered another download. This is the way back: the same release
+/// archive, with only the sidecar taken out of it.
+pub(super) enum RepairState {
+    /// The sidecar is there, or this platform has none.
+    Present,
+    /// Missing. Waiting on a release to take one from.
+    Missing,
+    Downloading { progress: Arc<Progress>, rx: mpsc::Receiver<anyhow::Result<()>> },
+    /// Back on disk. It is only picked up on the next launch: the DLL is loaded
+    /// once per process and deliberately never unloaded.
+    Restored,
+    Failed(String),
+}
+
+impl RepairState {
+    /// Whether the user should be shown a way to fix this.
+    pub(super) fn wanted(&self) -> bool {
+        matches!(self, RepairState::Missing | RepairState::Failed(_))
+    }
+
+    fn busy(&self) -> bool {
+        matches!(self, RepairState::Downloading { .. })
+    }
+}
+
 pub(super) enum UpdateState {
     /// Not checked (yet) — the start-up check is off or still to be spawned.
     Idle,
-    Checking(mpsc::Receiver<anyhow::Result<Option<Release>>>),
+    Checking(mpsc::Receiver<anyhow::Result<Release>>),
     UpToDate,
     Available(Box<Release>),
     Downloading {
@@ -65,6 +95,10 @@ fn version_label(rel: &Release) -> String {
 impl App {
     /// Asks GitHub for the latest release on a background thread. No-op while
     /// a check or a download is already running.
+    ///
+    /// One request answers two questions — whether there is a newer build, and
+    /// where to get a replacement sidecar from — so a missing DLL costs no
+    /// second round trip.
     pub(super) fn start_update_check(&mut self, ctx: &egui::Context) {
         if self.update.busy() {
             return;
@@ -72,7 +106,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         let spawned = std::thread::Builder::new().name("openclip-update".into()).spawn(move || {
-            let _ = tx.send(update::check());
+            let _ = tx.send(update::latest());
             ctx.request_repaint();
         });
         self.update = match spawned {
@@ -83,17 +117,30 @@ impl App {
 
     /// Picks up results from the check / download threads (called every frame).
     pub(super) fn poll_update(&mut self, ctx: &egui::Context) {
+        self.poll_repair(ctx);
         let state = std::mem::replace(&mut self.update, UpdateState::Idle);
         self.update = match state {
             UpdateState::Checking(rx) => match rx.try_recv() {
-                Ok(Ok(Some(rel))) => {
-                    log::info!("update available: {} ({})", rel.version, rel.html_url);
-                    self.message = Some((t!(MSG_UPDATE_AVAILABLE, version_label(&rel)), false));
-                    UpdateState::Available(Box::new(rel))
+                Ok(Ok(rel)) => {
+                    // The same release answers the sidecar question, but only
+                    // when it *is* this build: a DLL from a different release
+                    // than the running exe is what the ABI check rejects.
+                    if self.repair.wanted() && rel.version == update::local_version() {
+                        self.start_sidecar_repair(&rel, ctx);
+                    }
+                    if update::is_newer(&rel.version, &update::local_version()) {
+                        log::info!("update available: {} ({})", rel.version, rel.html_url);
+                        self.message = Some((t!(MSG_UPDATE_AVAILABLE, version_label(&rel)), false));
+                        UpdateState::Available(Box::new(rel))
+                    } else {
+                        UpdateState::UpToDate
+                    }
                 }
-                Ok(Ok(None)) => UpdateState::UpToDate,
                 Ok(Err(e)) => {
                     log::warn!("update check failed: {e:#}");
+                    if self.repair.wanted() {
+                        self.repair = RepairState::Failed(format!("{e:#}"));
+                    }
                     UpdateState::Failed { rel: None, error: format!("{e:#}") }
                 }
                 Err(mpsc::TryRecvError::Empty) => UpdateState::Checking(rx),
@@ -145,6 +192,79 @@ impl App {
             Ok(_) => UpdateState::Downloading { rel, progress, rx },
             Err(e) => UpdateState::Failed { rel: Some(rel), error: e.to_string() },
         };
+    }
+
+    /// Downloads the release archive and puts the missing sidecar back.
+    ///
+    /// Gated exactly like an update: the DLL is mapped into openclip itself
+    /// from the first injection onward and into every game it reached, so it
+    /// must not be swapped while Game mode is armed.
+    fn start_sidecar_repair(&mut self, rel: &Release, ctx: &egui::Context) {
+        if self.repair.busy() || rel.asset.is_none() {
+            return;
+        }
+        if !matches!(self.state, State::Idle) || self.game_armed() || !update::install_dir_writable() {
+            return;
+        }
+        let rel = rel.clone();
+        let progress = Arc::new(Progress::default());
+        let (tx, rx) = mpsc::channel();
+        let (progress2, ctx2) = (progress.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new().name("openclip-repair".into()).spawn(move || {
+            let _ = tx.send(update::repair_sidecar(&rel, &progress2));
+            ctx2.request_repaint();
+        });
+        self.repair = match spawned {
+            Ok(_) => RepairState::Downloading { progress, rx },
+            Err(e) => RepairState::Failed(e.to_string()),
+        };
+    }
+
+    /// The Repair button: ask GitHub again, which restarts the whole flow.
+    pub(super) fn retry_sidecar_repair(&mut self, ctx: &egui::Context) {
+        if self.repair.busy() {
+            return;
+        }
+        self.repair = RepairState::Missing;
+        self.start_update_check(ctx);
+    }
+
+    fn poll_repair(&mut self, ctx: &egui::Context) {
+        let state = std::mem::replace(&mut self.repair, RepairState::Present);
+        self.repair = match state {
+            RepairState::Downloading { progress, rx } => match rx.try_recv() {
+                Ok(Ok(())) => {
+                    log::info!("the game-capture component was restored");
+                    self.message = Some((t!(MSG_HOOK_REPAIRED).into(), false));
+                    RepairState::Restored
+                }
+                Ok(Err(e)) => {
+                    log::warn!("could not restore the game-capture component: {e:#}");
+                    RepairState::Failed(format!("{e:#}"))
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    RepairState::Downloading { progress, rx }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    RepairState::Failed("the download did not finish".into())
+                }
+            },
+            other => other,
+        };
+    }
+
+    /// What the Game card says about the sidecar, if anything.
+    pub(super) fn repair_status(&self) -> Option<(String, egui::Color32)> {
+        match &self.repair {
+            RepairState::Present => None,
+            RepairState::Missing => Some((t!(HOOK_MISSING).into(), ORANGE)),
+            RepairState::Downloading { progress, .. } => {
+                Some((t!(HOOK_REPAIRING, human_bytes(progress.downloaded.load(Ordering::Relaxed))), BLUE))
+            }
+            RepairState::Restored => Some((t!(HOOK_REPAIRED_RESTART).into(), GREEN)),
+            RepairState::Failed(e) => Some((t!(HOOK_REPAIR_FAILED, e), ORANGE)),
+        }
     }
 
     /// Asks a running download to stop (Cancel button, app exit); the thread
@@ -215,14 +335,31 @@ impl App {
         }
     }
 
-    /// About → Updates: the start-up toggle (saved on change) and the check row.
+    /// About → Updates: the start-up toggle (saved on change), the check row
+    /// and — only when there is something to say — the sidecar's state.
     pub(super) fn about_update_rows(&mut self, ui: &mut egui::Ui) {
         let before = self.check_updates;
+        let ctx = ui.ctx().clone();
+        let mut fix = false;
         Card::show(ui, |card| {
             switch_row(card, t!(UPDATES_CHECKBOX), &mut self.check_updates);
             card.row_inline("", |ui| self.update_check_row(ui));
+            // Reachable without arming Game mode, which is the state an install
+            // with no sidecar is stuck in.
+            if let Some((text, colour)) = self.repair_status() {
+                let offer = self.repair.wanted();
+                card.row_inline("", |ui| {
+                    ui.label(RichText::new(text).color(colour));
+                    if offer {
+                        fix = tinted_button_small(ui, t!(HOOK_REPAIR_BUTTON)).clicked();
+                    }
+                });
+            }
         });
         footnote(ui, t!(UPDATES_NOTE));
+        if fix {
+            self.retry_sidecar_repair(&ctx);
+        }
         if before != self.check_updates {
             self.save_settings();
         }

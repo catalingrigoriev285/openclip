@@ -422,6 +422,9 @@ strings! {
         "Не удалось начать запись: {0}";
     MSG_RECORDING_FAILED => "Recording failed: {0}", "Înregistrarea a eșuat: {0}", "Ошибка записи: {0}";
     MSG_SNAPSHOT_FAILED => "Snapshot failed: {0}", "Captura a eșuat: {0}", "Не удалось сделать снимок: {0}";
+    MSG_HOOK_REPAIRED => "Game-capture component restored. Restart openclip to use Game mode.",
+        "Componenta pentru captura jocurilor a fost restaurată. Repornește openclip pentru modul Joc.",
+        "Компонент захвата игр восстановлен. Перезапустите openclip, чтобы включить игровой режим.";
     MSG_PICKER_FAILED => "Region picker: {0}", "Selectorul de regiune: {0}", "Выбор области: {0}";
     MSG_DELETED => "Deleted {0}", "Șters: {0}", "Удалено: {0}";
     MSG_DELETE_FAILED => "Could not delete: {0}", "Nu s-a putut șterge: {0}", "Не удалось удалить: {0}";
@@ -564,6 +567,19 @@ strings! {
     GAME_STATUS => "Status", "Stare", "Состояние";
     GAME_MODE_ROW => "Game mode", "Mod joc", "Игровой режим";
     GAME_HOOK_VERSION => "Hook", "Componentă", "Компонент";
+    HOOK_MISSING => "The game-capture component is missing.",
+        "Componenta pentru captura jocurilor lipsește.",
+        "Компонент захвата игр отсутствует.";
+    HOOK_REPAIRING => "Restoring the game-capture component… {0}",
+        "Se restaurează componenta pentru captura jocurilor… {0}",
+        "Восстановление компонента захвата игр… {0}";
+    HOOK_REPAIRED_RESTART => "Restored — restart openclip to use Game mode.",
+        "Restaurată — repornește openclip pentru modul Joc.",
+        "Восстановлен — перезапустите openclip для игрового режима.";
+    HOOK_REPAIR_FAILED => "Could not restore it: {0}",
+        "Nu s-a putut restaura: {0}",
+        "Не удалось восстановить: {0}";
+    HOOK_REPAIR_BUTTON => "Repair", "Repară", "Восстановить";
     GAME_HOOK_LOG => "Hook log", "Jurnalul componentei", "Журнал компонента";
     GAME_IGNORE_ROW => "This application", "Această aplicație", "Это приложение";
     GAME_IGNORE => "Never hook", "Nu te atașa niciodată", "Никогда не подключаться";
@@ -650,6 +666,9 @@ strings! {
     VIEWER_STEP_FORWARD => "Next frame", "Cadrul următor", "Следующий кадр";
     VIEWER_SNAPSHOT_TIP => "Save this frame as PNG", "Salvează acest cadru ca PNG",
         "Сохранить этот кадр в PNG";
+    VIEWER_SNAPSHOT_LOST => "the decoder stopped before the frame was saved",
+        "decodorul s-a oprit înainte de salvarea cadrului",
+        "декодер остановился до сохранения кадра";
     VIEWER_VOLUME => "Volume", "Volum", "Громкость";
     VIEWER_MUTE => "Mute", "Fără sunet", "Выключить звук";
     VIEWER_UNMUTE => "Unmute", "Cu sunet", "Включить звук";

@@ -30,8 +30,15 @@ const BACKOFF: Duration = Duration::from_millis(2);
 /// This has to buy roughly as much time as [`output::HIGH_WATER_MS`] of audio,
 /// or video falls behind the audio clock and the GUI drops most of what was
 /// decoded. Big frames get a shallower queue: at 4K each one is 33 MB.
+///
+/// The shallow arm used to make the backlog *the* bottleneck at 1440p and
+/// above: the audio ring dips below its high-water mark on every callback, so
+/// [`Worker::can_read`] kept pumping, and each video frame that came back was
+/// decoded in full and then dropped off the front of the backlog — the very
+/// next one due on screen. [`Worker::pump`] now reads audio alone once the
+/// backlog is full, so a shallow queue costs lead time rather than frames.
 fn held_cap(width: u32, height: u32) -> usize {
-    if width as u64 * height as u64 > 2_500_000 { 3 } else { 8 }
+    if width as u64 * height as u64 > 2_500_000 { 3 } else { super::MAX_HELD }
 }
 
 pub fn run(
@@ -90,7 +97,7 @@ impl Worker {
         frames: SyncSender<Frame>,
         repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> anyhow::Result<Worker> {
-        let reader = Reader::open(path)?;
+        let reader = Reader::open(path, super::MAX_PLAYBACK_SIDE)?;
         if let Some(d) = reader.duration {
             shared.set_duration(d);
         }
@@ -348,7 +355,12 @@ impl Worker {
         // During a seek, everything a half-frame before the target is pre-roll:
         // the reader skips converting it, which is what makes seeks feel quick.
         let pixels_from = self.target.map(|t| t.saturating_sub(self.interval / 2));
-        match self.reader.read(pixels_from, &self.pool) {
+        // Video is as far ahead as it may run, so this round is only here to
+        // keep the output device fed. Reading every stream would decode frames
+        // that `place` would immediately drop off the front of the backlog —
+        // the next ones due on screen — for nothing.
+        let audio_only = !self.busy() && self.held.len() >= self.held_cap;
+        match self.reader.read(pixels_from, &self.pool, audio_only) {
             Ok(Packet::Video { image, pts }) => self.on_video(image, pts),
             Ok(Packet::VideoSkipped { pts }) => self.last_pts = pts,
             Ok(Packet::Audio { samples, channels, pts }) => self.on_audio(samples, channels, pts),
@@ -375,9 +387,16 @@ impl Worker {
         }
         self.shared.set_dims(image.width, image.height);
         let seq = self.shared.seq.load(std::sync::atomic::Ordering::Relaxed);
-        self.place(Frame { image, pts, seq });
+        // Only wake the GUI for a frame it can actually take. One that went into
+        // the backlog is delivered — and repainted for — by `flush_held`;
+        // repainting per *decoded* frame instead drives the event loop at decode
+        // rate during a burst, and every one of those wake-ups redraws the whole
+        // viewer for nothing.
+        let delivered = self.place(Frame { image, pts, seq });
         self.report(pts);
-        (self.repaint)();
+        if delivered || landed {
+            (self.repaint)();
+        }
     }
 
     /// One line a second: decode rate and how far video trails the clock. If
@@ -435,9 +454,12 @@ impl Worker {
     /// Hands a frame to the GUI, or queues it when the channel is full. Only
     /// once the backlog is over its cap is the oldest frame given up — dropping
     /// eagerly here is what starves the GUI of frames it could still have shown.
-    fn place(&mut self, frame: Frame) {
+    ///
+    /// Returns whether the frame actually reached the GUI, so the caller only
+    /// wakes it for something it can draw.
+    fn place(&mut self, frame: Frame) -> bool {
         match self.frames.try_send(frame) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(TrySendError::Full(f)) => {
                 self.held.push_back(f);
                 while self.held.len() > self.held_cap {
@@ -445,8 +467,12 @@ impl Worker {
                         self.pool.recycle(old.image.rgba);
                     }
                 }
+                false
             }
-            Err(TrySendError::Disconnected(f)) => self.pool.recycle(f.image.rgba),
+            Err(TrySendError::Disconnected(f)) => {
+                self.pool.recycle(f.image.rgba);
+                false
+            }
         }
     }
 

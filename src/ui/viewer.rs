@@ -6,7 +6,7 @@
 //! Foundation; elsewhere the file gets a poster and a link to the system player.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -50,6 +50,10 @@ pub(super) struct Viewer {
     last_seek: Option<Instant>,
     /// Pictures: 1:1 instead of fit-to-window.
     actual_size: bool,
+    /// A snapshot being decoded at full resolution on a background thread.
+    /// Media Foundation cannot run on the GUI thread, and re-reading the frame
+    /// takes long enough that doing it inline would stall playback.
+    snapshot: Option<mpsc::Receiver<anyhow::Result<PathBuf>>>,
 }
 
 impl Viewer {
@@ -136,7 +140,10 @@ enum Action {
     Reveal,
     Delete,
     External,
-    Snapshot(PreviewImage),
+    /// Keep the frame on screen. Carries where it sits in the file, not its
+    /// pixels: playback decodes at viewing size, so the picture that gets saved
+    /// is re-read at full resolution from that position.
+    Snapshot(Duration),
 }
 
 impl App {
@@ -169,6 +176,7 @@ impl App {
             scrub: None,
             last_seek: None,
             actual_size: false,
+            snapshot: None,
         };
 
         if kind == LibraryTab::Images {
@@ -226,9 +234,32 @@ impl App {
         v.transport(ui, &mut action);
         v.media(ui, &mut action);
 
-        // Repaint on the frame grid while something is moving.
+        // Wake for the next frame while something is moving: at the moment the
+        // one already decoded and held back becomes due, or failing that on the
+        // frame grid, so a stall still gets looked at.
         if v.is_playing() {
-            ctx.request_repaint_after(v.player.as_ref().map(|p| p.frame_interval()).unwrap_or(SKIP) / 2);
+            let p = v.player.as_ref();
+            let grid = p.map(|p| p.frame_interval()).unwrap_or(SKIP) / 2;
+            ctx.request_repaint_after(p.and_then(|p| p.next_due()).unwrap_or(grid).min(grid));
+        }
+
+        // A finished snapshot, decoded at full resolution off-thread.
+        if let Some(rx) = &v.snapshot {
+            match rx.try_recv() {
+                Ok(Ok(path)) => {
+                    v.snapshot = None;
+                    self.saved(path, t!(WHAT_SNAPSHOT));
+                }
+                Ok(Err(e)) => {
+                    v.snapshot = None;
+                    self.message = Some((t!(MSG_SNAPSHOT_FAILED, format!("{e:#}")), true));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    v.snapshot = None;
+                    self.message = Some((t!(MSG_SNAPSHOT_FAILED, t!(VIEWER_SNAPSHOT_LOST)), true));
+                }
+            }
         }
 
         let path = v.path.clone();
@@ -239,7 +270,7 @@ impl App {
             Action::Reveal => reveal_in_folder(&path),
             Action::External => open_with_default(&path),
             Action::Delete => self.library.confirm_delete = Some(path),
-            Action::Snapshot(image) => self.viewer_snapshot(image),
+            Action::Snapshot(at) => self.viewer_snapshot(&mut v, at, ctx),
         }
         if keep {
             self.viewer_volume = v.player.as_ref().map(|p| p.volume()).unwrap_or(self.viewer_volume);
@@ -248,19 +279,35 @@ impl App {
         }
     }
 
-    /// Writes the frame on screen next to the recordings, exactly as the
+    /// Writes the frame at `at` next to the recordings, exactly as the
     /// toolbar's snapshot button does — only the pixels come from the decoder.
-    fn viewer_snapshot(&mut self, image: PreviewImage) {
+    ///
+    /// The frame is re-read at full resolution rather than taken off the
+    /// screen, because playback decodes at viewing size. That needs Media
+    /// Foundation on a thread of its own, so the result comes back through a
+    /// channel [`App::viewer_ui`] drains.
+    fn viewer_snapshot(&mut self, v: &mut Viewer, at: Duration, ctx: &egui::Context) {
+        if v.snapshot.is_some() {
+            return;
+        }
         let path = self.timestamped("png");
-        let result = (|| -> anyhow::Result<()> {
-            std::fs::create_dir_all(&self.output_dir).ok();
-            let img = image::RgbaImage::from_raw(image.width, image.height, image.rgba)
-                .ok_or_else(|| anyhow::anyhow!("bad image buffer"))?;
-            img.save(&path).map_err(|e| anyhow::anyhow!("{e}"))
-        })();
-        match result {
-            Ok(()) => self.saved(path, t!(WHAT_SNAPSHOT)),
-            Err(e) => self.message = Some((t!(MSG_SNAPSHOT_FAILED, format!("{e:#}")), true)),
+        let source = v.path.clone();
+        std::fs::create_dir_all(&self.output_dir).ok();
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new().name("openclip-snapshot".into()).spawn(move || {
+            let result = crate::player::frame_at(&source, at).and_then(|image| {
+                let img = image::RgbaImage::from_raw(image.width, image.height, image.rgba)
+                    .ok_or_else(|| anyhow::anyhow!("bad image buffer"))?;
+                img.save(&path).map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(path)
+            });
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        match spawned {
+            Ok(_) => v.snapshot = Some(rx),
+            Err(e) => self.message = Some((t!(MSG_SNAPSHOT_FAILED, e.to_string()), true)),
         }
     }
 }
@@ -582,12 +629,15 @@ impl Viewer {
         // Right: snapshot hard against the edge, then anything the player says.
         ui.scope_builder(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)), |ui| {
             if video && live {
-                let frame = self.player.as_ref().and_then(|p| p.frame()).map(|f| f.image.clone());
-                ui.add_enabled_ui(frame.is_some(), |ui| {
+                // Where the frame on screen sits, not the frame itself: cloning
+                // the pixels here would deep-copy several megabytes on every
+                // repaint for a value the button only needs once it is pressed.
+                let at = self.player.as_ref().and_then(|p| p.frame()).map(|f| f.pts);
+                ui.add_enabled_ui(at.is_some() && self.snapshot.is_none(), |ui| {
                     if icon_button(ui, icons::CAMERA, t!(VIEWER_SNAPSHOT_TIP)).clicked()
-                        && let Some(image) = frame
+                        && let Some(at) = at
                     {
-                        *action = Action::Snapshot(image);
+                        *action = Action::Snapshot(at);
                     }
                 });
             }

@@ -36,8 +36,31 @@ use crate::video::{PixelFormat, RawFrame};
 /// RGBA, and the viewer never shows more than the window holds.
 pub const MAX_DECODE_SIDE: u32 = 3840;
 
+/// Longest side asked for during playback.
+///
+/// The viewer's media area is a few hundred points across, so a 4K file was
+/// costing 33 MB a frame — copied, swizzled, turned into a `ColorImage` and
+/// uploaded — to be drawn into a fraction of that. Media Foundation's advanced
+/// video processor does the resize on the way out of the decoder, where it is
+/// nearly free, and every pass afterwards shrinks with it. Snapshots do not go
+/// through here: [`frame_at`] re-reads the one frame at [`MAX_DECODE_SIDE`] so
+/// what gets saved is still full resolution.
+pub const MAX_PLAYBACK_SIDE: u32 = 1920;
+
 /// Frame rate assumed when the file does not declare one.
 const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_nanos(33_366_667);
+
+/// Frames the queue between the worker and the GUI holds.
+const FRAME_QUEUE: usize = 2;
+
+/// Most frames the worker may hold back when that queue is full.
+pub(crate) const MAX_HELD: usize = 8;
+
+/// Buffers kept for reuse. Everything that can be alive at once: the queue, the
+/// frame on screen, the one held back until it is due, and the worker's
+/// backlog. A pool smaller than the working set hands back empty `Vec`s exactly
+/// when playback is busiest, and every miss is a multi-megabyte allocation.
+const POOL_SIZE: usize = FRAME_QUEUE + 2 + MAX_HELD;
 
 /// What the player is doing. Everything the GUI draws hangs off this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,12 +344,12 @@ impl Player {
         if let Some(d) = crate::video::thumbnail::container_duration(path) {
             shared.set_duration(d);
         }
-        let pool = FramePool::new(4);
+        let pool = FramePool::new(POOL_SIZE);
 
         #[cfg(windows)]
         {
             let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
-            let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(2);
+            let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel(FRAME_QUEUE);
             let worker = {
                 let shared = shared.clone();
                 let pool = pool.clone();
@@ -510,6 +533,20 @@ impl Player {
     pub fn frame(&self) -> Option<&Frame> {
         self.current.as_ref()
     }
+
+    /// How long until the frame [`Player::poll`] held back becomes due.
+    ///
+    /// The GUI schedules its next repaint from this. Without it the only
+    /// wake-up is a fixed grid, which has no phase relationship to the clock:
+    /// a held-back frame then waits for whichever tick happens to come after
+    /// it is due, and the picture beats against the audio.
+    pub fn next_due(&self) -> Option<Duration> {
+        let pending = self.pending.as_ref()?;
+        if !self.shared.clock.is_running() {
+            return None;
+        }
+        Some(pending.pts.saturating_sub(self.shared.clock.position()))
+    }
 }
 
 impl Drop for Player {
@@ -522,6 +559,52 @@ impl Drop for Player {
             let _ = h.join();
         }
     }
+}
+
+/// How many packets to spend looking for the wanted frame in [`frame_at`].
+///
+/// Media Foundation lands on the keyframe at or before the target, so this has
+/// to cover a whole group of pictures plus the audio samples interleaved with
+/// it. Generous, because giving up early would silently save the wrong frame.
+#[cfg(windows)]
+const SNAPSHOT_READS: u32 = 600;
+
+/// Decodes the frame at `at`, at the source's own resolution.
+///
+/// Playback runs at [`MAX_PLAYBACK_SIDE`], which is what makes it smooth, but
+/// the frame the viewer keeps on screen is then too small to save. This opens a
+/// reader of its own for the one frame the user asked to keep, so a snapshot is
+/// still full resolution.
+///
+/// Media Foundation is thread-affine, so this must run on a thread of its own
+/// (it creates and drops its own `ComGuard`) and never on the GUI thread.
+#[cfg(windows)]
+pub fn frame_at(path: &Path, at: Duration) -> Result<PreviewImage> {
+    // Declared first so COM outlives the reader.
+    let _com = crate::video::mf::ComGuard::new();
+    let mut reader = decode::Reader::open(path, MAX_DECODE_SIDE)?;
+    if !reader.has_video() {
+        return Err(anyhow!("the file has no video track"));
+    }
+    let interval = reader.video_info.map(|v| v.interval).unwrap_or(DEFAULT_FRAME_INTERVAL);
+    reader.seek(at)?;
+    // Everything up to half a frame before the target is pre-roll the reader
+    // can skip converting — the same trick that makes seeking feel immediate.
+    let from = at.saturating_sub(interval / 2);
+    let pool = FramePool::new(1);
+    for _ in 0..SNAPSHOT_READS {
+        match reader.read(Some(from), &pool, false)? {
+            decode::Packet::Video { image, .. } => return Ok(image),
+            decode::Packet::End => break,
+            _ => {}
+        }
+    }
+    Err(anyhow!("no frame at that position"))
+}
+
+#[cfg(not(windows))]
+pub fn frame_at(_path: &Path, _at: Duration) -> Result<PreviewImage> {
+    Err(anyhow!("this platform has no in-app decoder"))
 }
 
 /// Decodes a still picture at full size. Cross-platform: the `image` crate
